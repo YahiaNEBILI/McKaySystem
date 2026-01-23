@@ -3,28 +3,35 @@ runner.py
 
 FinOps SaaS runner (checkers -> validated wire findings -> storage-cast -> parquet).
 
-Run this from repo root.
-
-Example (PowerShell):
-  python runner.py --tenant acme --workspace prod `
-    --checker checks.aws.ec2_graviton:ExampleGravitonChecker `
-    --out data/finops_findings
+Default behavior: run ALL registered checkers (discovered under the `checks` package).
+Optional behavior: run only selected checkers via --checker, and/or exclude via --exclude-checker.
 
 If your imports are "from contracts..." / "from pipeline..." / "from checks...",
 ensure your repo root is on PYTHONPATH (pytest.ini already does this for tests).
+
+Run everything (default):
+python runner.py --tenant acme --workspace prod
+
+Run everything except one checker:
+python runner.py --tenant acme --workspace prod --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
+
+Run a subset:
+python runner.py --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import pkgutil
 import sys
 from datetime import datetime, timezone
 from typing import List, Sequence
 
 import boto3
 
-from checks.registry import get_factory
+import checks  # IMPORTANT: used for module discovery
+from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
 from contracts.services import Services
 from infra.aws_config import SDK_CONFIG
@@ -40,15 +47,31 @@ def _make_run_id(run_ts: datetime) -> str:
     return f"run-{run_ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}"
 
 
+def _discover_all_checker_specs() -> list[str]:
+    """
+    Import all modules under the `checks` package so they can register factories/classes.
+    Returns all registered checker specs in deterministic order.
+    """
+    prefix = checks.__name__ + "."
+    for mod in pkgutil.walk_packages(checks.__path__, prefix):
+        importlib.import_module(mod.name)
+
+    specs = list_specs()
+    if not specs:
+        raise RuntimeError(
+            "No checkers registered. Ensure checker modules register themselves in checks.registry."
+        )
+    return specs
+
+
 def _load_checker(dotted_path: str, *, ctx: RunContext, bootstrap: dict) -> Checker:
     """
     Load a checker instance from a dotted import path.
 
     Format:
       module.path:ClassName
-
     Example:
-      checks.aws.ec2_graviton:ExampleGravitonChecker
+      checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
     """
     if ":" not in dotted_path:
         raise ValueError("Checker path must be like 'module.path:ClassName'")
@@ -65,7 +88,7 @@ def _load_checker(dotted_path: str, *, ctx: RunContext, bootstrap: dict) -> Chec
             raise TypeError(f"Factory for '{dotted_path}' did not return a valid Checker")
         return instance
 
-    # Fallback: plain no-arg constructor.
+    # Fallback: plain no-arg constructor (legacy/simple checkers).
     klass = getattr(module, class_name, None)
     if klass is None:
         raise ValueError(f"Class '{class_name}' not found in module '{module_path}'")
@@ -98,11 +121,20 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="How finding_id is salted (stable/per_run/per_day)",
     )
 
+    # By default: run everything (registered).
+    # If user provides --checker, run only those (after applying exclusions).
     parser.add_argument(
         "--checker",
         action="append",
-        required=True,
-        help="Checker to run, format: module.path:ClassName. Can be provided multiple times.",
+        default=None,  # None means "user did not specify"
+        help="Checker to run, format: module.path:ClassName. Repeatable. If omitted, runs all checkers.",
+    )
+
+    parser.add_argument(
+        "--exclude-checker",
+        action="append",
+        default=[],
+        help="Checker spec(s) to exclude (same format as --checker). Repeatable.",
     )
 
     parser.add_argument(
@@ -134,8 +166,8 @@ def main(argv: Sequence[str]) -> int:
     run_ts = _utc_now()
     run_id = _make_run_id(run_ts)
 
+    # --- Services / AWS bootstrapping ---
     session = boto3.Session()
-
     sts = session.client("sts")
     s3 = session.client("s3", config=SDK_CONFIG)
 
@@ -143,8 +175,7 @@ def main(argv: Sequence[str]) -> int:
 
     services = Services(s3=s3)
 
-    # Bootstrap is runtime data that some checker factories may need.
-    # Keep it small and explicit; prefer passing shared clients via ctx.services.
+    # Bootstrap is runtime data that checker factories may need.
     bootstrap: dict = {
         "aws_account_id": account_id,
         "aws_billing_account_id": account_id,
@@ -164,10 +195,26 @@ def main(argv: Sequence[str]) -> int:
         services=services,
     )
 
-    checkers: List[Checker] = []
-    for dotted in args.checker:
-        checkers.append(_load_checker(dotted, ctx=ctx, bootstrap=bootstrap))
+    # --- Resolve which checkers to run ---
+    if args.checker is None:
+        # User did not specify any checker -> run ALL registered checkers
+        checker_specs = _discover_all_checker_specs()
+    else:
+        # Explicit list provided -> run only those
+        checker_specs = list(args.checker)
 
+    exclude = set(args.exclude_checker or [])
+    checker_specs = [s for s in checker_specs if s not in exclude]
+
+    if not checker_specs:
+        raise RuntimeError("No checkers selected to run (after exclusions).")
+
+    # --- Instantiate checkers ---
+    checkers: List[Checker] = []
+    for spec in checker_specs:
+        checkers.append(_load_checker(spec, ctx=ctx, bootstrap=bootstrap))
+
+    # --- Run + persist ---
     runner = CheckerRunner(finding_id_salt_mode=args.finding_id_mode)
     result = runner.run_many(checkers, ctx)
 
@@ -180,13 +227,14 @@ def main(argv: Sequence[str]) -> int:
     writer.extend(result.valid_findings)
     stats = writer.close()
 
+    # --- Summary ---
     print("=== Run summary ===")
     print(f"tenant: {args.tenant}")
     print(f"workspace: {args.workspace}")
     print(f"cloud: {args.cloud}")
     print(f"run_id: {run_id}")
     print(f"run_ts: {run_ts.astimezone(timezone.utc).isoformat().replace('+00:00','Z')}")
-    print(f"checkers: {len(checkers)}")
+    print(f"checkers_selected: {len(checkers)}")
 
     print(f"engine_name: {ENGINE_NAME}")
     print(f"engine_version: {ENGINE_VERSION}")
