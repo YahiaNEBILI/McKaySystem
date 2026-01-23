@@ -42,6 +42,12 @@ Notes on performance
 - The engine streams DuckDB results in batches (fetchmany) and writes to Parquet
   using FindingsParquetWriter (typed + partitioned).
 
+IMPORTANT DuckDB compatibility note
+-----------------------------------
+DuckDB does not allow prepared parameters in certain DDL statements (e.g. CREATE VIEW).
+Therefore this engine avoids passing parameters into CREATE VIEW and instead:
+- escapes literals for view definitions (tenant/workspace/run + parquet glob)
+- materializes rule required_check_ids into a TEMP table and joins
 """
 
 from __future__ import annotations
@@ -73,7 +79,7 @@ class CorrelationConfig:
 
     findings_glob:
       - Parquet dataset glob, e.g. "data/finops_findings/**/*.parquet"
-      - Should be unionable by name (your exporter already uses union_by_name=True)
+      - Should be unionable by name (writer uses stable schema)
 
     out_dir:
       - Where correlated findings will be written as Parquet (same schema)
@@ -168,27 +174,35 @@ class CorrelationEngine:
             con.execute(f"PRAGMA threads={int(cfg.threads)};")
             con.execute("PRAGMA enable_progress_bar=false;")
 
-            # 1) Raw findings view (union_by_name=True like export_json)
+            # 1) Raw findings view (avoid prepared params in DDL)
+            glob_escaped = str(cfg.findings_glob).replace("'", "''")
             con.execute(
-                """
+                f"""
                 CREATE OR REPLACE VIEW findings_raw AS
                 SELECT *
-                FROM read_parquet(?, union_by_name=true)
-                """,
-                [cfg.findings_glob],
+                FROM read_parquet('{glob_escaped}', union_by_name=true)
+                """
             )
 
-            # 2) Base filter view (tenant/workspace/run)
+            # 2) Base filter view (avoid prepared params in DDL)
+            tenant_escaped = str(cfg.tenant_id).replace("'", "''")
+            workspace_escaped = str(cfg.workspace_id or "").replace("'", "''")
+            run_id_escaped = str(cfg.run_id or "").replace("'", "''")
+
+            where_parts = [f"tenant_id = '{tenant_escaped}'"]
+            if workspace_escaped:
+                where_parts.append(f"workspace_id = '{workspace_escaped}'")
+            if run_id_escaped:
+                where_parts.append(f"run_id = '{run_id_escaped}'")
+            where_sql = " AND ".join(where_parts)
+
             con.execute(
-                """
+                f"""
                 CREATE OR REPLACE VIEW findings_base AS
                 SELECT *
                 FROM findings_raw
-                WHERE tenant_id = ?
-                  AND (? = '' OR workspace_id = ?)
-                  AND (? = '' OR run_id = ?)
-                """,
-                [cfg.tenant_id, cfg.workspace_id, cfg.workspace_id, cfg.run_id, cfg.run_id],
+                WHERE {where_sql}
+                """
             )
 
             # 3) Writer for meta-findings
@@ -241,14 +255,22 @@ class CorrelationEngine:
             raise CorrelationError("required_check_ids is empty; refusing to scan full dataset")
 
         # Pre-filter to reduce parquet scan cost.
+        # DuckDB does not allow prepared parameters in CREATE VIEW statements,
+        # so we materialize required check_ids into a temporary table and join.
+        con.execute("DROP TABLE IF EXISTS tmp_required_check_ids")
+        con.execute("CREATE TEMP TABLE tmp_required_check_ids(check_id VARCHAR)")
+        con.executemany(
+            "INSERT INTO tmp_required_check_ids VALUES (?)",
+            [(x,) for x in required],
+        )
         con.execute(
             """
-            CREATE OR REPLACE VIEW rule_input AS
-            SELECT *
-            FROM findings_base
-            WHERE check_id IN (SELECT * FROM UNNEST(?))
-            """,
-            [required],
+            CREATE OR REPLACE TEMP VIEW rule_input AS
+            SELECT b.*
+            FROM findings_base b
+            INNER JOIN tmp_required_check_ids r
+              ON b.check_id = r.check_id
+            """
         )
 
         cur = con.execute(rule.sql)
@@ -296,23 +318,17 @@ class CorrelationEngine:
           - build issue_key from source fingerprints (if present) for deterministic identity
           - build fingerprint + finding_id + validate using contract
         """
-        # Basic required top-level defaults
         tenant_id = normalize_str(raw.get("tenant_id") or cfg.tenant_id, lower=False)
         workspace_id = normalize_str(raw.get("workspace_id") or cfg.workspace_id, lower=False)
         run_id = normalize_str(raw.get("run_id") or cfg.run_id, lower=False)
 
-        # Prefer run_ts from SQL; otherwise use "now"
         run_ts = raw.get("run_ts") or now_ts
-
-        # Ingested timestamp for meta findings should be "now"
         ingested_ts = now_ts
 
-        # Engine metadata defaults
         engine_name = raw.get("engine_name") or "mckay"
         engine_version = raw.get("engine_version") or ""
         rulepack_version = raw.get("rulepack_version") or ""
 
-        # Check identity defaults
         check_id = raw.get("check_id") or f"correlation.{rule.rule_id}"
         check_name = raw.get("check_name") or rule.name
         category = raw.get("category") or "governance"
@@ -321,12 +337,10 @@ class CorrelationEngine:
 
         status = normalize_str(raw.get("status") or "fail", lower=True)
 
-        # Severity default
         severity = raw.get("severity")
         if not severity:
             severity = {"level": "medium", "score": 700}
 
-        # Content
         title = raw.get("title") or f"Correlated signal: {rule.name}"
         message = raw.get("message") or ""
         recommendation = raw.get("recommendation") or ""
@@ -334,7 +348,6 @@ class CorrelationEngine:
         remediation = raw.get("remediation") or ""
         links = raw.get("links") or []
 
-        # Estimated / actual blocks (optional)
         estimated = raw.get("estimated")
         if not estimated:
             estimated = {
@@ -354,23 +367,18 @@ class CorrelationEngine:
         metrics = raw.get("metrics") or {}
         metadata_json = raw.get("metadata_json") or ""
 
-        # Scope must be present; correlation SQL should anchor to a real entity.
         scope = raw.get("scope")
         if not isinstance(scope, Mapping):
             raise CorrelationError(
                 f"Rule '{rule.rule_id}' returned no valid scope; SQL must select an anchor scope struct"
             )
 
-        # Source (lineage) default
         source = raw.get("source") or {
             "source_type": "scanner",
             "source_ref": f"correlation:{rule.rule_id}",
             "schema_version": 1,
         }
 
-        # Build deterministic issue_key for fingerprint:
-        # - include correlation rule_id
-        # - include source fingerprints if provided by SQL
         issue_key = self._build_issue_key_for_correlation(raw, rule)
 
         wire: Dict[str, Any] = {
@@ -407,7 +415,6 @@ class CorrelationEngine:
             "source": dict(source) if isinstance(source, Mapping) else source,
         }
 
-        # Compute IDs + validate (mutates wire)
         build_ids_and_validate(
             wire,
             issue_key=issue_key,
@@ -436,7 +443,6 @@ class CorrelationEngine:
             if isinstance(val, list):
                 sources = [str(x) for x in val if str(x).strip()]
             else:
-                # DuckDB may return LIST as a tuple in some clients
                 try:
                     sources = [str(x) for x in list(val) if str(x).strip()]
                 except Exception:  # pragma: no cover
@@ -448,18 +454,12 @@ class CorrelationEngine:
         if not sources and "anchor_fingerprint" in raw and raw["anchor_fingerprint"]:
             sources = [str(raw["anchor_fingerprint"])]
 
-        # Stable sort for deterministic key
         sources = sorted(set(sources))
 
         return {
             "rule_id": rule.rule_id,
             "sources": ",".join(sources),
         }
-
-
-# -------------------------------
-# Convenience: load SQL from file
-# -------------------------------
 
 
 def load_rule_sql(path: str) -> str:
