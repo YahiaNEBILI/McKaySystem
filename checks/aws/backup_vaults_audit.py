@@ -7,16 +7,16 @@ This module adds two governance-oriented checks for AWS Backup vaults:
 1) aws.backup.vaults.no_lifecycle
    IMPORTANT NOTE (AWS reality):
    AWS Backup retention "lifecycle" (cold storage / delete after) is defined on
-   *backup plan rules*, not on vaults. However, AWS Backup *does* provide a
-   vault-level retention guardrail called **Vault Lock** (min/max retention).
-   This check therefore uses Vault Lock as the vault-level lifecycle/retention
-   control and flags vaults that lack guardrails or effectively allow infinite
-   retention.
+   *backup plan rules*, not on vaults. However, AWS Backup provides a vault-level
+   retention guardrail called **Vault Lock** (min/max retention).
+   This check uses the Vault Lock fields returned by `DescribeBackupVault`
+   (Locked / MinRetentionDays / MaxRetentionDays) and flags vaults that lack
+   guardrails or effectively allow indefinite retention.
 
    Detects:
-     - Vaults with no Vault Lock configuration (no retention guardrail).
-     - Vaults with Vault Lock missing/zero MaxRetentionDays (allows "never delete").
-     - (Optional) Vault Lock values out of org standards.
+     - Vaults with no Vault Lock fields present (no retention guardrail).
+     - Vaults with MaxRetentionDays missing/zero (allows "never delete").
+     - (Optional) Vault Lock values inconsistent with org standards.
 
 2) aws.backup.vaults.access_policy_misconfig
    Detects common misconfigurations in backup vault access policies:
@@ -33,7 +33,7 @@ Design notes
 
 Permissions required (minimum):
 - backup:ListBackupVaults
-- backup:GetBackupVaultLockConfiguration
+- backup:DescribeBackupVault
 - backup:GetBackupVaultAccessPolicy
 """
 
@@ -251,7 +251,7 @@ class AwsBackupVaultsAuditChecker:
             for v in vaults:
                 yield from self._check_vault_lock(ctx, backup, region, v)
         except ClientError as exc:
-            yield self._access_error_finding(ctx, region, "get_backup_vault_lock_configuration", exc)
+            yield self._access_error_finding(ctx, region, "describe_backup_vault", exc)
             return
 
         # Access policy checks
@@ -270,49 +270,48 @@ class AwsBackupVaultsAuditChecker:
         if not vault_name:
             return
 
-        # If no Vault Lock config exists, AWS returns ResourceNotFoundException.
-        try:
-            resp = backup.get_backup_vault_lock_configuration(BackupVaultName=vault_name)
-            lock = resp or {}
-        except ClientError as exc:
-            code = exc.response.get("Error", {}).get("Code", "")
-            if code in {"ResourceNotFoundException", "ResourceNotFound"}:
-                yield FindingDraft(
-                    check_id="aws.backup.vaults.no_lifecycle",
-                    check_name="AWS Backup vault retention guardrails (Vault Lock)",
-                    category="governance",
-                    status="fail",
-                    severity=Severity(level="medium", score=70),
-                    title="Backup vault has no Vault Lock (no retention guardrail)",
-                    message=(
-                        f"Backup vault '{vault_name}' has no Vault Lock configuration. "
-                        "This means there is no vault-level min/max retention guardrail; "
-                        "retention is entirely dependent on backup plan rules and can drift to 'retain forever'."
-                    ),
-                    recommendation=(
-                        "Consider configuring Vault Lock (min/max retention) for this vault to enforce "
-                        "organization retention standards and prevent indefinite accumulation."
-                    ),
-                    scope=self._base_scope(
-                        ctx,
-                        region=region,
-                        resource_type="backup_vault",
-                        resource_id=vault_name,
-                        resource_arn=vault_arn,
-                    ),
-                    issue_key={"rule": "vault_lock_missing", "vault": vault_name},
-                    dimensions={"vault_arn": vault_arn},
-                    estimated_monthly_cost=None,
-                    estimated_monthly_savings=None,
-                    estimate_confidence=0,
-                    estimate_notes="Vault-level retention guardrail; cost impact depends on current recovery points and plan rules.",
-                )
-                return
-            raise
+        # `DescribeBackupVault` exposes Vault Lock-related fields when present:
+        # Locked, MinRetentionDays, MaxRetentionDays.
+        desc = backup.describe_backup_vault(BackupVaultName=vault_name) or {}
+        locked_flag = desc.get("Locked")
+        min_days_raw = desc.get("MinRetentionDays")
+        max_days_raw = desc.get("MaxRetentionDays")
 
-        min_days = _safe_int(lock.get("MinRetentionDays"), default=0)
-        max_days = _safe_int(lock.get("MaxRetentionDays"), default=0)
-        changeable = _safe_int(lock.get("ChangeableForDays"), default=0)
+        has_any_lock_fields = any(x is not None for x in (locked_flag, min_days_raw, max_days_raw))
+        if not has_any_lock_fields:
+            yield FindingDraft(
+                check_id="aws.backup.vaults.no_lifecycle",
+                check_name="AWS Backup vault retention guardrails (Vault Lock)",
+                category="governance",
+                status="fail",
+                severity=Severity(level="medium", score=70),
+                title="Backup vault has no Vault Lock (no retention guardrail)",
+                message=(
+                    f"Backup vault '{vault_name}' has no Vault Lock configuration (no min/max retention guardrails). "
+                    "Retention is entirely dependent on backup plan rules and can drift to 'retain forever'."
+                ),
+                recommendation=(
+                    "Consider configuring Vault Lock (min/max retention) for this vault to enforce "
+                    "organization retention standards and prevent indefinite accumulation."
+                ),
+                scope=self._base_scope(
+                    ctx,
+                    region=region,
+                    resource_type="backup_vault",
+                    resource_id=vault_name,
+                    resource_arn=vault_arn,
+                ),
+                issue_key={"rule": "vault_lock_missing", "vault": vault_name},
+                dimensions={"vault_arn": vault_arn},
+                estimated_monthly_cost=None,
+                estimated_monthly_savings=None,
+                estimate_confidence=0,
+                estimate_notes="Vault-level retention guardrail; cost impact depends on current recovery points and plan rules.",
+            )
+            return
+
+        min_days = _safe_int(min_days_raw, default=0)
+        max_days = _safe_int(max_days_raw, default=0)
 
         # If MaxRetentionDays is missing/0, treat as "allows never delete" for governance.
         if max_days <= 0:
@@ -324,7 +323,7 @@ class AwsBackupVaultsAuditChecker:
                 severity=Severity(level="medium", score=75),
                 title="Backup vault Vault Lock allows indefinite retention",
                 message=(
-                    f"Backup vault '{vault_name}' has Vault Lock configured but MaxRetentionDays is not set "
+                    f"Backup vault '{vault_name}' has Vault Lock-related fields but MaxRetentionDays is not set "
                     "or is zero. This can allow recovery points to be retained indefinitely."
                 ),
                 recommendation="Set a MaxRetentionDays value aligned with your retention standards.",
@@ -340,7 +339,7 @@ class AwsBackupVaultsAuditChecker:
                     "vault_arn": vault_arn,
                     "min_retention_days": str(min_days),
                     "max_retention_days": str(max_days),
-                    "changeable_for_days": str(changeable),
+                    "locked": str(bool(locked_flag)).lower() if locked_flag is not None else "",
                 },
                 estimated_monthly_cost=None,
                 estimated_monthly_savings=None,
@@ -358,7 +357,7 @@ class AwsBackupVaultsAuditChecker:
                 vault_arn,
                 min_days,
                 max_days,
-                changeable,
+                0,
                 reason="MinRetentionDays differs from expected org standard.",
             )
             return
@@ -371,56 +370,10 @@ class AwsBackupVaultsAuditChecker:
                 vault_arn,
                 min_days,
                 max_days,
-                changeable,
+                0,
                 reason="MaxRetentionDays differs from expected org standard.",
             )
             return
-
-    def _vault_lock_out_of_standard(
-        self,
-        ctx,
-        region: str,
-        vault_name: str,
-        vault_arn: str,
-        min_days: int,
-        max_days: int,
-        changeable: int,
-        *,
-        reason: str,
-    ) -> FindingDraft:
-        expected_min = "" if self._expected_lock_min_days is None else str(self._expected_lock_min_days)
-        expected_max = "" if self._expected_lock_max_days is None else str(self._expected_lock_max_days)
-
-        return FindingDraft(
-            check_id="aws.backup.vaults.no_lifecycle",
-            check_name="AWS Backup vault retention guardrails (Vault Lock)",
-            category="governance",
-            status="fail",
-            severity=Severity(level="low", score=55),
-            title="Backup vault Vault Lock is out of org standard",
-            message=f"Backup vault '{vault_name}' Vault Lock configuration is out of standard: {reason}",
-            recommendation="Update Vault Lock retention values to match your organization standards (if applicable).",
-            scope=self._base_scope(
-                ctx,
-                region=region,
-                resource_type="backup_vault",
-                resource_id=vault_name,
-                resource_arn=vault_arn,
-            ),
-            issue_key={"rule": "vault_lock_out_of_standard", "vault": vault_name},
-            dimensions={
-                "vault_arn": vault_arn,
-                "min_retention_days": str(min_days),
-                "max_retention_days": str(max_days),
-                "changeable_for_days": str(changeable),
-                "expected_min_retention_days": expected_min,
-                "expected_max_retention_days": expected_max,
-            },
-            estimated_monthly_cost=None,
-            estimated_monthly_savings=None,
-            estimate_confidence=0,
-            estimate_notes="Standardization finding; does not estimate storage cost directly.",
-        )
 
     # ------------------------------ Check 2: Access Policy ------------------------------ #
 
@@ -694,7 +647,7 @@ class AwsBackupVaultsAuditChecker:
             severity=Severity(level="low", score=10),
             title="Unable to enumerate AWS Backup vault inventory",
             message=f"Failed to call {operation} ({code}). Some AWS Backup vault checks were skipped.",
-            recommendation="Grant AWS Backup read permissions for vault listing, lock configuration, and access policies.",
+            recommendation="Grant AWS Backup read permissions for vault listing, describe, and access policies.",
             scope=self._base_scope(
                 ctx,
                 region=region,
@@ -730,6 +683,52 @@ class AwsBackupVaultsAuditChecker:
             resource_type=resource_type,
             resource_id=resource_id,
             resource_arn=resource_arn,
+        )
+
+    def _vault_lock_out_of_standard(
+        self,
+        ctx,
+        region: str,
+        vault_name: str,
+        vault_arn: str,
+        min_days: int,
+        max_days: int,
+        changeable: int,
+        *,
+        reason: str,
+    ) -> FindingDraft:
+        expected_min = "" if self._expected_lock_min_days is None else str(self._expected_lock_min_days)
+        expected_max = "" if self._expected_lock_max_days is None else str(self._expected_lock_max_days)
+
+        return FindingDraft(
+            check_id="aws.backup.vaults.no_lifecycle",
+            check_name="AWS Backup vault retention guardrails (Vault Lock)",
+            category="governance",
+            status="fail",
+            severity=Severity(level="low", score=55),
+            title="Backup vault Vault Lock is out of org standard",
+            message=f"Backup vault '{vault_name}' Vault Lock configuration is out of standard: {reason}",
+            recommendation="Update Vault Lock retention values to match your organization standards (if applicable).",
+            scope=self._base_scope(
+                ctx,
+                region=region,
+                resource_type="backup_vault",
+                resource_id=vault_name,
+                resource_arn=vault_arn,
+            ),
+            issue_key={"rule": "vault_lock_out_of_standard", "vault": vault_name},
+            dimensions={
+                "vault_arn": vault_arn,
+                "min_retention_days": str(min_days),
+                "max_retention_days": str(max_days),
+                "changeable_for_days": str(changeable),
+                "expected_min_retention_days": expected_min,
+                "expected_max_retention_days": expected_max,
+            },
+            estimated_monthly_cost=None,
+            estimated_monthly_savings=None,
+            estimate_confidence=0,
+            estimate_notes="Standardization finding; does not estimate storage cost directly.",
         )
 
 
