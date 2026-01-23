@@ -300,7 +300,7 @@ SELECT
     [c.vault_name, COALESCE(c.vault_arn,''), CAST(c.signal_count AS VARCHAR), CAST(c.stale_rp_count AS VARCHAR), CAST(c.rules_no_lifecycle_count AS VARCHAR)]
   ) AS dimensions,
 
-  {} AS metrics,
+  '{}' AS metrics,
 
   -- Optional metadata_json for debugging/audit
   ('{"correlation_rule":"vault_risk","signal_count":' || CAST(c.signal_count AS VARCHAR) || '}') AS metadata_json,
