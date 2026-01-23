@@ -30,6 +30,8 @@ from .finops_contracts import (
     normalize_str,
 )
 
+from .services import Services
+
 # -----------------------------
 # Core data structures
 # -----------------------------
@@ -52,6 +54,7 @@ class RunContext:
 
     default_currency: str = "USD"
     cloud: str = "aws"  # "aws"|"azure"|"gcp"
+    services: Optional[Services] = None
 
     def to_source_struct(self, *, source_ref: str, source_type: str = "scanner") -> Dict[str, Any]:
         return {

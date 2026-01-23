@@ -27,6 +27,11 @@ from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
+import boto3
+
+from infra.aws_config import SDK_CONFIG
+from contracts.services import Services
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -119,6 +124,14 @@ def main(argv: Sequence[str]) -> int:
     run_ts = _utc_now()
     run_id = _make_run_id(run_ts)
 
+    session = boto3.Session()
+
+    s3 = session.client("s3", config=SDK_CONFIG)
+
+    services = Services(
+    s3=s3
+    )
+
     ctx = RunContext(
         tenant_id=args.tenant,
         workspace_id=args.workspace,
@@ -130,6 +143,7 @@ def main(argv: Sequence[str]) -> int:
         schema_version=SCHEMA_VERSION,
         default_currency=args.currency,
         cloud=args.cloud,
+        services=services,
     )
 
     checkers: List[Checker] = []
