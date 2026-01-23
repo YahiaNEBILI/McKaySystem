@@ -8,6 +8,8 @@ from botocore.exceptions import ClientError
 
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
+from checks.registry import register_checker
+
 
 @dataclass(frozen=True)
 class AwsAccountContext:
@@ -128,3 +130,30 @@ class S3LifecycleMissingChecker:
 
                 # Unknown error: bubble up for visibility in MVP
                 raise
+
+
+# -----------------------------
+# Factory registration (runner uses this; no runner special-casing)
+# -----------------------------
+
+
+@register_checker("checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker")
+def _factory(ctx, bootstrap):
+    """Instantiate this checker from runtime bootstrap data.
+
+    Expected bootstrap keys:
+      - aws_account_id: str
+      - aws_billing_account_id: Optional[str]
+    """
+    account_id = str(bootstrap.get("aws_account_id") or "")
+    if not account_id:
+        raise RuntimeError(
+            "aws_account_id missing from bootstrap (required for S3LifecycleMissingChecker)"
+        )
+
+    billing_account_id = bootstrap.get("aws_billing_account_id") or account_id
+    account_ctx = AwsAccountContext(
+        account_id=account_id,
+        billing_account_id=str(billing_account_id),
+    )
+    return S3LifecycleMissingChecker(account=account_ctx)

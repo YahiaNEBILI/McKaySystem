@@ -22,17 +22,14 @@ import sys
 from datetime import datetime, timezone
 from typing import List, Sequence
 
-from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
-from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
-
-from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
-
 import boto3
 
-from infra.aws_config import SDK_CONFIG
+from checks.registry import get_factory
+from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
 from contracts.services import Services
-
-from checks.aws.s3_lifecycle_missing import AwsAccountContext, S3LifecycleMissingChecker
+from infra.aws_config import SDK_CONFIG
+from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
+from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
 
 def _utc_now() -> datetime:
@@ -43,7 +40,7 @@ def _make_run_id(run_ts: datetime) -> str:
     return f"run-{run_ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}"
 
 
-def _load_checker(dotted_path: str) -> Checker:
+def _load_checker(dotted_path: str, *, ctx: RunContext, bootstrap: dict) -> Checker:
     """
     Load a checker instance from a dotted import path.
 
@@ -57,7 +54,18 @@ def _load_checker(dotted_path: str) -> Checker:
         raise ValueError("Checker path must be like 'module.path:ClassName'")
     module_path, class_name = dotted_path.split(":", 1)
 
+    # Importing the module can register a factory in checks.registry.
     module = importlib.import_module(module_path)
+
+    # If a factory is registered for this spec, use it.
+    factory = get_factory(dotted_path)
+    if factory is not None:
+        instance = factory(ctx, bootstrap)
+        if not hasattr(instance, "run") or not hasattr(instance, "checker_id"):
+            raise TypeError(f"Factory for '{dotted_path}' did not return a valid Checker")
+        return instance
+
+    # Fallback: plain no-arg constructor.
     klass = getattr(module, class_name, None)
     if klass is None:
         raise ValueError(f"Class '{class_name}' not found in module '{module_path}'")
@@ -133,14 +141,14 @@ def main(argv: Sequence[str]) -> int:
 
     account_id = sts.get_caller_identity()["Account"]
 
-    services = Services(
-    s3=s3
-    )
+    services = Services(s3=s3)
 
-    account_ctx = AwsAccountContext(
-        account_id=account_id,
-        billing_account_id=account_id,  # same for now
-    )
+    # Bootstrap is runtime data that some checker factories may need.
+    # Keep it small and explicit; prefer passing shared clients via ctx.services.
+    bootstrap: dict = {
+        "aws_account_id": account_id,
+        "aws_billing_account_id": account_id,
+    }
 
     ctx = RunContext(
         tenant_id=args.tenant,
@@ -158,13 +166,7 @@ def main(argv: Sequence[str]) -> int:
 
     checkers: List[Checker] = []
     for dotted in args.checker:
-        if dotted.endswith(":S3LifecycleMissingChecker"):
-
-            checkers.append(
-                S3LifecycleMissingChecker(account=account_ctx)
-            )
-        else:
-            checkers.append(_load_checker(dotted))
+        checkers.append(_load_checker(dotted, ctx=ctx, bootstrap=bootstrap))
 
     runner = CheckerRunner(finding_id_salt_mode=args.finding_id_mode)
     result = runner.run_many(checkers, ctx)
