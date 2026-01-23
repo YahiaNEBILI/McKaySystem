@@ -22,9 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
-from finops_contracts_v2 import (
+from .finops_contracts import (
     ValidationError,
     build_ids_and_validate,
     normalize_str,
