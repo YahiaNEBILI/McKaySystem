@@ -120,8 +120,8 @@ class RDSSnapshotsCleanupChecker:
                 yield FindingDraft(
                     check_id="aws.rds.snapshots.manual_old",
                     check_name="RDS manual snapshot is old",
-                    category="cost",
-                    status="fail",
+                    category="waste",
+                    status="info",
                     severity=Severity(level="medium", score=50),
                     title="Old RDS manual DB snapshot",
                     message=(
@@ -153,9 +153,9 @@ class RDSSnapshotsCleanupChecker:
                 yield FindingDraft(
                     check_id="aws.rds.snapshots.orphaned",
                     check_name="RDS snapshot is orphaned",
-                    category="cost",
-                    status="info",
-                    severity=Severity(level="low", score=20),
+                    category="waste",
+                    status="fail",
+                    severity=Severity(level="high", score=90),
                     title="Orphaned RDS manual DB snapshot",
                     message=(
                         f"Snapshot '{sid}' references source instance '{src_instance}', "
