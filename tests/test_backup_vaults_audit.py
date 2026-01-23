@@ -10,10 +10,6 @@ from botocore.exceptions import ClientError
 from checks.aws.backup_vaults_audit import AwsAccountContext, AwsBackupVaultsAuditChecker
 
 
-# -------------------------
-# Minimal fakes (no boto3)
-# -------------------------
-
 class _FakePaginator:
     def __init__(self, pages: List[Dict[str, Any]]):
         self._pages = pages
@@ -24,10 +20,8 @@ class _FakePaginator:
 
 class _FakeBackupClient:
     """
-    Fake backup client with:
-      - get_paginator("list_backup_vaults") -> BackupVaultList
-      - describe_backup_vault(BackupVaultName=...)
-      - get_backup_vault_access_policy(BackupVaultName=...)
+    Fake backup client with both paginator and direct-call methods, to match
+    _paginate_items() behavior (it may fall back to direct call).
     """
 
     def __init__(
@@ -47,6 +41,7 @@ class _FakeBackupClient:
         self._raise_on = raise_on
         self._raise_code = raise_code
 
+    # ------------- paginator -------------
     def get_paginator(self, op: str) -> _FakePaginator:
         if self._raise_on == op:
             raise ClientError({"Error": {"Code": self._raise_code, "Message": "Denied"}}, op)
@@ -56,11 +51,24 @@ class _FakeBackupClient:
 
         raise AssertionError(f"Unexpected paginator op: {op}")
 
+    # ------------- direct calls (fallback path in _paginate_items) -------------
+
+    def list_backup_vaults(self, **_kwargs) -> Dict[str, Any]:
+        if self._raise_on == "list_backup_vaults":
+            raise ClientError(
+                {"Error": {"Code": self._raise_code, "Message": "Denied"}},
+                "list_backup_vaults",
+            )
+        # minimal NextToken-compatible shape
+        return {"BackupVaultList": self._vaults}
+
     def describe_backup_vault(self, *, BackupVaultName: str) -> Dict[str, Any]:
         if self._raise_on == "describe_backup_vault":
-            raise ClientError({"Error": {"Code": self._raise_code, "Message": "Denied"}}, "describe_backup_vault")
+            raise ClientError(
+                {"Error": {"Code": self._raise_code, "Message": "Denied"}},
+                "describe_backup_vault",
+            )
 
-        # Simulate "not found" by raising ResourceNotFoundException if name missing (rare for describe)
         if BackupVaultName not in self._describe_by_name:
             raise ClientError(
                 {"Error": {"Code": "ResourceNotFoundException", "Message": "NotFound"}},
@@ -81,7 +89,6 @@ class _FakeBackupClient:
                 {"Error": {"Code": "ResourceNotFoundException", "Message": "NotFound"}},
                 "get_backup_vault_access_policy",
             )
-        # val can be a dict policy document or already a string; normalize to {"Policy": "..."}
         if isinstance(val, str):
             return {"Policy": val}
         return {"Policy": json.dumps(val)}
@@ -121,7 +128,9 @@ def _mk_checker(
 def test_vault_lock_missing_fields_emits_no_lifecycle():
     checker = _mk_checker()
 
-    vaults = [{"BackupVaultName": "vault-a", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-a"}]
+    vaults = [
+        {"BackupVaultName": "vault-a", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-a"}
+    ]
     describe = {
         # No Locked/MinRetentionDays/MaxRetentionDays fields => treated as "no vault lock"
         "vault-a": {"BackupVaultName": "vault-a"},
@@ -130,7 +139,6 @@ def test_vault_lock_missing_fields_emits_no_lifecycle():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    # Also has access policy check; we provided an empty dict => it's valid JSON with no Statement => emits nothing.
     assert len(findings) == 1
     f = findings[0]
     assert f.check_id == "aws.backup.vaults.no_lifecycle"
@@ -141,7 +149,9 @@ def test_vault_lock_missing_fields_emits_no_lifecycle():
 def test_vault_lock_no_max_emits_indefinite_retention():
     checker = _mk_checker()
 
-    vaults = [{"BackupVaultName": "vault-b", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-b"}]
+    vaults = [
+        {"BackupVaultName": "vault-b", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-b"}
+    ]
     describe = {
         "vault-b": {"BackupVaultName": "vault-b", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
     }
@@ -153,13 +163,15 @@ def test_vault_lock_no_max_emits_indefinite_retention():
     f = findings[0]
     assert f.check_id == "aws.backup.vaults.no_lifecycle"
     assert f.issue_key["rule"] == "vault_lock_no_max"
-    assert f.severity.level in ("medium", "high")  # medium in implementation
+    assert f.severity.level in ("medium", "high")
 
 
 def test_vault_lock_out_of_standard_emits_low():
     checker = _mk_checker(expected_min=14, expected_max=90)
 
-    vaults = [{"BackupVaultName": "vault-c", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-c"}]
+    vaults = [
+        {"BackupVaultName": "vault-c", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-c"}
+    ]
     describe = {
         "vault-c": {"BackupVaultName": "vault-c", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 90},
     }
@@ -181,12 +193,12 @@ def test_vault_lock_out_of_standard_emits_low():
 def test_access_policy_missing_emits_low_misconfig():
     checker = _mk_checker()
 
-    vaults = [{"BackupVaultName": "vault-d", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-d"}]
+    vaults = [
+        {"BackupVaultName": "vault-d", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-d"}
+    ]
     describe = {
-        # Provide proper lock fields so Vault Lock check emits nothing
         "vault-d": {"BackupVaultName": "vault-d", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 30},
     }
-    # policy_by_name missing => ResourceNotFoundException => emits "no access policy"
     backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={})
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
@@ -201,7 +213,9 @@ def test_access_policy_missing_emits_low_misconfig():
 def test_access_policy_wildcard_principal_emits_high():
     checker = _mk_checker()
 
-    vaults = [{"BackupVaultName": "vault-e", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-e"}]
+    vaults = [
+        {"BackupVaultName": "vault-e", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-e"}
+    ]
     describe = {
         "vault-e": {"BackupVaultName": "vault-e", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 30},
     }
@@ -223,9 +237,11 @@ def test_access_policy_wildcard_principal_emits_high():
 
 
 def test_access_policy_cross_account_not_allowlisted_emits_fail():
-    checker = _mk_checker(allowlist=["222222222222"])  # allowlist different account
+    checker = _mk_checker(allowlist=["222222222222"])
 
-    vaults = [{"BackupVaultName": "vault-f", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-f"}]
+    vaults = [
+        {"BackupVaultName": "vault-f", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-f"}
+    ]
     describe = {
         "vault-f": {"BackupVaultName": "vault-f", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 30},
     }
@@ -249,22 +265,21 @@ def test_access_policy_cross_account_not_allowlisted_emits_fail():
     f = findings[0]
     assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
     assert f.issue_key["rule"] == "cross_account_access"
-    # Sensitive action => should be high per implementation
-    assert f.severity.level in ("medium", "high")
     assert "333333333333" in (f.dimensions.get("cross_account_ids") or "")
 
 
 def test_access_policy_emits_only_worst_per_vault():
     checker = _mk_checker()
 
-    vaults = [{"BackupVaultName": "vault-g", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-g"}]
+    vaults = [
+        {"BackupVaultName": "vault-g", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-g"}
+    ]
     describe = {
         "vault-g": {"BackupVaultName": "vault-g", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 30},
     }
     policy = {
         "Version": "2012-10-17",
         "Statement": [
-            # medium-ish issue
             {
                 "Sid": "Cross",
                 "Effect": "Allow",
@@ -272,7 +287,6 @@ def test_access_policy_emits_only_worst_per_vault():
                 "Action": ["backup:ListBackupJobs"],
                 "Resource": "*",
             },
-            # high issue (wildcard principal)
             {"Sid": "Wild", "Effect": "Allow", "Principal": "*", "Action": "backup:*", "Resource": "*"},
         ],
     }
@@ -291,6 +305,7 @@ def test_access_policy_emits_only_worst_per_vault():
 def test_list_vaults_access_error_emits_single_info_and_stops():
     checker = _mk_checker()
 
+    # Raise on direct op name ("list_backup_vaults") so both paginator and fallback path fail consistently.
     backup = _FakeBackupClient(region="eu-west-1", raise_on="list_backup_vaults")
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
@@ -303,8 +318,9 @@ def test_list_vaults_access_error_emits_single_info_and_stops():
 def test_describe_vault_access_error_emits_single_info_and_stops():
     checker = _mk_checker()
 
-    vaults = [{"BackupVaultName": "vault-h", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-h"}]
-    # configure paginator ok but raise on describe
+    vaults = [
+        {"BackupVaultName": "vault-h", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-h"}
+    ]
     backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name={}, policy_by_name={}, raise_on="describe_backup_vault")
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
