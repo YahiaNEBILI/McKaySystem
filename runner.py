@@ -6,11 +6,24 @@ FinOps SaaS runner (checkers -> validated wire findings -> storage-cast -> parqu
 Default behavior: run ALL registered checkers (discovered under the `checks` package).
 Optional behavior: run only selected checkers via --checker, and/or exclude via --exclude-checker.
 
-If your imports are "from contracts..." / "from pipeline..." / "from checks...",
-ensure your repo root is on PYTHONPATH (pytest.ini already does this for tests).
+NEW: Correlation step
+--------------------
+After writing raw findings to Parquet, the runner can optionally run the correlation engine,
+which reads the raw Parquet dataset and emits *meta-findings* to a separate Parquet dataset.
+
+Pipeline:
+  checkers -> findings_raw parquet
+    -> correlation -> findings_correlated parquet
+      -> duckdb/json export (should UNION both datasets)
 
 Run everything (default):
 python runner.py --tenant acme --workspace prod
+
+Disable correlation:
+python runner.py --tenant acme --workspace prod --no-correlation
+
+Custom correlated output directory:
+python runner.py --tenant acme --workspace prod --correlation-out data/finops_findings_correlated
 
 Run everything except one checker:
 python runner.py --tenant acme --workspace prod --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
@@ -143,6 +156,24 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="If set, records failing storage casting are skipped instead of failing the run.",
     )
 
+    # Correlation controls
+    parser.add_argument(
+        "--no-correlation",
+        action="store_true",
+        help="Disable correlation step (meta-findings).",
+    )
+    parser.add_argument(
+        "--correlation-out",
+        default="",
+        help="Output base directory for correlated findings parquet dataset (default: <out>_correlated).",
+    )
+    parser.add_argument(
+        "--correlation-threads",
+        type=int,
+        default=4,
+        help="DuckDB threads for correlation engine (default: 4).",
+    )
+
     # Convenience
     parser.add_argument(
         "--print-version",
@@ -151,6 +182,45 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
 
     return parser.parse_args(argv)
+
+
+def _run_correlation_step(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    run_id: str,
+    findings_glob: str,
+    out_dir: str,
+    threads: int,
+    finding_id_mode: str,
+) -> dict:
+    """
+    Run correlation step if available.
+
+    Returns a dict of stats for printing.
+    """
+    try:
+        # You will add this module as part of correlation wiring.
+        from pipeline.correlation.correlate_findings import run_correlation # pylint: disable=import-error
+    except Exception as exc:  # pragma: no cover
+        print(f"[WARN] Correlation step skipped: pipeline/correlate_findings.py not available ({exc})")
+        return {"enabled": False, "emitted": 0, "errors": 0, "out_dir": out_dir}
+
+    stats = run_correlation(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        findings_glob=findings_glob,
+        out_dir=out_dir,
+        threads=int(threads),
+        finding_id_mode=finding_id_mode,
+    )
+
+    # run_correlation should return something like:
+    # {"enabled": True, "emitted": int, "errors": int, "out_dir": str, "rules_enabled": int}
+    if not isinstance(stats, dict):
+        return {"enabled": True, "emitted": 0, "errors": 0, "out_dir": out_dir}
+    return stats
 
 
 def main(argv: Sequence[str]) -> int:
@@ -171,6 +241,7 @@ def main(argv: Sequence[str]) -> int:
     sts = session.client("sts")
     s3 = session.client("s3", config=SDK_CONFIG)
     rds = session.client("rds", config=SDK_CONFIG)
+    # backup client is used by your backup checkers
     backup = session.client("backup", config=SDK_CONFIG)
 
     account_id = sts.get_caller_identity()["Account"]
@@ -202,10 +273,8 @@ def main(argv: Sequence[str]) -> int:
 
     # --- Resolve which checkers to run ---
     if args.checker is None:
-        # User did not specify any checker -> run ALL registered checkers
         checker_specs = _discover_all_checker_specs()
     else:
-        # Explicit list provided -> run only those
         checker_specs = list(args.checker)
 
     exclude = set(args.exclude_checker or [])
@@ -219,7 +288,7 @@ def main(argv: Sequence[str]) -> int:
     for spec in checker_specs:
         checkers.append(_load_checker(spec, ctx=ctx, bootstrap=bootstrap))
 
-    # --- Run + persist ---
+    # --- Run + persist raw findings ---
     runner = CheckerRunner(finding_id_salt_mode=args.finding_id_mode)
     result = runner.run_many(checkers, ctx)
 
@@ -231,6 +300,22 @@ def main(argv: Sequence[str]) -> int:
     )
     writer.extend(result.valid_findings)
     stats = writer.close()
+
+    # --- Optional: Correlation step (meta-findings) ---
+    corr_stats: dict = {"enabled": False, "emitted": 0, "errors": 0, "out_dir": ""}
+
+    if not args.no_correlation:
+        raw_glob = f"{args.out}/**/*.parquet"
+        corr_out = args.correlation_out.strip() or f"{args.out}_correlated"
+        corr_stats = _run_correlation_step(
+            tenant_id=args.tenant,
+            workspace_id=args.workspace,
+            run_id=run_id,
+            findings_glob=raw_glob,
+            out_dir=corr_out,
+            threads=args.correlation_threads,
+            finding_id_mode=args.finding_id_mode,
+        )
 
     # --- Summary ---
     print("=== Run summary ===")
@@ -253,6 +338,17 @@ def main(argv: Sequence[str]) -> int:
     print(f"writer_written: {stats.written}")
     print(f"writer_dropped_cast_errors: {stats.dropped_cast_errors}")
 
+    # Correlation summary
+    if corr_stats.get("enabled"):
+        print("--- Correlation ---")
+        print(f"correlation_out: {corr_stats.get('out_dir', '')}")
+        print(f"correlation_rules_enabled: {corr_stats.get('rules_enabled', '')}")
+        print(f"correlation_emitted: {corr_stats.get('emitted', 0)}")
+        print(f"correlation_errors: {corr_stats.get('errors', 0)}")
+    else:
+        print("--- Correlation ---")
+        print("correlation: disabled/skipped")
+
     if result.invalid_errors:
         print("\n--- Sample validation errors (contract layer) ---")
         for e in result.invalid_errors[:10]:
@@ -266,6 +362,11 @@ def main(argv: Sequence[str]) -> int:
     # Non-zero exit code if nothing was written but we did receive records
     if stats.written == 0 and stats.received > 0:
         return 2
+
+    # If correlation ran but had errors, return non-zero
+    if corr_stats.get("enabled") and int(corr_stats.get("errors", 0)) > 0:
+        return 3
+
     return 0
 
 

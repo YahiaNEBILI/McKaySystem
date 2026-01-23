@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import duckdb
 
@@ -35,10 +35,24 @@ def _rows_to_jsonable(cols: List[str], rows: List[tuple]) -> List[Dict[str, Any]
 
 @dataclass(frozen=True)
 class ExportConfig:
-    findings_glob: str                  # ex: data/finops_findings/**/**/**.parquet
+    """
+    findings_glob remains for backward compatibility.
+
+    Preferred: findings_globs for multiple datasets, e.g.:
+      [
+        "data/finops_findings/**/*.parquet",
+        "data/finops_findings_correlated/**/*.parquet"
+      ]
+    """
     tenant_id: str
     out_dir: str = "webapp_data"        # directory where JSON files are written
     limit_findings: int = 500           # safety limit
+
+    # Backward compatible single source
+    findings_glob: str = ""
+
+    # Preferred multi-source
+    findings_globs: Optional[List[str]] = None
 
 
 class FinOpsJsonExporter:
@@ -50,8 +64,28 @@ class FinOpsJsonExporter:
     def close(self) -> None:
         self.con.close()
 
+    def _effective_globs(self) -> List[str]:
+        # Prefer explicit list; else fall back to single glob.
+        if self.cfg.findings_globs:
+            globs = [str(x).strip() for x in self.cfg.findings_globs if str(x).strip()]
+            if globs:
+                return globs
+        if str(self.cfg.findings_glob).strip():
+            return [str(self.cfg.findings_glob).strip()]
+        raise ValueError("ExportConfig must set findings_glob or findings_globs")
+
     def _findings_rel(self) -> str:
-        return f"read_parquet('{self.cfg.findings_glob}', union_by_name=True)"
+        """
+        Return a DuckDB relation expression reading Parquet.
+        DuckDB accepts a LIST of paths/globs for read_parquet().
+        """
+        globs = self._effective_globs()
+        if len(globs) == 1:
+            # Keep the exact behavior you had before
+            return f"read_parquet('{globs[0]}', union_by_name=True)"
+        # Multi-source read
+        escaped = ",".join("'" + g.replace("'", "''") + "'" for g in globs)
+        return f"read_parquet([{escaped}], union_by_name=True)"
 
     # -------------------------
     # Exports
