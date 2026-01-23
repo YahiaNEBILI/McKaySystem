@@ -10,6 +10,9 @@ from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
 
+SUPPRESS_TAG_KEYS = { "retain", "legal-hold", "backup-policy", "suppress", "downgrade", }
+
+
 @dataclass(frozen=True)
 class AwsAccountContext:
     account_id: str
@@ -79,6 +82,27 @@ class RDSSnapshotsCleanupChecker:
 
     checker_id = "aws.rds.snapshots.cleanup"
 
+    def _extract_tags(self, snap: dict) -> dict[str, str]:
+        tags = {}
+        for t in snap.get("TagList", []) or []:
+            key = str(t.get("Key") or "").strip().lower()
+            val = str(t.get("Value") or "").strip().lower()
+            if key:
+                tags[key] = val
+        return tags
+
+
+    def _should_suppress(self, tags: dict[str, str]) -> bool:
+        # If tag key exists with any value → suppress
+        for k in tags:
+            if k in SUPPRESS_TAG_KEYS:
+                return True
+        # If tag value matches suppression keywords
+        for v in tags.values():
+            if v in SUPPRESS_TAG_KEYS:
+                return True
+        return False
+
     def __init__(
         self,
         *,
@@ -137,6 +161,10 @@ class RDSSnapshotsCleanupChecker:
         created = _utc(snap.get("SnapshotCreateTime"))
         arn = self._snapshot_arn(snap, "db")
 
+        tags = self._extract_tags(snap)
+        if self._should_suppress(tags):
+            return  # ignore this snapshot entirely
+
         # Orphan detection first (ALL snapshots) with false-positive guards.
         if self._is_cross_region_snapshot(snap, region, arn):
             is_orphan = False
@@ -146,7 +174,7 @@ class RDSSnapshotsCleanupChecker:
 
         if is_orphan:
             est = self._estimate_snapshot_cost_usd(snap, kind="db")
-            yield self._orphan_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est)
+            yield self._orphan_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est, tags)
             return
 
         # Old manual applies only to non-orphaned manual-ish snapshots.
@@ -156,7 +184,7 @@ class RDSSnapshotsCleanupChecker:
             return
 
         est = self._estimate_snapshot_cost_usd(snap, kind="db")
-        yield self._old_manual_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est)
+        yield self._old_manual_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est, tags)
 
     def _evaluate_cluster_snapshot(
         self,
@@ -171,6 +199,10 @@ class RDSSnapshotsCleanupChecker:
         created = _utc(snap.get("SnapshotCreateTime"))
         arn = self._snapshot_arn(snap, "cluster")
 
+        tags = self._extract_tags(snap)
+        if self._should_suppress(tags):
+            return
+
         # Orphan detection first (ALL snapshots) with false-positive guards.
         if self._is_cross_region_snapshot(snap, region, arn):
             is_orphan = False
@@ -180,7 +212,7 @@ class RDSSnapshotsCleanupChecker:
 
         if is_orphan:
             est = self._estimate_snapshot_cost_usd(snap, kind="cluster")
-            yield self._orphan_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est)
+            yield self._orphan_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est, tags)
             return
 
         # Old manual applies only to non-orphaned manual-ish snapshots.
@@ -190,7 +222,7 @@ class RDSSnapshotsCleanupChecker:
             return
 
         est = self._estimate_snapshot_cost_usd(snap, kind="cluster")
-        yield self._old_manual_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est)
+        yield self._old_manual_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est, tags)
 
     # ---------- estimation ----------
 
@@ -245,6 +277,7 @@ class RDSSnapshotsCleanupChecker:
         resource_type: str,
         resource_arn: str,
         est: Tuple[Optional[str], Optional[str], Optional[int], str],
+        tags: dict[str, str]
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         created_str = created.date().isoformat() if created else "unknown date"
@@ -253,7 +286,7 @@ class RDSSnapshotsCleanupChecker:
             check_name="Orphaned RDS snapshot",
             category="waste",
             status="fail",
-            severity=Severity(level="high", score=80),
+            severity=Severity(level="medium", score=70),
             title="RDS snapshot is orphaned",
             message=f"Snapshot '{snapshot_id}' appears orphaned (created {created_str}).",
             recommendation="Review and delete orphaned snapshots if they are no longer required.",
@@ -263,6 +296,7 @@ class RDSSnapshotsCleanupChecker:
             estimated_monthly_savings=est_save,
             estimate_confidence=conf,
             estimate_notes=notes,
+            tags=tags,
         )
 
     def _old_manual_finding(
@@ -274,6 +308,7 @@ class RDSSnapshotsCleanupChecker:
         resource_type: str,
         resource_arn: str,
         est: Tuple[Optional[str], Optional[str], Optional[int], str],
+        tags: dict[str, str]
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         return FindingDraft(
@@ -294,6 +329,7 @@ class RDSSnapshotsCleanupChecker:
             estimated_monthly_savings=est_save,
             estimate_confidence=conf,
             estimate_notes=notes,
+            tags=tags,
         )
 
     # ---------- scope / identity helpers ----------
