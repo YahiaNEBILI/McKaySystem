@@ -81,6 +81,7 @@ class FinOpsJsonExporter:
             title,
             message,
             recommendation,
+            estimated.monthly_cost AS est_monthly_cost,
             estimated.monthly_savings AS est_monthly_savings,
             estimated.confidence AS est_confidence,
             actual.cost_30d AS actual_cost_30d,
