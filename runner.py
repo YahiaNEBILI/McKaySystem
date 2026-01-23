@@ -32,6 +32,8 @@ import boto3
 from infra.aws_config import SDK_CONFIG
 from contracts.services import Services
 
+from checks.aws.s3_lifecycle_missing import AwsAccountContext, S3LifecycleMissingChecker
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -126,10 +128,18 @@ def main(argv: Sequence[str]) -> int:
 
     session = boto3.Session()
 
+    sts = session.client("sts")
     s3 = session.client("s3", config=SDK_CONFIG)
+
+    account_id = sts.get_caller_identity()["Account"]
 
     services = Services(
     s3=s3
+    )
+
+    account_ctx = AwsAccountContext(
+        account_id=account_id,
+        billing_account_id=account_id,  # same for now
     )
 
     ctx = RunContext(
@@ -148,7 +158,13 @@ def main(argv: Sequence[str]) -> int:
 
     checkers: List[Checker] = []
     for dotted in args.checker:
-        checkers.append(_load_checker(dotted))
+        if dotted.endswith(":S3LifecycleMissingChecker"):
+
+            checkers.append(
+                S3LifecycleMissingChecker(account=account_ctx)
+            )
+        else:
+            checkers.append(_load_checker(dotted))
 
     runner = CheckerRunner(finding_id_salt_mode=args.finding_id_mode)
     result = runner.run_many(checkers, ctx)
