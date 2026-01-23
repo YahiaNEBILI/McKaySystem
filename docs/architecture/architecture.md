@@ -75,6 +75,15 @@ Rules:
 - must not depend on DuckDB
 - should not manage credentials
 - should remain fast and safe (timeouts, error handling)
+- checker module must register itself in the checker registry at import time.
+
+Example : 
+
+```python
+@register_checker("checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker")
+def _factory(ctx, bootstrap):
+    ...
+```
 
 Example: `S3LifecycleMissingChecker`
 
@@ -126,6 +135,22 @@ Runner builds and wires:
 - writer config
 
 Runner is the only place where you should load SDK config and instantiate cloud clients.
+
+### 2.5 Checker discovery model
+
+Runner does not maintain a hardcoded list of checkers.
+Instead:
+Runner imports **all modules under** checks/
+Module imports trigger **checker registration**
+Runner reads the registry to determine what to run
+
+This ensures:
+
+zero runner changes when adding checkers
+
+deterministic and auditable checker sets
+
+SaaS-safe defaults (“run everything”)
 
 ---
 
@@ -257,9 +282,9 @@ These files can be:
 
 To add a checker:
 1. create a new module in `checks/`
-2. implement `run(ctx)` yielding `FindingDraft`
+2. implement `run(ctx)` yielding `FindingDraft` with `checker_id`
 3. ensure correct `scope` and `issue_key`
-4. run via `runner.py --checker ...`
+4. register it using `register_checker(...)` or `register_class(...)`
 
 ---
 
@@ -323,9 +348,34 @@ Recommended additions:
 - integration test in CloudShell against a dev AWS account
 - “golden record” tests for schema evolution
 
+### 8.4 Deterministic rule execution
+
+Because : checker discovery is explicit / ordering is deterministic / identity is stable
+
+The system guarantees : reproducible runs / safe reprocessing / consistent lifecycle tracking
+
 ---
 
-## 9. Guiding principles (summary)
+### 9. Runtime bootstrap model
+
+Some checkers require runtime information (e.g. AWS account ID).
+
+Runner provides a small, explicit bootstrap dictionary to factories:
+
+```python
+bootstrap = {
+    "aws_account_id": "...",
+    "aws_billing_account_id": "...",
+}
+```
+
+Guidelines:
+bootstrap is immutable
+bootstrap contains facts, not clients
+shared SDK clients belong in ctx.services
+This keeps factories pure and testable.
+
+## 10. Guiding principles (summary)
 
 1. **Checkers stay dumb about storage**
 2. **Contracts stay strict**
@@ -369,3 +419,4 @@ run_export(ExportConfig(
 ))
 EOF
 ```
+
