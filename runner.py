@@ -171,10 +171,11 @@ def main(argv: Sequence[str]) -> int:
     sts = session.client("sts")
     s3 = session.client("s3", config=SDK_CONFIG)
     rds = session.client("rds", config=SDK_CONFIG)
+    backup = session.client("backup", config=SDK_CONFIG)
 
     account_id = sts.get_caller_identity()["Account"]
 
-    services = Services(s3=s3, rds=rds)
+    services = Services(s3=s3, rds=rds, backup=backup)
 
     # Bootstrap is runtime data that checker factories may need.
     bootstrap: dict = {
