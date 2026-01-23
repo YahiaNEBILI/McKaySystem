@@ -15,19 +15,34 @@ class AwsAccountContext:
     billing_account_id: Optional[str] = None
 
 
-class S3LifecycleMissingChecker:
+def _normalize_s3_location_constraint(value: Optional[str]) -> str:
     """
-    Real AWS checker: emits a finding for every bucket without lifecycle configuration.
+    S3 GetBucketLocation returns:
+      - None or "" for us-east-1
+      - "EU" legacy for eu-west-1
+      - otherwise region like "eu-west-3", "us-west-2", ...
+    """
+    if not value:
+        return "us-east-1"
+    if value == "EU":
+        return "eu-west-1"
+    return value
 
-    it uses get_bucket_lifecycle_configuration and treats missing lifecycle as "fail",
-    similar to how your previous module derived LifecycleRules. :contentReference[oaicite:1]{index=1}
-    """
+
+class S3LifecycleMissingChecker:
     checker_id = "aws.s3.governance.lifecycle_missing"
 
     def __init__(self, *, account: AwsAccountContext) -> None:
         self._account = account
 
     def run(self, ctx) -> Iterable[FindingDraft]:
+        """
+        Real AWS checker: emits a finding for every bucket without lifecycle configuration.
+        Also enriches scope.region using get_bucket_location.
+        """
+        if ctx.services is None:
+            raise RuntimeError("S3LifecycleMissingChecker requires ctx.services (AWS clients)")
+
         s3: BaseClient = ctx.services.s3  # injected by runner
 
         resp = s3.list_buckets()
@@ -36,7 +51,19 @@ class S3LifecycleMissingChecker:
             if not name:
                 continue
 
-            # Detect lifecycle presence (same API as the historical checker). :contentReference[oaicite:2]{index=2}
+            # 1) Resolve bucket region (best-effort)
+            bucket_region = "unknown"
+            try:
+                loc = s3.get_bucket_location(Bucket=name)
+                bucket_region = _normalize_s3_location_constraint(loc.get("LocationConstraint"))
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                # If we can't read location, keep "unknown" but don't fail the whole checker.
+                if code not in ("AccessDenied", "AllAccessDisabled"):
+                    # unknown errors should still be visible during MVP
+                    raise
+
+            # 2) Detect lifecycle presence
             try:
                 s3.get_bucket_lifecycle_configuration(Bucket=name)
                 continue  # lifecycle exists => no finding
@@ -53,12 +80,14 @@ class S3LifecycleMissingChecker:
                         severity=Severity(level="medium", score=50),
                         title="S3 bucket has no lifecycle configuration",
                         message=f"Bucket {name} does not have a lifecycle policy.",
-                        recommendation="Add lifecycle rules to transition or expire objects where appropriate.",
+                        recommendation=(
+                            "Add lifecycle rules to transition or expire objects where appropriate."
+                        ),
                         scope=Scope(
                             cloud=ctx.cloud,
                             billing_account_id=self._account.billing_account_id or self._account.account_id,
                             account_id=self._account.account_id,
-                            region="global",
+                            region=bucket_region,
                             service="AmazonS3",
                             resource_type="s3_bucket",
                             resource_id=name,
@@ -70,7 +99,7 @@ class S3LifecycleMissingChecker:
                     )
                     continue
 
-                # Access issues => INFO (optional but practical)
+                # Access issues => INFO (practical)
                 if code in ("AccessDenied", "AllAccessDisabled"):
                     yield FindingDraft(
                         check_id=self.checker_id,
@@ -85,7 +114,7 @@ class S3LifecycleMissingChecker:
                             cloud=ctx.cloud,
                             billing_account_id=self._account.billing_account_id or self._account.account_id,
                             account_id=self._account.account_id,
-                            region="global",
+                            region=bucket_region,
                             service="AmazonS3",
                             resource_type="s3_bucket",
                             resource_id=name,
