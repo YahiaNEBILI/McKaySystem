@@ -291,8 +291,8 @@ SELECT
   NULL AS actual,
   NULL AS lifecycle,
 
-  {} AS tags,
-  {} AS labels,
+  '{}' AS tags,
+  '{}' AS labels,
 
   -- Dimensions (for UI filters)
   map(
