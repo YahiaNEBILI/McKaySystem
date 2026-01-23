@@ -1,6 +1,8 @@
 -- pipeline/correlation/rules/aws_backup_vault_risk.sql
 --
 -- Correlation: AWS Backup "Vault Risk" meta finding
+-- rule_id: aws.backup.correlation.vault_risk
+-- name: AWS Backup vault risk (correlated)
 -- -------------------------------------------------
 -- Uses findings emitted by:
 --   - checks/aws/backup_vaults_audit.py
@@ -290,18 +292,14 @@ SELECT
 
   NULL AS actual,
   NULL AS lifecycle,
-
-  '{}' AS tags,
-  '{}' AS labels,
-
+  map([],[]) AS tags,
+  map([],[]) AS labels,
   -- Dimensions (for UI filters)
   map(
     ['vault_name','vault_arn','signal_count','stale_rp_count','rules_no_lifecycle_count'],
     [c.vault_name, COALESCE(c.vault_arn,''), CAST(c.signal_count AS VARCHAR), CAST(c.stale_rp_count AS VARCHAR), CAST(c.rules_no_lifecycle_count AS VARCHAR)]
   ) AS dimensions,
-
-  '{}' AS metrics,
-
+  map([],[]) AS metrics,
   -- Optional metadata_json for debugging/audit
   ('{"correlation_rule":"vault_risk","signal_count":' || CAST(c.signal_count AS VARCHAR) || '}') AS metadata_json,
 
