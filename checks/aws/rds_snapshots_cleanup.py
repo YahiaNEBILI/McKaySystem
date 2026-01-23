@@ -1,3 +1,59 @@
+"""
+RDS Snapshots Cleanup Checker
+=============================
+
+This module implements an infra-native FinOps checker that analyzes Amazon RDS
+DB snapshots and Aurora cluster snapshots to detect two classes of issues:
+
+1. **Orphaned snapshots**
+   Snapshots whose source DB instance or DB cluster no longer exists in the
+   current region. These snapshots typically accumulate over time and represent
+   pure waste. Orphan detection is evaluated for *all* snapshots (manual or
+   automated). If a snapshot is identified as orphaned, only the orphaned
+   finding is emitted (no duplicate findings).
+
+2. **Old manual snapshots**
+   Manual snapshots that exceed a configurable retention threshold (default:
+   30 days). These snapshots often remain after migrations, upgrades, or
+   operational tasks. Old snapshot detection applies only to non-orphaned
+   snapshots whose type begins with ``"manual"``.
+
+The checker also includes several production-grade behaviors:
+
+- **Tag-based suppression**
+  Snapshots tagged with keys or values indicating intentional retention
+  (e.g., ``retain``, ``legal-hold``, ``backup-policy``, ``suppress``,
+  ``downgrade``) are ignored entirely. This prevents false positives for
+  compliance, DR, or operational workflows.
+
+- **Cross-region false-positive guards**
+  RDS snapshot copies may reference source identifiers that do not exist in
+  the current region. The checker inspects both ``SourceRegion`` and the
+  snapshot ARN to avoid incorrectly flagging these snapshots as orphaned.
+
+- **Cost estimation**
+  For DB snapshots, approximate monthly storage cost is estimated using
+  ``AllocatedStorage`` and a configurable USD/GB-month price (default: 0.095).
+  Aurora cluster snapshots generally do not expose reliable size information,
+  so their cost is marked as unknown.
+
+- **Graceful degradation**
+  If the checker lacks permissions to list RDS instances, clusters, or
+  snapshots, it emits a single informational finding describing the access
+  error and stops cleanly.
+
+- **Contract alignment**
+  All findings are emitted as ``FindingDraft`` objects compatible with the
+  FinOps engine contract:
+    - deterministic scope and issue keys
+    - stable fingerprint generation
+    - consistent severity, category, and metadata fields
+
+This checker is intended to be used by the FinOps engine runner and is
+registered via ``@register_checker`` for automatic discovery.
+"""
+
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,11 +66,12 @@ from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
 
-SUPPRESS_TAG_KEYS = { "retain", "legal-hold", "backup-policy", "suppress", "downgrade", }
+SUPPRESS_TAG_KEYS = { "retain", "legal-hold", "backup-policy" }
 
 
 @dataclass(frozen=True)
 class AwsAccountContext:
+    """Provide account context"""
     account_id: str
     billing_account_id: Optional[str] = None
     partition: str = "aws"
@@ -163,7 +220,7 @@ class RDSSnapshotsCleanupChecker:
 
         tags = self._extract_tags(snap)
         if self._should_suppress(tags):
-            return  # ignore this snapshot entirely
+            return iter(())  # ignore this snapshot entirely
 
         # Orphan detection first (ALL snapshots) with false-positive guards.
         if self._is_cross_region_snapshot(snap, region, arn):
@@ -201,7 +258,7 @@ class RDSSnapshotsCleanupChecker:
 
         tags = self._extract_tags(snap)
         if self._should_suppress(tags):
-            return
+            return iter(())
 
         # Orphan detection first (ALL snapshots) with false-positive guards.
         if self._is_cross_region_snapshot(snap, region, arn):

@@ -85,7 +85,8 @@ class FinOpsJsonExporter:
             estimated.monthly_savings AS est_monthly_savings,
             estimated.confidence AS est_confidence,
             actual.cost_30d AS actual_cost_30d,
-            actual.attribution.method AS attribution_method
+            actual.attribution.method AS attribution_method,
+            tags
         FROM {self._findings_rel()}
         WHERE tenant_id = ?
         ORDER BY run_ts DESC
