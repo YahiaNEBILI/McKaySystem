@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Optional, Set, Any
+from typing import Any, Iterable, Optional, Set, Tuple
 
 from botocore.exceptions import ClientError
 
@@ -38,8 +38,6 @@ def _safe_region_from_client(rds_client) -> str:
 
 def _arn_region(arn: str) -> str:
     # arn:partition:service:region:account:resource...
-    # Example RDS snapshot:
-    # arn:aws:rds:eu-west-1:123456789012:snapshot:my-snap
     try:
         parts = arn.split(":")
         if len(parts) >= 4 and parts[0] == "arn":
@@ -50,14 +48,17 @@ def _arn_region(arn: str) -> str:
 
 
 def _fmt_money_usd(amount: float) -> str:
-    # Keep wire-format money as a string for your contract (Arrow cast will handle it).
+    # Wire-format money as string (decimal-friendly downstream).
     return f"{amount:.2f}"
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort float conversion, mypy/pylance-friendly."""
     try:
         if value is None:
             return default
+        if isinstance(value, (int, float)):
+            return float(value)
         return float(value)
     except (TypeError, ValueError):
         return default
@@ -70,8 +71,10 @@ class RDSSnapshotsCleanupChecker:
     - Orphan detection is evaluated first for ALL snapshots.
     - If orphaned -> emit only the orphaned finding (no duplicates).
     - Old snapshot detection applies ONLY to non-orphaned snapshots whose type startswith "manual".
-    - Cost estimation is reintroduced (approximate) for DB snapshots where AllocatedStorage is available.
-      For Aurora/cluster snapshots, snapshot sizing is generally not available -> we keep cost as unknown.
+    - Cost estimation is approximate and emitted in structured fields:
+        * estimated_monthly_cost
+        * estimated_monthly_savings
+      (never embedded in message)
     """
 
     checker_id = "aws.rds.snapshots.cleanup"
@@ -93,9 +96,7 @@ class RDSSnapshotsCleanupChecker:
 
         rds = ctx.services.rds
         region = _safe_region_from_client(rds)
-
-        now = _now_utc()
-        cutoff = now - timedelta(days=self._stale_days)
+        cutoff = _now_utc() - timedelta(days=self._stale_days)
 
         # Inventory (best effort). If we can't list sources, emit a single INFO finding and stop.
         try:
@@ -144,7 +145,8 @@ class RDSSnapshotsCleanupChecker:
             is_orphan = bool(src_instance and str(src_instance) not in instances)
 
         if is_orphan:
-            yield self._orphan_finding(ctx, sid, created, region, resource_type="rds_db_snapshot", resource_arn=arn)
+            est = self._estimate_snapshot_cost_usd(snap, kind="db")
+            yield self._orphan_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est)
             return
 
         # Old manual applies only to non-orphaned manual-ish snapshots.
@@ -153,20 +155,8 @@ class RDSSnapshotsCleanupChecker:
         if not created or created > cutoff:
             return
 
-        # Cost estimation (approx) for DB snapshots where AllocatedStorage exists.
-        size_gb = _safe_float(snap.get("AllocatedStorage"), default=0.0)
-        est_cost_monthly = float(size_gb) * float(self._snapshot_gb_month_price_usd)
-
-        yield self._old_manual_finding(
-            ctx,
-            sid,
-            created,
-            region,
-            resource_type="rds_db_snapshot",
-            resource_arn=arn,
-            est_cost_monthly_usd=est_cost_monthly,
-            size_gb=size_gb,
-        )
+        est = self._estimate_snapshot_cost_usd(snap, kind="db")
+        yield self._old_manual_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est)
 
     def _evaluate_cluster_snapshot(
         self,
@@ -189,14 +179,8 @@ class RDSSnapshotsCleanupChecker:
             is_orphan = bool(src_cluster and str(src_cluster) not in clusters)
 
         if is_orphan:
-            yield self._orphan_finding(
-                ctx,
-                sid,
-                created,
-                region,
-                resource_type="rds_cluster_snapshot",
-                resource_arn=arn,
-            )
+            est = self._estimate_snapshot_cost_usd(snap, kind="cluster")
+            yield self._orphan_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est)
             return
 
         # Old manual applies only to non-orphaned manual-ish snapshots.
@@ -205,17 +189,31 @@ class RDSSnapshotsCleanupChecker:
         if not created or created > cutoff:
             return
 
-        # Aurora snapshot sizing is usually unavailable -> keep cost unknown (do NOT return 0).
-        yield self._old_manual_finding(
-            ctx,
-            sid,
-            created,
-            region,
-            resource_type="rds_cluster_snapshot",
-            resource_arn=arn,
-            est_cost_monthly_usd=None,
-            size_gb=None,
-        )
+        est = self._estimate_snapshot_cost_usd(snap, kind="cluster")
+        yield self._old_manual_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est)
+
+    # ---------- estimation ----------
+
+    def _estimate_snapshot_cost_usd(self, snap: dict, *, kind: str) -> Tuple[Optional[str], Optional[str], Optional[int], str]:
+        """Return (estimated_monthly_cost, estimated_monthly_savings, confidence, notes).
+
+        We estimate storage cost for snapshots as:
+            allocated_storage_gb * price_per_gb_month
+
+        - For DB snapshots, AWS typically provides AllocatedStorage.
+        - For cluster snapshots (Aurora), AllocatedStorage is often missing; if missing -> unknown.
+        """
+        size_gb = _safe_float(snap.get("AllocatedStorage"), default=0.0)
+        if size_gb <= 0.0:
+            # Unknown sizing for many Aurora snapshots; avoid misleading 0.
+            return (None, None, 10, f"Snapshot size unavailable for {kind} snapshot; cost not estimated.")
+
+        est_cost = float(size_gb) * float(self._snapshot_gb_month_price_usd)
+        if est_cost <= 0.0:
+            return (None, None, 10, f"Estimated cost <= 0 for {kind} snapshot; check pricing inputs.")
+        # Potential savings assumes deletion of the snapshot.
+        money = _fmt_money_usd(est_cost)
+        return (money, money, 50, f"Estimated using AllocatedStorage={size_gb:.0f}GB and ${self._snapshot_gb_month_price_usd}/GB-month.")
 
     # ---------- findings ----------
 
@@ -230,16 +228,12 @@ class RDSSnapshotsCleanupChecker:
             title="Unable to list RDS snapshot inventory",
             message=f"Failed to call {operation} ({code}). Some snapshot checks were skipped.",
             recommendation="Grant rds:Describe* permissions to the scanner role and retry.",
-            scope=self._base_scope(
-                ctx,
-                region=region,
-                resource_type="rds_inventory",
-                resource_id=operation,
-                resource_arn="",
-            ),
+            scope=self._base_scope(ctx, region=region, resource_type="rds_inventory", resource_id=operation, resource_arn=""),
             issue_key={"rule": "access_error", "operation": operation, "error": code},
-            estimated_monthly_savings="",
+            estimated_monthly_savings=None,
+            estimated_monthly_cost=None,
             estimate_confidence=0,
+            estimate_notes="",
         )
 
     def _orphan_finding(
@@ -250,31 +244,25 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
+        est: Tuple[Optional[str], Optional[str], Optional[int], str],
     ) -> FindingDraft:
+        (est_cost, est_save, conf, notes) = est
         created_str = created.date().isoformat() if created else "unknown date"
         return FindingDraft(
             check_id="aws.rds.snapshots.orphaned",
             check_name="Orphaned RDS snapshot",
-            category="cost_optimization",
+            category="waste",
             status="fail",
-            severity=Severity(level="medium", score=60),
+            severity=Severity(level="high", score=80),
             title="RDS snapshot is orphaned",
             message=f"Snapshot '{snapshot_id}' appears orphaned (created {created_str}).",
             recommendation="Review and delete orphaned snapshots if they are no longer required.",
-            scope=self._base_scope(
-                ctx,
-                region=region,
-                resource_type=resource_type,
-                resource_id=snapshot_id,
-                resource_arn=resource_arn,
-            ),
-            issue_key={
-                "rule": "orphaned",
-                "snapshot_id": snapshot_id,
-                "resource_type": resource_type,
-            },
-            estimated_monthly_savings="",
-            estimate_confidence=0,
+            scope=self._base_scope(ctx, region=region, resource_type=resource_type, resource_id=snapshot_id, resource_arn=resource_arn),
+            issue_key={"rule": "orphaned", "snapshot_id": snapshot_id, "resource_type": resource_type},
+            estimated_monthly_cost=est_cost,
+            estimated_monthly_savings=est_save,
+            estimate_confidence=conf,
+            estimate_notes=notes,
         )
 
     def _old_manual_finding(
@@ -285,48 +273,27 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
-        est_cost_monthly_usd: Optional[float],
-        size_gb: Optional[float],
+        est: Tuple[Optional[str], Optional[str], Optional[int], str],
     ) -> FindingDraft:
-        # If we can estimate snapshot storage cost and the action is deletion,
-        # potential savings ~= monthly cost (very rough but useful).
-        if est_cost_monthly_usd is not None and est_cost_monthly_usd > 0.0:
-            estimated_monthly_savings = _fmt_money_usd(est_cost_monthly_usd)
-            confidence = 50
-            size_hint = f" (~{size_gb:.0f} GB)" if size_gb else ""
-            cost_hint = f" Estimated storage cost: ${estimated_monthly_savings}/month{size_hint}."
-        else:
-            estimated_monthly_savings = ""
-            confidence = 20
-            cost_hint = " Storage cost estimate is unavailable for this snapshot type."
-
+        (est_cost, est_save, conf, notes) = est
         return FindingDraft(
             check_id="aws.rds.snapshots.manual_old",
             check_name="Old manual RDS snapshot",
-            category="cost_optimization",
+            category="waste",
             status="fail",
-            severity=Severity(level="low", score=30),
+            severity=Severity(level="low", score=60),
             title="Manual RDS snapshot is old",
             message=(
                 f"Manual snapshot '{snapshot_id}' was created on {created.date().isoformat()} "
-                f"and exceeds retention ({self._stale_days}d).{cost_hint}"
+                f"and exceeds retention ({self._stale_days}d)."
             ),
             recommendation="Delete old manual snapshots if they are no longer required.",
-            scope=self._base_scope(
-                ctx,
-                region=region,
-                resource_type=resource_type,
-                resource_id=snapshot_id,
-                resource_arn=resource_arn,
-            ),
-            issue_key={
-                "rule": "manual_old",
-                "snapshot_id": snapshot_id,
-                "resource_type": resource_type,
-                "stale_days": self._stale_days,
-            },
-            estimated_monthly_savings=estimated_monthly_savings,
-            estimate_confidence=confidence,
+            scope=self._base_scope(ctx, region=region, resource_type=resource_type, resource_id=snapshot_id, resource_arn=resource_arn),
+            issue_key={"rule": "manual_old", "snapshot_id": snapshot_id, "resource_type": resource_type, "stale_days": self._stale_days},
+            estimated_monthly_cost=est_cost,
+            estimated_monthly_savings=est_save,
+            estimate_confidence=conf,
+            estimate_notes=notes,
         )
 
     # ---------- scope / identity helpers ----------
@@ -334,9 +301,9 @@ class RDSSnapshotsCleanupChecker:
     def _base_scope(self, ctx, *, region: str, resource_type: str, resource_id: str, resource_arn: str) -> Scope:
         account_id = self._account.account_id
         billing_account_id = self._account.billing_account_id or account_id
-
         return Scope(
             cloud=ctx.cloud,
+            provider_partition=self._account.partition,
             billing_account_id=billing_account_id,
             account_id=account_id,
             region=region,
@@ -348,10 +315,7 @@ class RDSSnapshotsCleanupChecker:
 
     def _snapshot_arn(self, snap: dict, kind: str) -> str:
         # Prefer ARN directly from AWS response.
-        if kind == "db":
-            arn = snap.get("DBSnapshotArn")
-        else:
-            arn = snap.get("DBClusterSnapshotArn")
+        arn = snap.get("DBSnapshotArn") if kind == "db" else snap.get("DBClusterSnapshotArn")
         return str(arn or "")
 
     def _is_cross_region_snapshot(self, snap: dict, current_region: str, snapshot_arn: str) -> bool:
@@ -360,11 +324,9 @@ class RDSSnapshotsCleanupChecker:
         source_region = str(snap.get("SourceRegion") or "")
         if source_region and current_region and source_region != current_region:
             return True
-
         arn_region = _arn_region(snapshot_arn) if snapshot_arn else ""
         if arn_region and current_region and arn_region != current_region:
             return True
-
         return False
 
     # ---------- AWS listing helpers ----------
@@ -413,13 +375,5 @@ def _factory(ctx, bootstrap):
     price = _safe_float(bootstrap.get("rds_snapshot_gb_month_price_usd", 0.095), default=0.095)
     partition = str(bootstrap.get("aws_partition") or "aws")
 
-    account = AwsAccountContext(
-        account_id=account_id,
-        billing_account_id=billing_account_id,
-        partition=partition,
-    )
-    return RDSSnapshotsCleanupChecker(
-        account=account,
-        stale_days=stale_days,
-        snapshot_gb_month_price_usd=price,
-    )
+    account = AwsAccountContext(account_id=account_id, billing_account_id=billing_account_id, partition=partition)
+    return RDSSnapshotsCleanupChecker(account=account, stale_days=stale_days, snapshot_gb_month_price_usd=price)
