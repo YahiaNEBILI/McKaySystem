@@ -454,19 +454,3 @@ def example_run() -> None:
     # res.valid_findings is a list[dict] ready to be written as Parquet rows later
     # res.invalid_findings / res.invalid_errors give you data quality visibility
     _ = res
-
-
-"""
-Recommended folder layout (keeps it clean):
-
-finops/
-  contracts/
-    finops_contracts.py          # canonicalization + hashing + validation (your previous module)
-    finops_checker_pattern.py    # this file
-  checks/
-    aws/
-      ec2_graviton.py            # implements Checker
-      rds_idle.py
-      s3_lifecycle.py
-  runner.py                      # builds RunContext, runs checkers, hands results to writer pipeline later
-"""
