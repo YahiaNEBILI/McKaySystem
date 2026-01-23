@@ -104,7 +104,8 @@ def test_writer_writes_partitioned_parquet(tmp_path) -> None:
     assert parquet_files, "No parquet files written"
 
     # Sanity read with pyarrow
-    table = pq.read_table(parquet_files[0])
+    pf = pq.ParquetFile(parquet_files[0])
+    table = pf.read()
     assert table.num_rows == 1
     assert "tenant_id" in table.schema.names
     assert "finding_id" in table.schema.names

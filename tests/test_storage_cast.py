@@ -7,6 +7,7 @@ import pyarrow as pa
 import pytest
 
 from contracts.finops_contracts import build_ids_and_validate
+from contracts.finops_contracts import ValidationError
 from contracts.schema import FINOPS_FINDINGS_SCHEMA
 from contracts.storage_cast import cast_for_storage
 
@@ -131,7 +132,5 @@ def test_cast_rejects_invalid_decimal() -> None:
     wire = _minimal_wire_record()
     wire["estimated"]["monthly_savings"] = "not-a-number"
 
-    wire = build_ids_and_validate(wire, issue_key={"recommended_arch": "arm64"})
-
-    with pytest.raises(Exception):
-        _ = cast_for_storage(wire, FINOPS_FINDINGS_SCHEMA)
+    with pytest.raises(ValidationError):
+        _ = build_ids_and_validate(wire, issue_key={"recommended_arch": "arm64"})
