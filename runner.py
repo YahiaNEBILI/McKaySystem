@@ -170,15 +170,19 @@ def main(argv: Sequence[str]) -> int:
     session = boto3.Session()
     sts = session.client("sts")
     s3 = session.client("s3", config=SDK_CONFIG)
+    rds = session.client("rds", config=SDK_CONFIG)
 
     account_id = sts.get_caller_identity()["Account"]
 
-    services = Services(s3=s3)
+    services = Services(s3=s3, rds=rds)
 
     # Bootstrap is runtime data that checker factories may need.
     bootstrap: dict = {
         "aws_account_id": account_id,
         "aws_billing_account_id": account_id,
+        # Optional: configure RDS snapshot cleanup heuristics
+        # "rds_snapshot_stale_days": 30,
+        # "rds_snapshot_gb_month_price_usd": 0.095,
     }
 
     ctx = RunContext(

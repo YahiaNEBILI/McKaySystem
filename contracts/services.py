@@ -4,3 +4,4 @@ from typing import Any
 @dataclass(frozen=True)
 class Services:
     s3: Any
+    rds: Any | None = None
