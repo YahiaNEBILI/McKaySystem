@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Set
 
@@ -7,6 +8,12 @@ from botocore.exceptions import ClientError
 
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 from checks.registry import register_checker
+
+
+@dataclass(frozen=True)
+class AwsAccountContext:
+    account_id: str
+    billing_account_id: Optional[str] = None
 
 
 def _utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -21,6 +28,13 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _safe_region_from_client(rds_client) -> str:
+    try:
+        return str(getattr(getattr(rds_client, "meta", None), "region_name", "") or "")
+    except Exception:  # pragma: no cover
+        return ""
+
+
 class RDSSnapshotsCleanupChecker:
     """Detect old manual RDS snapshots and orphaned RDS snapshots.
 
@@ -32,7 +46,8 @@ class RDSSnapshotsCleanupChecker:
 
     checker_id = "aws.rds.snapshots.cleanup"
 
-    def __init__(self, *, stale_days: int = 30) -> None:
+    def __init__(self, *, account: AwsAccountContext, stale_days: int = 30) -> None:
+        self._account = account
         self._stale_days = stale_days
 
     def run(self, ctx) -> Iterable[FindingDraft]:
@@ -40,87 +55,127 @@ class RDSSnapshotsCleanupChecker:
             raise RuntimeError("RDSSnapshotsCleanupChecker requires ctx.services.rds")
 
         rds = ctx.services.rds
+        region = _safe_region_from_client(rds)
+
         now = _now_utc()
         cutoff = now - timedelta(days=self._stale_days)
 
+        # Inventory (best effort). If we can't list sources, emit a single INFO finding.
         try:
             instances = self._list_db_instances(rds)
             clusters = self._list_db_clusters(rds)
-        except ClientError:
-            return []
+        except ClientError as exc:
+            yield self._access_error_finding(ctx, region, "describe_db_instances/describe_db_clusters", exc)
+            return
 
+        # DB snapshots
         try:
-            for s in self._list_db_snapshots(rds):
-                yield from self._evaluate_db_snapshot(ctx, s, instances, clusters, cutoff)
-        except ClientError:
-            return []
+            for snap in self._list_db_snapshots(rds):
+                yield from self._evaluate_db_snapshot(ctx, snap, instances, cutoff, region)
+        except ClientError as exc:
+            yield self._access_error_finding(ctx, region, "describe_db_snapshots", exc)
+            return
 
+        # Cluster snapshots (Aurora)
         try:
-            for s in self._list_cluster_snapshots(rds):
-                yield from self._evaluate_cluster_snapshot(ctx, s, clusters, cutoff)
-        except ClientError:
-            return []
+            for snap in self._list_cluster_snapshots(rds):
+                yield from self._evaluate_cluster_snapshot(ctx, snap, clusters, cutoff, region)
+        except ClientError as exc:
+            yield self._access_error_finding(ctx, region, "describe_db_cluster_snapshots", exc)
+            return
+
+    # ---------- evaluation ----------
 
     def _evaluate_db_snapshot(
         self,
         ctx,
-        s: dict,
+        snap: dict,
         instances: Set[str],
-        clusters: Set[str],
         cutoff: datetime,
+        region: str,
     ) -> Iterable[FindingDraft]:
-        sid = s.get("DBSnapshotIdentifier") or ""
-        snapshot_type = (s.get("SnapshotType") or "").lower()
-        created = _utc(s.get("SnapshotCreateTime"))
+        sid = str(snap.get("DBSnapshotIdentifier") or "")
+        snapshot_type = str(snap.get("SnapshotType") or "").lower()
+        created = _utc(snap.get("SnapshotCreateTime"))
 
-        src_instance = s.get("DBInstanceIdentifier")
+        src_instance = snap.get("DBInstanceIdentifier")
         is_orphan = bool(src_instance and src_instance not in instances)
 
+        # Orphan wins (no duplicate findings).
         if is_orphan:
-            yield self._orphan_finding(ctx, sid, created, "rds_db_snapshot")
+            yield self._orphan_finding(ctx, sid, created, region, resource_type="rds_db_snapshot")
             return
 
+        # Old manual applies only to non-orphaned manual-ish snapshots
         if not snapshot_type.startswith("manual"):
             return
-
         if not created or created > cutoff:
             return
 
-        yield self._old_manual_finding(ctx, sid, created, "rds_db_snapshot")
+        yield self._old_manual_finding(ctx, sid, created, region, resource_type="rds_db_snapshot")
 
     def _evaluate_cluster_snapshot(
         self,
         ctx,
-        s: dict,
+        snap: dict,
         clusters: Set[str],
         cutoff: datetime,
+        region: str,
     ) -> Iterable[FindingDraft]:
-        sid = s.get("DBClusterSnapshotIdentifier") or ""
-        snapshot_type = (s.get("SnapshotType") or "").lower()
-        created = _utc(s.get("SnapshotCreateTime"))
+        sid = str(snap.get("DBClusterSnapshotIdentifier") or "")
+        snapshot_type = str(snap.get("SnapshotType") or "").lower()
+        created = _utc(snap.get("SnapshotCreateTime"))
 
-        src_cluster = s.get("DBClusterIdentifier")
+        src_cluster = snap.get("DBClusterIdentifier")
         is_orphan = bool(src_cluster and src_cluster not in clusters)
 
+        # Orphan wins (no duplicate findings).
         if is_orphan:
-            yield self._orphan_finding(ctx, sid, created, "rds_cluster_snapshot")
+            yield self._orphan_finding(ctx, sid, created, region, resource_type="rds_cluster_snapshot")
             return
 
+        # Old manual applies only to non-orphaned manual-ish snapshots
         if not snapshot_type.startswith("manual"):
             return
-
         if not created or created > cutoff:
             return
 
-        yield self._old_manual_finding(ctx, sid, created, "rds_cluster_snapshot")
+        yield self._old_manual_finding(ctx, sid, created, region, resource_type="rds_cluster_snapshot")
+
+    # ---------- findings ----------
+
+    def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
+        code = exc.response.get("Error", {}).get("Code", "ClientError")
+        return FindingDraft(
+            check_id="aws.rds.snapshots.access_error",
+            check_name="RDS snapshots access error",
+            category="inventory",
+            status="info",
+            severity=Severity(level="low", score=10),
+            title="Unable to list RDS snapshot inventory",
+            message=f"Failed to call {operation} ({code}). Some snapshot checks were skipped.",
+            recommendation="Grant rds:Describe* permissions to the scanner role and retry.",
+            scope=self._base_scope(
+                ctx,
+                region=region,
+                resource_type="rds_inventory",
+                resource_id=operation,
+                resource_arn="",
+            ),
+            issue_key={"operation": operation, "error": code},
+            estimated_monthly_savings="",
+            estimate_confidence=0,
+        )
 
     def _orphan_finding(
         self,
         ctx,
         snapshot_id: str,
         created: Optional[datetime],
+        region: str,
         resource_type: str,
     ) -> FindingDraft:
+        created_str = created.isoformat().replace("+00:00", "Z") if created else "unknown time"
         return FindingDraft(
             check_id="aws.rds.snapshots.orphaned",
             check_name="Orphaned RDS snapshot",
@@ -128,14 +183,11 @@ class RDSSnapshotsCleanupChecker:
             status="fail",
             severity=Severity(level="medium", score=60),
             title="RDS snapshot is orphaned",
-            message=f"Snapshot '{snapshot_id}' is not associated with any existing RDS resource.",
+            message=f"Snapshot '{snapshot_id}' appears orphaned (created {created_str}).",
             recommendation="Review and delete orphaned snapshots if they are no longer required.",
-            scope=Scope(
-                cloud=ctx.cloud,
-                billing_account_id="",
-                account_id="",
-                region=ctx.services.rds.meta.region_name,
-                service="AmazonRDS",
+            scope=self._base_scope(
+                ctx,
+                region=region,
                 resource_type=resource_type,
                 resource_id=snapshot_id,
                 resource_arn="",
@@ -150,6 +202,7 @@ class RDSSnapshotsCleanupChecker:
         ctx,
         snapshot_id: str,
         created: datetime,
+        region: str,
         resource_type: str,
     ) -> FindingDraft:
         return FindingDraft(
@@ -161,31 +214,47 @@ class RDSSnapshotsCleanupChecker:
             title="Manual RDS snapshot is old",
             message=(
                 f"Manual snapshot '{snapshot_id}' was created on "
-                f"{created.date().isoformat()} and exceeds retention."
+                f"{created.date().isoformat()} and exceeds retention ({self._stale_days}d)."
             ),
             recommendation="Delete old manual snapshots if they are no longer required.",
-            scope=Scope(
-                cloud=ctx.cloud,
-                billing_account_id="",
-                account_id="",
-                region=ctx.services.rds.meta.region_name,
-                service="AmazonRDS",
+            scope=self._base_scope(
+                ctx,
+                region=region,
                 resource_type=resource_type,
                 resource_id=snapshot_id,
                 resource_arn="",
             ),
-            issue_key={"manual_old": True},
+            issue_key={"manual_old": True, "stale_days": self._stale_days},
             estimated_monthly_savings="",
             estimate_confidence=0,
         )
+
+    def _base_scope(self, ctx, *, region: str, resource_type: str, resource_id: str, resource_arn: str) -> Scope:
+        # billing_account_id/account_id are required by your contract, so always populate.
+        account_id = self._account.account_id
+        billing_account_id = self._account.billing_account_id or account_id
+
+        return Scope(
+            cloud=ctx.cloud,
+            billing_account_id=billing_account_id,
+            account_id=account_id,
+            region=region,
+            service="AmazonRDS",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            resource_arn=resource_arn,
+        )
+
+    # ---------- AWS listing helpers ----------
 
     def _list_db_instances(self, rds) -> Set[str]:
         ids: Set[str] = set()
         paginator = rds.get_paginator("describe_db_instances")
         for page in paginator.paginate():
             for db in page.get("DBInstances", []):
-                if "DBInstanceIdentifier" in db:
-                    ids.add(db["DBInstanceIdentifier"])
+                ident = db.get("DBInstanceIdentifier")
+                if ident:
+                    ids.add(str(ident))
         return ids
 
     def _list_db_clusters(self, rds) -> Set[str]:
@@ -193,24 +262,32 @@ class RDSSnapshotsCleanupChecker:
         paginator = rds.get_paginator("describe_db_clusters")
         for page in paginator.paginate():
             for c in page.get("DBClusters", []):
-                if "DBClusterIdentifier" in c:
-                    ids.add(c["DBClusterIdentifier"])
+                ident = c.get("DBClusterIdentifier")
+                if ident:
+                    ids.add(str(ident))
         return ids
 
     def _list_db_snapshots(self, rds):
         paginator = rds.get_paginator("describe_db_snapshots")
         for page in paginator.paginate():
-            for s in page.get("DBSnapshots", []):
-                yield s
+            for snap in page.get("DBSnapshots", []):
+                yield snap
 
     def _list_cluster_snapshots(self, rds):
         paginator = rds.get_paginator("describe_db_cluster_snapshots")
         for page in paginator.paginate():
-            for s in page.get("DBClusterSnapshots", []):
-                yield s
+            for snap in page.get("DBClusterSnapshots", []):
+                yield snap
 
 
 @register_checker("checks.aws.rds_snapshots_cleanup:RDSSnapshotsCleanupChecker")
 def _factory(ctx, bootstrap):
+    account_id = str(bootstrap.get("aws_account_id") or "")
+    if not account_id:
+        raise RuntimeError("aws_account_id missing from bootstrap (required for RDSSnapshotsCleanupChecker)")
+
+    billing_account_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     stale_days = int(bootstrap.get("rds_snapshot_stale_days", 30))
-    return RDSSnapshotsCleanupChecker(stale_days=stale_days)
+
+    account = AwsAccountContext(account_id=account_id, billing_account_id=billing_account_id)
+    return RDSSnapshotsCleanupChecker(account=account, stale_days=stale_days)
