@@ -40,14 +40,13 @@ python runner.py --tenant acme --workspace prod --checker checks.aws.s3_lifecycl
 from __future__ import annotations
 
 import argparse
+import glob
 import importlib
+import os
 import pkgutil
 import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Sequence, Tuple
-
-import glob
-import os
 
 import boto3
 
@@ -56,6 +55,7 @@ from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
 from contracts.services import ServicesFactory, Services
 from infra.aws_config import SDK_CONFIG
+from infra.pipeline_paths import PipelinePaths
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
@@ -64,8 +64,8 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _has_parquet(globs: Sequence[str]) -> bool:
-    for g in globs:
+def _has_parquet(globs_list: Sequence[str]) -> bool:
+    for g in globs_list:
         if glob.glob(g, recursive=True):
             return True
     return False
@@ -142,8 +142,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
     parser.add_argument(
         "--out",
-        default="data/finops_findings",
-        help="Output base directory for finops_findings parquet dataset",
+        default="",
+        help="Output base directory for finops_findings parquet dataset "
+        "(default: infra.pipeline_paths.PipelinePaths.findings_raw_dir())",
     )
 
     parser.add_argument(
@@ -184,7 +185,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--correlation-out",
         default="",
-        help="Output base directory for correlated findings parquet dataset (default: <out>_correlated).",
+        help="Output base directory for correlated findings parquet dataset "
+        "(default: infra.pipeline_paths.PipelinePaths.findings_correlated_dir())",
     )
     parser.add_argument(
         "--correlation-threads",
@@ -257,32 +259,24 @@ def run_cost_enrichment_if_available(
       False -> enrichment skipped (CUR unavailable)
     """
     try:
-        from pipeline.cur.normalize_cur import (
-            CurNormalizeConfig,
-            normalize_cur,
-        )
-        from pipeline.cur.cost_enrich import (
-            CostEnrichConfig,
-            enrich_findings_with_cur,
-        )
+        from pipeline.cur.normalize_cur import CurNormalizeConfig, normalize_cur
+        from pipeline.cur.cost_enrich import CostEnrichConfig, enrich_findings_with_cur
     except Exception as exc:  # pragma: no cover
         print(f"[WARN] CUR enrichment unavailable (modules missing): {exc}")
         return False
 
-    # 1) Normalize CUR if raw files exist
     if _has_parquet(raw_cur_globs):
         print("[INFO] CUR raw files detected, normalizing...")
         normalize_cur(
             CurNormalizeConfig(
                 tenant_id=tenant_id,
                 input_globs=list(raw_cur_globs),
-                out_dir="data/cur_facts",
+                out_dir=str(PipelinePaths().cur_facts_dir()),
             )
         )
     else:
         print("[INFO] No raw CUR files detected, skipping normalization")
 
-    # 2) Enrich if we have normalized facts
     if not _has_parquet(cur_facts_globs):
         print("[INFO] No CUR facts available, skipping cost enrichment")
         return False
@@ -296,7 +290,6 @@ def run_cost_enrichment_if_available(
             out_dir=enriched_out_dir,
         )
     )
-
     return True
 
 
@@ -307,9 +300,6 @@ def _get_configured_regions() -> List[str]:
     Expected: AWS_REGIONS = ["eu-west-3", "us-east-1", ...]
     """
     try:
-        # This constant should be defined by you in infra/aws_config.py
-        # Example:
-        # AWS_REGIONS = ["eu-west-3", "eu-west-1"]
         from infra.aws_config import AWS_REGIONS  # type: ignore  # pylint: disable=import-error
     except Exception as exc:
         raise RuntimeError(
@@ -323,7 +313,6 @@ def _get_configured_regions() -> List[str]:
             "AWS_REGIONS is empty. Configure infra/aws_config.py with at least one region."
         )
 
-    # Deduplicate while preserving order
     seen = set()
     ordered: List[str] = []
     for r in regions:
@@ -392,6 +381,13 @@ def main(argv: Sequence[str]) -> int:
         print(f"SCHEMA_VERSION={SCHEMA_VERSION}")
         return 0
 
+    paths = PipelinePaths()
+
+    # Centralized defaults (CLI overrides still win)
+    raw_out_dir = args.out.strip() or str(paths.findings_raw_dir())
+    corr_out_dir = args.correlation_out.strip() or str(paths.findings_correlated_dir())
+    enriched_out_dir = str(paths.findings_enriched_dir())
+
     run_ts = _utc_now()
     run_id = _make_run_id(run_ts)
 
@@ -430,7 +426,6 @@ def main(argv: Sequence[str]) -> int:
     if not checker_specs:
         raise RuntimeError("No checkers selected to run (after exclusions).")
 
-    # --- Partition checkers: global (run once) vs regional (run per region) ---
     global_checkers, regional_specs = _partition_checkers_by_scope(
         checker_specs=checker_specs,
         ctx_control=ctx_control,
@@ -439,15 +434,13 @@ def main(argv: Sequence[str]) -> int:
 
     runner = CheckerRunner(finding_id_salt_mode=args.finding_id_mode)
 
-    # Writer is shared for the whole run (all regions).
     writer = FindingsParquetWriter(
         ParquetWriterConfig(
-            base_dir=args.out,
+            base_dir=raw_out_dir,
             drop_invalid_on_cast=bool(args.drop_invalid_on_cast),
         )
     )
 
-    # Aggregate stats
     total_valid = 0
     total_invalid_count = 0
     total_invalid_errors: List[str] = []
@@ -489,31 +482,32 @@ def main(argv: Sequence[str]) -> int:
     corr_stats: dict = {"enabled": False, "emitted": 0, "errors": 0, "out_dir": ""}
 
     if not args.no_correlation:
-        raw_glob = f"{args.out}/**/*.parquet"
-        corr_out = args.correlation_out.strip() or f"{args.out}_correlated"
+        raw_glob = paths.raw_findings_glob()
         corr_stats = _run_correlation_step(
             tenant_id=args.tenant,
             workspace_id=args.workspace,
             run_id=run_id,
             findings_glob=raw_glob,
-            out_dir=corr_out,
+            out_dir=corr_out_dir,
             threads=args.correlation_threads,
             finding_id_mode=args.finding_id_mode,
         )
-
 
     # --- Optional: CUR cost enrichment (best-effort) ---
     run_cost_enrichment_if_available(
         tenant_id=args.tenant,
         findings_globs=[
-            f"{args.out}/**/*.parquet",
-            f"{(args.correlation_out.strip() or f'{args.out}_correlated')}/**/*.parquet",
+            paths.raw_findings_glob(),
+            paths.correlated_findings_glob(),
         ],
-        raw_cur_globs=["data/raw_cur/**/*.parquet"],
-        cur_facts_globs=["data/cur_facts/**/*.parquet"],
-        enriched_out_dir="data/finops_findings_enriched",
+        raw_cur_globs=[
+            str(paths.cur_raw_dir() / "**/*.parquet"),
+        ],
+        cur_facts_globs=[
+            str(paths.cur_facts_dir() / "**/*.parquet"),
+        ],
+        enriched_out_dir=enriched_out_dir,
     )
-
 
     # --- Summary ---
     print("=== Run summary ===")
@@ -526,6 +520,10 @@ def main(argv: Sequence[str]) -> int:
     print(f"regions_configured: {len(regions)}")
     print(f"regions: {', '.join(regions)}")
     print(f"control_region: {control_region}")
+
+    print(f"out_raw: {raw_out_dir}")
+    print(f"out_correlated: {corr_out_dir}")
+    print(f"out_enriched: {enriched_out_dir}")
 
     print(f"checkers_selected: {len(checker_specs)}")
     print(f"global_checkers: {len(global_checkers)}")
@@ -573,7 +571,6 @@ def main(argv: Sequence[str]) -> int:
     if stats.written == 0 and stats.received > 0:
         return 2
 
-    # If correlation ran but had errors, return non-zero
     if corr_stats.get("enabled") and int(corr_stats.get("errors", 0)) > 0:
         return 3
 
