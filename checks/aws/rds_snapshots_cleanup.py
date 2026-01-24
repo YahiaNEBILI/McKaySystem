@@ -53,7 +53,6 @@ This checker is intended to be used by the FinOps engine runner and is
 registered via ``@register_checker`` for automatic discovery.
 """
 
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -66,7 +65,7 @@ from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
 
-SUPPRESS_TAG_KEYS = { "retain", "legal-hold", "backup-policy" }
+SUPPRESS_TAG_KEYS = {"retain", "legal-hold", "backup-policy"}
 
 
 @dataclass(frozen=True)
@@ -124,30 +123,44 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-class RDSSnapshotsCleanupChecker:
-    """Detect orphaned RDS snapshots and old manual RDS snapshots.
-
-    Rules:
-    - Orphan detection is evaluated first for ALL snapshots.
-    - If orphaned -> emit only the orphaned finding (no duplicates).
-    - Old snapshot detection applies ONLY to non-orphaned snapshots whose type startswith "manual".
-    - Cost estimation is approximate and emitted in structured fields:
-        * estimated_monthly_cost
-        * estimated_monthly_savings
-      (never embedded in message)
+def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
+    ctx: Any, region: str, default_price: float
+) -> tuple[float, str, int]:
     """
+    Returns: (usd_per_gb_month, notes, confidence)
+    """
+    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
+    if pricing is None:
+        return (default_price, "PricingService unavailable; using default price.", 30)
+
+    try:
+        quote = pricing.rds_backup_storage_gb_month(region=region)
+    except Exception:
+        quote = None
+
+    if quote is None:
+        return (default_price, "Pricing lookup failed/unknown; using default price.", 30)
+
+    return (
+        float(quote.unit_price_usd),
+        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
+        60 if quote.source == "cache" else 70,
+    )
+
+
+class RDSSnapshotsCleanupChecker:
+    """Detect orphaned RDS snapshots and old manual RDS snapshots."""
 
     checker_id = "aws.rds.snapshots.cleanup"
 
     def _extract_tags(self, snap: dict) -> dict[str, str]:
-        tags = {}
+        tags: dict[str, str] = {}
         for t in snap.get("TagList", []) or []:
             key = str(t.get("Key") or "").strip().lower()
             val = str(t.get("Value") or "").strip().lower()
             if key:
                 tags[key] = val
         return tags
-
 
     def _should_suppress(self, tags: dict[str, str]) -> bool:
         # If tag key exists with any value → suppress
@@ -179,6 +192,13 @@ class RDSSnapshotsCleanupChecker:
         region = _safe_region_from_client(rds)
         cutoff = _now_utc() - timedelta(days=self._stale_days)
 
+        # Resolve pricing once per run/region (fast + cached).
+        usd_per_gb_month, pricing_notes, pricing_conf = _resolve_rds_snapshot_storage_price_usd_per_gb_month(
+            ctx,
+            region,
+            default_price=float(self._snapshot_gb_month_price_usd),
+        )
+
         # Inventory (best effort). If we can't list sources, emit a single INFO finding and stop.
         try:
             instances = self._list_db_instances(rds)
@@ -190,7 +210,16 @@ class RDSSnapshotsCleanupChecker:
         # DB snapshots
         try:
             for snap in self._list_db_snapshots(rds):
-                yield from self._evaluate_db_snapshot(ctx, snap, instances, cutoff, region)
+                yield from self._evaluate_db_snapshot(
+                    ctx,
+                    snap,
+                    instances,
+                    cutoff,
+                    region,
+                    usd_per_gb_month,
+                    pricing_notes,
+                    pricing_conf,
+                )
         except ClientError as exc:
             yield self._access_error_finding(ctx, region, "describe_db_snapshots", exc)
             return
@@ -198,7 +227,16 @@ class RDSSnapshotsCleanupChecker:
         # Cluster snapshots (Aurora)
         try:
             for snap in self._list_cluster_snapshots(rds):
-                yield from self._evaluate_cluster_snapshot(ctx, snap, clusters, cutoff, region)
+                yield from self._evaluate_cluster_snapshot(
+                    ctx,
+                    snap,
+                    clusters,
+                    cutoff,
+                    region,
+                    usd_per_gb_month,
+                    pricing_notes,
+                    pricing_conf,
+                )
         except ClientError as exc:
             yield self._access_error_finding(ctx, region, "describe_db_cluster_snapshots", exc)
             return
@@ -212,6 +250,9 @@ class RDSSnapshotsCleanupChecker:
         instances: Set[str],
         cutoff: datetime,
         region: str,
+        usd_per_gb_month: float,
+        pricing_notes: str,
+        pricing_conf: int,
     ) -> Iterable[FindingDraft]:
         sid = str(snap.get("DBSnapshotIdentifier") or "")
         snapshot_type = str(snap.get("SnapshotType") or "").lower()
@@ -230,7 +271,13 @@ class RDSSnapshotsCleanupChecker:
             is_orphan = bool(src_instance and str(src_instance) not in instances)
 
         if is_orphan:
-            est = self._estimate_snapshot_cost_usd(snap, kind="db")
+            est = self._estimate_snapshot_cost_usd(
+                snap,
+                kind="db",
+                usd_per_gb_month=usd_per_gb_month,
+                pricing_notes=pricing_notes,
+                pricing_conf=pricing_conf,
+            )
             yield self._orphan_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est, tags)
             return
 
@@ -240,7 +287,13 @@ class RDSSnapshotsCleanupChecker:
         if not created or created > cutoff:
             return
 
-        est = self._estimate_snapshot_cost_usd(snap, kind="db")
+        est = self._estimate_snapshot_cost_usd(
+            snap,
+            kind="db",
+            usd_per_gb_month=usd_per_gb_month,
+            pricing_notes=pricing_notes,
+            pricing_conf=pricing_conf,
+        )
         yield self._old_manual_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est, tags)
 
     def _evaluate_cluster_snapshot(
@@ -250,6 +303,9 @@ class RDSSnapshotsCleanupChecker:
         clusters: Set[str],
         cutoff: datetime,
         region: str,
+        usd_per_gb_month: float,
+        pricing_notes: str,
+        pricing_conf: int,
     ) -> Iterable[FindingDraft]:
         sid = str(snap.get("DBClusterSnapshotIdentifier") or "")
         snapshot_type = str(snap.get("SnapshotType") or "").lower()
@@ -268,7 +324,13 @@ class RDSSnapshotsCleanupChecker:
             is_orphan = bool(src_cluster and str(src_cluster) not in clusters)
 
         if is_orphan:
-            est = self._estimate_snapshot_cost_usd(snap, kind="cluster")
+            est = self._estimate_snapshot_cost_usd(
+                snap,
+                kind="cluster",
+                usd_per_gb_month=usd_per_gb_month,
+                pricing_notes=pricing_notes,
+                pricing_conf=pricing_conf,
+            )
             yield self._orphan_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est, tags)
             return
 
@@ -278,31 +340,51 @@ class RDSSnapshotsCleanupChecker:
         if not created or created > cutoff:
             return
 
-        est = self._estimate_snapshot_cost_usd(snap, kind="cluster")
+        est = self._estimate_snapshot_cost_usd(
+            snap,
+            kind="cluster",
+            usd_per_gb_month=usd_per_gb_month,
+            pricing_notes=pricing_notes,
+            pricing_conf=pricing_conf,
+        )
         yield self._old_manual_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est, tags)
 
     # ---------- estimation ----------
 
-    def _estimate_snapshot_cost_usd(self, snap: dict, *, kind: str) -> Tuple[Optional[str], Optional[str], Optional[int], str]:
+    def _estimate_snapshot_cost_usd(
+        self,
+        snap: dict,
+        *,
+        kind: str,
+        usd_per_gb_month: float,
+        pricing_notes: str,
+        pricing_conf: int,
+    ) -> Tuple[Optional[str], Optional[str], Optional[int], str]:
         """Return (estimated_monthly_cost, estimated_monthly_savings, confidence, notes).
 
         We estimate storage cost for snapshots as:
-            allocated_storage_gb * price_per_gb_month
-
-        - For DB snapshots, AWS typically provides AllocatedStorage.
-        - For cluster snapshots (Aurora), AllocatedStorage is often missing; if missing -> unknown.
+            allocated_storage_gb * usd_per_gb_month
         """
         size_gb = _safe_float(snap.get("AllocatedStorage"), default=0.0)
         if size_gb <= 0.0:
             # Unknown sizing for many Aurora snapshots; avoid misleading 0.
             return (None, None, 10, f"Snapshot size unavailable for {kind} snapshot; cost not estimated.")
 
-        est_cost = float(size_gb) * float(self._snapshot_gb_month_price_usd)
+        est_cost = float(size_gb) * float(usd_per_gb_month)
         if est_cost <= 0.0:
             return (None, None, 10, f"Estimated cost <= 0 for {kind} snapshot; check pricing inputs.")
-        # Potential savings assumes deletion of the snapshot.
+
         money = _fmt_money_usd(est_cost)
-        return (money, money, 50, f"Estimated using AllocatedStorage={size_gb:.0f}GB and ${self._snapshot_gb_month_price_usd}/GB-month.")
+
+        # Base heuristic confidence is 50 (we only know storage, not requests/backup deltas).
+        confidence = 50
+
+        notes = (
+            f"{pricing_notes}; "
+            f"Estimated using AllocatedStorage={size_gb:.0f}GB and ${usd_per_gb_month}/GB-month."
+        )
+        # Potential savings assumes deletion of the snapshot.
+        return (money, money, confidence, notes)
 
     # ---------- findings ----------
 
@@ -334,7 +416,7 @@ class RDSSnapshotsCleanupChecker:
         resource_type: str,
         resource_arn: str,
         est: Tuple[Optional[str], Optional[str], Optional[int], str],
-        tags: dict[str, str]
+        tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         created_str = created.date().isoformat() if created else "unknown date"
@@ -365,7 +447,7 @@ class RDSSnapshotsCleanupChecker:
         resource_type: str,
         resource_arn: str,
         est: Tuple[Optional[str], Optional[str], Optional[int], str],
-        tags: dict[str, str]
+        tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         return FindingDraft(
@@ -407,13 +489,10 @@ class RDSSnapshotsCleanupChecker:
         )
 
     def _snapshot_arn(self, snap: dict, kind: str) -> str:
-        # Prefer ARN directly from AWS response.
         arn = snap.get("DBSnapshotArn") if kind == "db" else snap.get("DBClusterSnapshotArn")
         return str(arn or "")
 
     def _is_cross_region_snapshot(self, snap: dict, current_region: str, snapshot_arn: str) -> bool:
-        # Guards to reduce false positives:
-        # - Cross-region snapshot copies can reference identifiers that don't exist in this region.
         source_region = str(snap.get("SourceRegion") or "")
         if source_region and current_region and source_region != current_region:
             return True

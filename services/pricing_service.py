@@ -206,6 +206,63 @@ class PricingService:
     # Public helpers
     # -------------------------
 
+    def rds_backup_storage_gb_month(self, *, region: str) -> Optional[PriceQuote]:
+        """
+        Best-effort RDS backup/snapshot storage price per GB-month.
+
+        AWS Pricing can be a bit inconsistent depending on SKU/attributes, so we try
+        several filter sets and return the first match.
+
+        Returns unit "GB-Mo" (most common for storage).
+        """
+        location = self.location_for_region(region)
+        if not location:
+            return None
+
+        # Multiple attempts because Pricing catalog attributes can vary by partition/updates.
+        # All attempts are TERM_MATCH filters.
+        attempts: List[List[Dict[str, str]]] = [
+            # Attempt 1: product family only + location (broad)
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Database Storage"},
+            ],
+            # Attempt 2: group "RDS:BackupUsage" (sometimes used for backup/snapshot storage)
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Database Storage"},
+                {"Field": "group", "Value": "RDS:BackupUsage"},
+            ],
+            # Attempt 3: group "RDS:StorageUsage" (sometimes used)
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Database Storage"},
+                {"Field": "group", "Value": "RDS:StorageUsage"},
+            ],
+            # Attempt 4: explicit usageType strings (best-effort)
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Database Storage"},
+                {"Field": "usagetype", "Value": "RDS:BackupUsage"},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Database Storage"},
+                {"Field": "usagetype", "Value": "RDS:StorageUsage"},
+            ],
+        ]
+
+        for filters in attempts:
+            quote = self.get_on_demand_unit_price(
+                service_code="AmazonRDS",
+                filters=filters,
+                unit="GB-Mo",
+            )
+            if quote is not None:
+                return quote
+
+        return None
+
     def location_for_region(self, region: str) -> Optional[str]:
         return _REGION_TO_LOCATION.get(str(region or "").strip())
 
