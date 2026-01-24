@@ -46,6 +46,9 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Sequence, Tuple
 
+import glob
+import os
+
 import boto3
 
 import checks  # IMPORTANT: used for module discovery
@@ -59,6 +62,17 @@ from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSIO
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _has_parquet(globs: Sequence[str]) -> bool:
+    for g in globs:
+        if glob.glob(g, recursive=True):
+            return True
+    return False
+
+
+def _non_empty_dir(path: str) -> bool:
+    return os.path.isdir(path) and bool(glob.glob(f"{path}/**/*.parquet", recursive=True))
 
 
 def _make_run_id(run_ts: datetime) -> str:
@@ -225,6 +239,65 @@ def _run_correlation_step(
     if not isinstance(stats, dict):
         return {"enabled": True, "emitted": 0, "errors": 0, "out_dir": out_dir}
     return stats
+
+
+def run_cost_enrichment_if_available(
+    *,
+    tenant_id: str,
+    findings_globs: List[str],
+    raw_cur_globs: List[str],
+    cur_facts_globs: List[str],
+    enriched_out_dir: str,
+) -> bool:
+    """
+    Normalize CUR (if raw files exist) and enrich findings with actual costs.
+
+    Returns:
+      True  -> enriched dataset was produced / updated
+      False -> enrichment skipped (CUR unavailable)
+    """
+    try:
+        from pipeline.cur.normalize_cur import (
+            CurNormalizeConfig,
+            normalize_cur,
+        )
+        from pipeline.cur.cost_enrich import (
+            CostEnrichConfig,
+            enrich_findings_with_cur,
+        )
+    except Exception as exc:  # pragma: no cover
+        print(f"[WARN] CUR enrichment unavailable (modules missing): {exc}")
+        return False
+
+    # 1) Normalize CUR if raw files exist
+    if _has_parquet(raw_cur_globs):
+        print("[INFO] CUR raw files detected, normalizing...")
+        normalize_cur(
+            CurNormalizeConfig(
+                tenant_id=tenant_id,
+                input_globs=list(raw_cur_globs),
+                out_dir="data/cur_facts",
+            )
+        )
+    else:
+        print("[INFO] No raw CUR files detected, skipping normalization")
+
+    # 2) Enrich if we have normalized facts
+    if not _has_parquet(cur_facts_globs):
+        print("[INFO] No CUR facts available, skipping cost enrichment")
+        return False
+
+    print("[INFO] Enriching findings with actual costs from CUR")
+    enrich_findings_with_cur(
+        CostEnrichConfig(
+            tenant_id=tenant_id,
+            findings_globs=findings_globs,
+            cur_facts_globs=list(cur_facts_globs),
+            out_dir=enriched_out_dir,
+        )
+    )
+
+    return True
 
 
 def _get_configured_regions() -> List[str]:
@@ -427,6 +500,20 @@ def main(argv: Sequence[str]) -> int:
             threads=args.correlation_threads,
             finding_id_mode=args.finding_id_mode,
         )
+
+
+    # --- Optional: CUR cost enrichment (best-effort) ---
+    run_cost_enrichment_if_available(
+        tenant_id=args.tenant,
+        findings_globs=[
+            f"{args.out}/**/*.parquet",
+            f"{(args.correlation_out.strip() or f'{args.out}_correlated')}/**/*.parquet",
+        ],
+        raw_cur_globs=["data/raw_cur/**/*.parquet"],
+        cur_facts_globs=["data/cur_facts/**/*.parquet"],
+        enriched_out_dir="data/finops_findings_enriched",
+    )
+
 
     # --- Summary ---
     print("=== Run summary ===")

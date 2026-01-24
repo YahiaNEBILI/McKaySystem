@@ -1,214 +1,298 @@
-# FinOps SaaS – Prototype Architecture
+# FinOps SaaS – Architecture & Pipeline Overview
 
-This repository contains a **SaaS-grade FinOps prototype** designed to:
-- run FinOps checks on cloud resources
-- generate deterministic findings
-- store results in Parquet (Arrow-compatible)
-- query results with DuckDB
-- export JSON files for a Flask web application
+This repository contains a **SaaS-grade FinOps engine** designed to be:
 
-The project is intentionally **modular, testable, and scalable**, while remaining simple enough for fast iteration.
+- infra-native (resource-level first, not CUR-only)
+- deterministic and testable
+- scalable from local DuckDB to Iceberg/Trino
+- production-ready, while remaining hackable
+
+This README reflects the **current state of the system**, including:
+
+- multi-region execution
+- correlation engine
+- CUR normalization & cost enrichment
+- stress-testing and determinism guarantees
+- smart export for a Flask UI
 
 ---
 
 ## High-level architecture
 
 ```
-Checkers
-   |
-   v
-Runner
-   |
-   v
-Contract validation + IDs
-   |
-   v
-Storage cast (Arrow types)
-   |
-   v
-Parquet (finops_findings)
-   |
-   v
-DuckDB
-   |
-   v
-JSON export
-   |
-   v
-Flask WebApp
+┌────────────┐
+│  Checkers  │  (infra-native signals)
+└─────┬──────┘
+      │
+      ▼
+┌────────────┐
+│   Runner   │  (multi-region orchestration)
+└─────┬──────┘
+      │
+      ▼
+┌────────────┐
+│ Contracts  │  (validation, canonicalization, IDs)
+└─────┬──────┘
+      │
+      ▼
+┌────────────┐
+│ Parquet IO │  (Arrow-typed, partitioned)
+└─────┬──────┘
+      │
+      ├──────────────┐
+      ▼              ▼
+┌────────────┐  ┌───────────────┐
+│ Correlator │  │ CUR Enrichment │
+│ (DuckDB)  │  │ (actual cost)  │
+└─────┬──────┘  └──────┬────────┘
+      │               │
+      └──────┬────────┘
+             ▼
+        ┌──────────┐
+        │ DuckDB   │  (analytics layer)
+        └────┬─────┘
+             ▼
+        ┌──────────┐
+        │ JSON     │  (smart export)
+        └────┬─────┘
+             ▼
+        ┌──────────┐
+        │ Flask UI │
+        └──────────┘
 ```
 
 ---
 
-## Repository layout
+## Repository layout (current)
 
 ```
 .
-├── runner.py                  # Main entrypoint
-├── contracts/                 # Data contracts & validation
-│   ├── finops_contracts.py    # Canonicalization, hashing, validation
-│   ├── schema.py              # PyArrow canonical schema
-│   ├── storage_cast.py        # Wire → Arrow storage casting
-│   ├── finops_checker_pattern.py
-│   └── __init__.py
+├── runner.py                    # Main orchestration entrypoint
+├── contracts/                   # Canonical schema & validation
+│   ├── schema.py                # Arrow schema (source of truth)
+│   ├── finops_contracts.py      # Canonicalization & hashing
+│   ├── storage_cast.py          # Wire → Arrow casting
+│   └── finops_checker_pattern.py
 │
-├── checks/                    # FinOps checkers
+├── checks/                      # FinOps checkers (signals)
 │   └── aws/
-│       └── ec2_graviton.py    # Example checker
+│       ├── ec2_graviton.py
+│       ├── ebs_storage.py
+│       ├── rds_snapshots_cleanup.py
+│       └── ...
 │
 ├── pipeline/
-│   ├── writer_parquet.py      # Parquet writer (partitioned, typed)
-│   ├── export_json.py         # DuckDB → JSON exporter
+│   ├── writer_parquet.py        # Typed, partitioned Parquet writer
+│   ├── correlation/             # Correlation engine (DuckDB SQL)
+│   │   ├── engine.py
+│   │   ├── ruleset.py
+│   │   └── correlate_findings.py
+│   ├── cur/                     # CUR pipeline
+│   │   ├── normalize_cur.py     # CUR → cost_facts
+│   │   └── cost_enrich.py       # Findings ← actual costs
+│   ├── export_json.py           # DuckDB → JSON (smart export)
 │   └── __init__.py
 │
-├── tests/                     # Pytest suite
+├── tests/                       # Extensive pytest suite
+│   ├── stress/                  # Determinism & scale tests
+│   ├── test_writer_parquet.py
 │   ├── test_storage_cast.py
-│   └── test_writer_parquet.py
+│   └── ...
 │
 ├── data/
-│   └── finops_findings/       # Generated Parquet data
+│   ├── finops_findings/          # Raw findings (Parquet)
+│   ├── finops_findings_correlated/
+│   ├── finops_findings_enriched/
+│   ├── raw_cur/                  # Raw CUR parquet inputs
+│   └── cur_facts/                # Normalized cost facts
 │
-├── webapp_data/               # Generated JSON files for Flask
+├── webapp_data/                  # Flask-consumable JSON
 │   ├── findings.json
 │   ├── summary.json
-│   └── top_savings.json
+│   ├── top_savings.json
+│   ├── correlated_findings.json
+│   └── coverage.json
 │
-├── pytest.ini
-├── pyproject.toml
-└── README.md
+├── README.md
+└── pyproject.toml
 ```
 
 ---
 
-## Core concepts
+## Core design principles
 
-### Wire vs Storage format
+### 1. Infra-native first (not CUR-first)
 
-The system uses **two explicit representations**:
-
-| Layer | Purpose | Types |
-|-----|--------|------|
-| Wire | Internal processing, JSON | strings, empty strings allowed |
-| Storage | Parquet / analytics | Decimal, datetime, date, None |
-
-Before writing Parquet, every record **must be cast** using the Arrow schema.
+- Findings are emitted **from infrastructure APIs** (EC2, RDS, S3, …)
+- CUR is **enrichment**, not the primary signal
+- This avoids CUR latency and missing-resource blind spots
 
 ---
 
-### Deterministic identity
+### 2. Deterministic identity & reproducibility
 
 Each finding has:
-- **fingerprint** → logical identity (same issue, same resource)
-- **finding_id** → storage identity (salted or stable)
 
-This enables:
-- deduplication
-- lifecycle tracking
-- safe reprocessing
+- `fingerprint` → logical identity (same issue, same scope)
+- `finding_id` → storage identity (stable / per-run / per-day)
 
----
-
-## Running the pipeline
-
-### 1. Run a checker
-
-```powershell
-python runner.py ^
-  --tenant acme ^
-  --workspace prod ^
-  --checker checks.aws.ec2_graviton:EC2GravitonChecker ^
-  --out data/finops_findings
-```
-
-This generates Parquet files under:
-
-```
-data/finops_findings/
-  tenant_id=acme/
-    run_date=YYYY-MM-DD/
-      part-*.parquet
-```
+Guarantees:
+- idempotent re-runs
+- safe correlation
+- stress-testing under shuffle / reordering
 
 ---
 
-### 2. Export JSON for the web app
+### 3. Wire vs Storage separation
 
-```powershell
-python -c "
-from pipeline.export_json import ExportConfig, run_export
-cfg = ExportConfig(
-    findings_globs=[
-        "data/finops_findings/**/*.parquet",
-        "data/finops_findings_correlated/**/*.parquet",
-    ],
-    tenant_id='xxx',
-    out_dir='webapp_data'
-)
-run_export(cfg)
-"
+| Layer | Purpose | Characteristics |
+|-----|--------|-----------------|
+| Wire | Runtime objects | permissive, strings |
+| Storage | Parquet | strict Arrow schema |
+
+Every finding **must** pass contract validation and storage casting before persistence.
+
+---
+
+## Correlation engine
+
+The correlation engine:
+
+- runs **after** raw findings are written
+- uses DuckDB SQL rules
+- emits **meta-findings** (still first-class findings)
+
+Characteristics:
+- deterministic SQL validation
+- rule-scoped prefiltering
+- source fingerprint tracking
+- correlation findings can be enriched with cost later
+
+Correlation output:
 ```
-
-This produces:
-
-```
-webapp_data/
-  findings.json
-  summary.json
-  top_savings.json
+data/finops_findings_correlated/
 ```
 
 ---
 
-## Testing
+## CUR pipeline (actual cost attribution)
 
-Run all tests:
+### 1. Raw CUR input
 
-```powershell
-python -m pytest -q
+Expected location:
+```
+data/raw_cur/**/*.parquet
 ```
 
-The tests validate:
-- contract enforcement
-- Arrow schema compatibility
-- Parquet writing correctness
+Files may be:
+- Athena CTAS outputs
+- Glue job outputs
+- any Parquet with standard CUR columns
 
 ---
 
-## Why this architecture works
+### 2. Normalization (`normalize_cur.py`)
 
-- **Strict contracts** prevent data corruption
-- **Arrow + Parquet** ensure scalability
-- **DuckDB** enables fast local analytics
-- **JSON export** decouples backend from UI
-- **Deterministic IDs** enable SaaS features (lifecycle, history)
+Transforms CUR into a stable analytical table:
 
-This architecture scales naturally to:
-- CUR attribution
-- KPI gold tables
-- live APIs
-- Iceberg / Trino backends
+```
+cur_facts
+  - tenant_id
+  - account_id
+  - region
+  - service
+  - resource_id
+  - usage_start
+  - cost_primary
+  - tags (MAP)
+```
 
----
+Output:
+```
+data/cur_facts/
+```
 
-## Next steps
-
-Planned evolutions:
-- CUR attribution (actual cost)
-- KPI materialization (gold tables)
-- Flask / FastAPI API
-- lifecycle state persistence
-- multi-tenant scheduling
+Schema drift tolerant, partitioned, deterministic.
 
 ---
 
-## Philosophy
+### 3. Cost enrichment (`cost_enrich.py`)
 
-> **Be liberal at the edges, strict at the core.**
+Enriches findings with:
+- `actual.cost_7d / 30d / mtd / prev_month`
+- attribution method & confidence
 
-Fast iteration for developers, strong guarantees for data.
+Matching tiers:
+1. Exact resource match (high confidence)
+2. Scoped roll-up (fallback)
+
+Output:
+```
+data/finops_findings_enriched/
+```
+
+CUR is **optional**: the pipeline never fails if CUR is missing.
 
 ---
 
-## License
+## Stress testing & determinism
 
-Internal prototype – all rights reserved.
+The test suite validates:
+
+- deterministic outputs under input shuffle
+- Arrow schema merge safety
+- large dataset behavior
+- correlation id stability
+
+This ensures the engine behaves correctly under SaaS-scale workloads.
+To run the stress test : 
+
+```bash
+python tools.stress.stress_engine --n 200000 --workdir .stress --clean
+```
+
+---
+
+## Export layer (Flask-ready)
+
+`export_json.py`:
+
+- reads Parquet via DuckDB
+- **auto-selects enriched dataset if present**
+- exports:
+  - findings.json
+  - summary.json
+  - top_savings.json
+  - correlated_findings.json
+  - coverage.json (cost availability)
+
+This fully decouples backend evolution from the UI.
+
+---
+
+## Typical end-to-end run
+
+```bash
+python runner.py --tenant acme --workspace prod
+python export_findings.py
+```
+
+If CUR data exists, costs appear automatically. If not, the UI degrades gracefully.
+Flow is :
+data/raw_cur/**/*.parquet
+        ↓ normalize
+data/cur_facts/**/*.parquet
+        ↓ enrich
+data/finops_findings_enriched/**/*.parquet
+
+---
+
+## Why this architecture scales
+
+- Arrow + Parquet → analytics-grade
+- DuckDB → fast local compute
+- Deterministic IDs → SaaS lifecycle tracking
+- CUR as enrichment → accurate but optional
+- Modular pipeline → Iceberg / Trino ready
+
+---

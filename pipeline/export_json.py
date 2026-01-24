@@ -51,13 +51,38 @@ class ExportConfig:
 
 
 class FinOpsJsonExporter:
+    """
+    Export parquet findings datasets to JSON files for the Flask app.
+
+    Behavior:
+      - If an enriched dataset exists (data/finops_findings_enriched/**/*.parquet),
+        and the caller is exporting the standard raw/correlated datasets, the exporter
+        automatically switches to the enriched dataset.
+      - Always exports: findings.json, summary.json, top_savings.json, coverage.json
+      - Optionally exports: correlated_findings.json
+    """
+
+    ENRICHED_GLOB = "data/finops_findings_enriched/**/*.parquet"
+    STANDARD_RAW_GLOB = "data/finops_findings/**/*.parquet"
+    STANDARD_CORR_GLOB = "data/finops_findings_correlated/**/*.parquet"
+
     def __init__(self, cfg: ExportConfig) -> None:
         self.cfg = cfg
         self.con = duckdb.connect(":memory:")
         self.con.execute("PRAGMA threads=4;")
         self.con.execute("PRAGMA enable_progress_bar=false;")
 
-        self._files = self._expand_globs_to_files(self._effective_globs())
+        globs = self._effective_globs()
+
+        # If enriched exists and caller is exporting standard datasets, prefer enriched.
+        if (self.ENRICHED_GLOB not in globs) and self._glob_has_files(self.ENRICHED_GLOB):
+            standard = {self.STANDARD_RAW_GLOB, self.STANDARD_CORR_GLOB}
+            if any(g in standard for g in globs):
+                print("[export_json] enriched dataset detected, using it for export")
+                globs = [self.ENRICHED_GLOB]
+
+        self._globs_used = globs
+        self._files = self._expand_globs_to_files(globs)
         if not self._files:
             raise ValueError("No parquet files matched findings_glob(s). Check your paths/globs.")
 
@@ -74,6 +99,10 @@ class FinOpsJsonExporter:
         if str(self.cfg.findings_glob).strip():
             return [str(self.cfg.findings_glob).strip()]
         raise ValueError("ExportConfig must set findings_glob or findings_globs")
+
+    @staticmethod
+    def _glob_has_files(glob_pattern: str) -> bool:
+        return bool(_glob.glob(glob_pattern, recursive=True))
 
     @staticmethod
     def _expand_globs_to_files(globs: List[str]) -> List[str]:
@@ -194,6 +223,40 @@ class FinOpsJsonExporter:
         cols = [d[0] for d in cur.description]
         self._write_json("top_savings.json", _rows_to_jsonable(cols, rows))
 
+    def export_coverage(self) -> None:
+        sql = """
+        WITH findings_all AS (
+            SELECT * FROM read_parquet(?, union_by_name=true)
+        ),
+        base AS (
+            SELECT
+                *,
+                (actual.cost_30d IS NOT NULL) AS has_actual_cost
+            FROM findings_all
+            WHERE tenant_id = ?
+        )
+        SELECT
+            count(*) AS findings_total,
+            sum(CASE WHEN has_actual_cost THEN 1 ELSE 0 END) AS findings_with_actual_cost,
+            round(
+                100.0 * sum(CASE WHEN has_actual_cost THEN 1 ELSE 0 END) / NULLIF(count(*), 0),
+                2
+            ) AS actual_cost_coverage_pct
+        FROM base;
+        """
+        cur = self.con.execute(sql, [self._files, self.cfg.tenant_id])
+        row = cur.fetchone() or (0, 0, 0.0)
+
+        enriched_used = any("finops_findings_enriched" in g for g in getattr(self, "_globs_used", []))
+        payload = {
+            "tenant_id": self.cfg.tenant_id,
+            "dataset": "enriched" if enriched_used else "raw_union",
+            "findings_total": int(row[0] or 0),
+            "findings_with_actual_cost": int(row[1] or 0),
+            "actual_cost_coverage_pct": float(row[2] or 0.0),
+        }
+        self._write_json("coverage.json", payload)
+
     def export_correlated_findings(self) -> None:
         sql = """
         WITH findings_all AS (
@@ -223,12 +286,14 @@ class FinOpsJsonExporter:
             estimated.monthly_cost AS est_monthly_cost,
             estimated.monthly_savings AS est_monthly_savings,
             estimated.confidence AS est_confidence,
+            actual.cost_30d AS actual_cost_30d,
+            actual.attribution.method AS attribution_method,
             source.source_ref AS source_ref
         FROM findings_all
         WHERE tenant_id = ?
           AND source.source_ref LIKE 'correlation:%'
         ORDER BY run_ts DESC
-        LIMIT ?;
+        LIMIT ?
         """
         cur = self.con.execute(sql, [self._files, self.cfg.tenant_id, self.cfg.limit_findings])
         rows = cur.fetchall()
@@ -254,6 +319,7 @@ def run_export(cfg: ExportConfig) -> None:
         exporter.export_findings()
         exporter.export_summary()
         exporter.export_top_savings()
+        exporter.export_coverage()
         if cfg.export_correlated:
             exporter.export_correlated_findings()
     finally:
