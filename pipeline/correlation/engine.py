@@ -62,6 +62,8 @@ import duckdb
 from contracts.finops_contracts import build_ids_and_validate, normalize_str
 from pipeline.writer_parquet import ParquetWriterConfig, FindingsParquetWriter
 
+from .contracts import CorrelationRule
+
 
 class CorrelationError(RuntimeError):
     """Raised when correlation execution fails."""
@@ -108,30 +110,6 @@ class CorrelationConfig:
 
     # Safety
     fail_fast: bool = True  # if False, keep going on rule failures and record errors
-
-
-@dataclass(frozen=True)
-class CorrelationRule:
-    """
-    A correlation rule expressed as SQL.
-
-    required_check_ids is used to pre-filter findings for scan reduction.
-
-    The SQL runs against a view named `rule_input` (created by the engine),
-    and should return 1 row == 1 *meta finding*.
-
-    Recommended that SQL returns:
-      - source_fingerprints (LIST(VARCHAR)) or source_fingerprint (VARCHAR)
-        so we can build stable issue_key for deterministic fingerprinting.
-
-    If SQL does not provide source fingerprints, the engine will still emit a finding,
-    but dedup stability is weaker.
-    """
-    rule_id: str
-    name: str
-    required_check_ids: Sequence[str]
-    sql: str
-    enabled: bool = True
 
 
 @dataclass

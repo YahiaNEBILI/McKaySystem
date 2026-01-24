@@ -22,29 +22,10 @@ Why this exists:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-
-# ---- Keep this type identical to your engine expectation ----
-
-@dataclass(frozen=True)
-class CorrelationRule:
-    """
-    A correlation rule expressed as SQL.
-
-    required_check_ids is used to pre-filter findings for scan reduction.
-
-    The SQL runs against a view named `rule_input` (created by the engine),
-    and should return 1 row == 1 *meta finding*.
-    """
-    rule_id: str
-    name: str
-    required_check_ids: Sequence[str]
-    sql: str
-    enabled: bool = True
-
+from .contracts import CorrelationRule
 
 # ---- SQL header parsing ----
 
