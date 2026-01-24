@@ -50,7 +50,7 @@ ATTRIBUTION_STRUCT = pa.struct([
 # A standardized severity model (string is flexible; keep numeric for sorting)
 SEVERITY_STRUCT = pa.struct([
     pa.field("level", pa.string()),              # "info"|"low"|"medium"|"high"|"critical"
-    pa.field("score", pa.uint16()),              # 0..1000 (or 0..100)
+    pa.field("score", pa.uint16()),              # 0..1000
 ])
 
 # Status lifecycle (helps dedup + long term tracking)

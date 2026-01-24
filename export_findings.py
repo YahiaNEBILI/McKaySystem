@@ -5,7 +5,7 @@ cfg = ExportConfig(
         "data/finops_findings/**/*.parquet",
         "data/finops_findings_correlated/**/*.parquet",
     ],
-    tenant_id="xxx",
+    tenant_id="engie",
     out_dir="webapp_data",
 )
 

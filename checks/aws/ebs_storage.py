@@ -3,15 +3,16 @@ checks/aws/ebs_storage.py
 
 EBS storage optimization checker (DI-friendly, FindingDraft-based).
 
-Signals:
+Signals (cost):
 1) Unattached EBS volumes older than N days
 2) gp2 -> gp3 migration candidates (storage-only savings estimate; fallback pricing)
 3) Old EBS snapshots older than N days NOT referenced by any AMI (tag suppress supported)
+    + guardrails to skip AWS Backup-managed snapshots (tag/description patterns)
 
-Notes:
-- Uses ctx.services.ec2 (injected by runner).
-- Does NOT build final dict records and does NOT call build_ids_and_validate().
-  The CheckerRunner does that.
+Signals (governance):
+4) Unencrypted EBS volumes
+5) Unencrypted EBS snapshots
+    + guardrails to skip AWS Backup-managed snapshots
 
 Caveat:
 - This checker runs in the single region configured for ctx.services.ec2.
@@ -69,6 +70,8 @@ class EBSStorageConfig:
 # Pricing (fallback-only for now)
 # -----------------------------
 
+# Conservative USD/GB-month defaults.
+# If you later inject a Pricing client into Services, replace this with a cached lookup.
 _FALLBACK_USD_PER_GB_MONTH: Dict[str, float] = {
     "gp2": 0.10,
     "gp3": 0.08,
@@ -128,6 +131,29 @@ def _is_suppressed(tags: Mapping[str, str], cfg: EBSStorageConfig) -> bool:
     return False
 
 
+def _is_aws_backup_snapshot(snapshot: Mapping[str, Any], tags: Mapping[str, str]) -> bool:
+    """
+    Guardrail: AWS Backup-managed snapshots should not be recommended for deletion/copy actions
+    by this generic checker, to avoid breaking backup plans / compliance.
+    """
+    # Most reliable: aws:backup:* tags
+    for k in tags.keys():
+        if str(k).strip().lower().startswith("aws:backup:"):
+            return True
+
+    # Common value hints
+    for v in tags.values():
+        if isinstance(v, str) and "aws backup" in v.lower():
+            return True
+
+    # Description hint (fallback)
+    desc = snapshot.get("Description")
+    if isinstance(desc, str) and "aws backup" in desc.lower():
+        return True
+
+    return False
+
+
 def _region_from_ec2(ec2: Any) -> str:
     region = getattr(getattr(ec2, "meta", None), "region_name", None)
     return str(region or "")
@@ -140,6 +166,9 @@ def _paginate(paginator: Any, **kwargs: Any) -> Iterable[Mapping[str, Any]]:
 
 
 def _collect_ami_snapshot_ids(ec2: Any) -> Set[str]:
+    """
+    Collect snapshot IDs referenced by self-owned AMIs (strong false-positive guardrail).
+    """
     referenced: Set[str] = set()
     paginator = ec2.get_paginator("describe_images")
     for page in _paginate(paginator, Owners=["self"]):
@@ -166,6 +195,7 @@ def _scope(ctx: RunContext, account_id: str, region: str, service: str, resource
 
 
 def _money_str(val: float) -> str:
+    # Stored as string for decimal-friendly upstream.
     return f"{val:.6f}"
 
 
@@ -191,7 +221,9 @@ class EBSStorageChecker(Checker):
         now_ts = _utc_now()
         cfg = self._cfg
 
-        # 1) Unattached volumes
+        # =========================================================
+        # COST: 1) Unattached volumes older than N days
+        # =========================================================
         check_id = "aws.ec2.ebs.unattached_volume"
         emitted = 0
 
@@ -204,6 +236,7 @@ class EBSStorageChecker(Checker):
 
                 attachments = vol.get("Attachments") or []
                 state = str(vol.get("State") or "").lower()
+                # "available" + no attachments => unattached
                 if attachments or state not in ("available", ""):
                     continue
 
@@ -223,7 +256,11 @@ class EBSStorageChecker(Checker):
                 size_gb = int(vol.get("Size") or 0)
 
                 monthly_cost = float(size_gb) * _usd_per_gb_month(vol_type)
-                sev = Severity(level="medium", score=700) if monthly_cost < 50.0 else Severity(level="high", score=850)
+                severity = (
+                    Severity(level="medium", score=700)
+                    if monthly_cost < 50.0
+                    else Severity(level="high", score=850)
+                )
 
                 yield FindingDraft(
                     check_id=check_id,
@@ -231,20 +268,31 @@ class EBSStorageChecker(Checker):
                     category="cost",
                     sub_category="storage",
                     status="fail",
-                    severity=sev,
+                    severity=severity,
                     title=f"Unattached EBS volume {vol_id} ({size_gb} GB {vol_type})",
                     message=(
                         f"Volume {vol_id} is unattached (state={state}) and appears idle for ~{age_days} days. "
                         f"Estimated storage cost ≈ ${monthly_cost:.2f}/month (fallback pricing)."
                     ),
                     recommendation="Delete if unused, or attach to an instance. If unsure, snapshot then delete.",
-                    scope=_scope(ctx, self._account_id, region, "AmazonEC2", "ebs_volume", vol_id),
+                    scope=_scope(
+                        ctx,
+                        account_id=self._account_id,
+                        region=region,
+                        service="AmazonEC2",
+                        resource_type="ebs_volume",
+                        resource_id=vol_id,
+                    ),
                     estimated_monthly_cost=_money_str(monthly_cost),
                     estimated_monthly_savings=_money_str(monthly_cost),
                     estimate_confidence=55,
                     estimate_notes="Uses conservative fallback pricing (Pricing client not injected).",
                     tags=tags,
-                    dimensions={"volume_type": vol_type, "size_gb": str(size_gb), "age_days": str(age_days)},
+                    dimensions={
+                        "volume_type": vol_type,
+                        "size_gb": str(size_gb),
+                        "age_days": str(age_days),
+                    },
                     issue_key={"check_id": check_id, "volume_id": vol_id},
                 )
 
@@ -254,7 +302,9 @@ class EBSStorageChecker(Checker):
             if emitted >= cfg.max_findings_per_type:
                 break
 
-        # 2) gp2 -> gp3 candidates (storage-only)
+        # =========================================================
+        # COST: 2) gp2 -> gp3 migration candidates (storage-only)
+        # =========================================================
         check_id = "aws.ec2.ebs.gp2_to_gp3"
         gp2_price = _usd_per_gb_month("gp2")
         gp3_price = _usd_per_gb_month("gp3")
@@ -292,12 +342,23 @@ class EBSStorageChecker(Checker):
                             f"Estimated savings ≈ ${monthly_savings:.2f}/month (storage-only; fallback pricing)."
                         ),
                         recommendation="Modify the EBS volume to gp3 and validate required IOPS/throughput settings.",
-                        scope=_scope(ctx, self._account_id, region, "AmazonEC2", "ebs_volume", vol_id),
+                        scope=_scope(
+                            ctx,
+                            account_id=self._account_id,
+                            region=region,
+                            service="AmazonEC2",
+                            resource_type="ebs_volume",
+                            resource_id=vol_id,
+                        ),
                         estimated_monthly_savings=_money_str(monthly_savings),
                         estimate_confidence=50,
-                        estimate_notes="Storage-only estimate using fallback pricing (excludes gp3 add-ons).",
+                        estimate_notes="Storage-only estimate using fallback pricing (excludes gp3 IOPS/throughput add-ons).",
                         tags=tags,
-                        dimensions={"size_gb": str(size_gb), "source_volume_type": "gp2", "target_volume_type": "gp3"},
+                        dimensions={
+                            "size_gb": str(size_gb),
+                            "source_volume_type": "gp2",
+                            "target_volume_type": "gp3",
+                        },
                         issue_key={"check_id": check_id, "volume_id": vol_id},
                     )
 
@@ -307,7 +368,10 @@ class EBSStorageChecker(Checker):
                 if emitted >= cfg.max_findings_per_type:
                     break
 
-        # 3) Old snapshots not referenced by AMIs
+        # =========================================================
+        # COST: 3) Old snapshots not referenced by AMIs
+        #      + AWS Backup guardrail
+        # =========================================================
         check_id = "aws.ec2.ebs.old_snapshot"
         cutoff = now_ts - timedelta(days=int(cfg.snapshot_old_age_days))
 
@@ -333,14 +397,25 @@ class EBSStorageChecker(Checker):
                 tags = _tags_to_dict(snap.get("Tags") or [])
                 if _is_suppressed(tags, cfg):
                     continue
+
+                # Guardrail: AWS Backup-managed snapshots are not "cleanup candidates" here.
+                if _is_aws_backup_snapshot(snap, tags):
+                    continue
+
+                # Guardrail: referenced by AMIs
                 if referenced_by_ami and snap_id in referenced_by_ami:
                     continue
 
                 size_gb = int(snap.get("VolumeSize") or 0)
                 age_days = _days_ago(start_time, now_ts)
 
+                # Conservative: approximate snapshot as full GB-month at gp2 (overestimates, but safe).
                 monthly_cost = float(size_gb) * _usd_per_gb_month("gp2")
-                sev = Severity(level="low", score=450) if monthly_cost < 20.0 else Severity(level="medium", score=650)
+                severity = (
+                    Severity(level="low", score=450)
+                    if monthly_cost < 20.0
+                    else Severity(level="medium", score=650)
+                )
 
                 yield FindingDraft(
                     check_id=check_id,
@@ -348,14 +423,21 @@ class EBSStorageChecker(Checker):
                     category="cost",
                     sub_category="storage",
                     status="fail",
-                    severity=sev,
+                    severity=severity,
                     title=f"Old EBS snapshot {snap_id} (~{size_gb} GB, {age_days} days)",
                     message=(
                         f"Snapshot {snap_id} is older than {cfg.snapshot_old_age_days} days and is not referenced by any AMI "
                         f"in this account/region. Approx. cost ≈ ${monthly_cost:.2f}/month (fallback, conservative)."
                     ),
                     recommendation="Review retention needs. If not required, delete the snapshot to reduce storage cost.",
-                    scope=_scope(ctx, self._account_id, region, "AmazonEC2", "ebs_snapshot", snap_id),
+                    scope=_scope(
+                        ctx,
+                        account_id=self._account_id,
+                        region=region,
+                        service="AmazonEC2",
+                        resource_type="ebs_snapshot",
+                        resource_id=snap_id,
+                    ),
                     estimated_monthly_cost=_money_str(monthly_cost),
                     estimated_monthly_savings=_money_str(monthly_cost),
                     estimate_confidence=40,
@@ -366,6 +448,133 @@ class EBSStorageChecker(Checker):
                         "volume_size_gb": str(size_gb),
                         "age_days": str(age_days),
                         "referenced_by_ami": "false",
+                        "aws_backup_managed": "false",
+                    },
+                    issue_key={"check_id": check_id, "snapshot_id": snap_id},
+                )
+
+                emitted += 1
+                if emitted >= cfg.max_findings_per_type:
+                    break
+            if emitted >= cfg.max_findings_per_type:
+                break
+
+        # =========================================================
+        # GOVERNANCE: 4) Unencrypted volumes
+        # =========================================================
+        check_id = "aws.ec2.ebs.volume_unencrypted"
+        emitted = 0
+
+        paginator = ec2.get_paginator("describe_volumes")
+        for page in _paginate(paginator):
+            for vol in page.get("Volumes", []) or []:
+                vol_id = str(vol.get("VolumeId") or "")
+                if not vol_id:
+                    continue
+
+                if vol.get("Encrypted") is True:
+                    continue
+
+                tags = _tags_to_dict(vol.get("Tags") or [])
+                if _is_suppressed(tags, cfg):
+                    continue
+
+                size_gb = int(vol.get("Size") or 0)
+                vol_type = str(vol.get("VolumeType") or "unknown")
+
+                yield FindingDraft(
+                    check_id=check_id,
+                    check_name="Unencrypted EBS volume",
+                    category="governance",
+                    sub_category="encryption",
+                    status="fail",
+                    severity=Severity(level="high", score=900),
+                    title=f"Unencrypted EBS volume {vol_id}",
+                    message=f"EBS volume {vol_id} ({size_gb} GB, {vol_type}) is not encrypted at rest.",
+                    recommendation=(
+                        "Create a snapshot, copy it with encryption enabled, then create a new encrypted volume "
+                        "and replace the original volume."
+                    ),
+                    scope=_scope(
+                        ctx,
+                        account_id=self._account_id,
+                        region=region,
+                        service="AmazonEC2",
+                        resource_type="ebs_volume",
+                        resource_id=vol_id,
+                    ),
+                    estimate_confidence=100,
+                    estimate_notes="Encryption is a binary compliance requirement.",
+                    tags=tags,
+                    dimensions={
+                        "volume_type": vol_type,
+                        "size_gb": str(size_gb),
+                        "encrypted": "false",
+                    },
+                    issue_key={"check_id": check_id, "volume_id": vol_id},
+                )
+
+                emitted += 1
+                if emitted >= cfg.max_findings_per_type:
+                    break
+            if emitted >= cfg.max_findings_per_type:
+                break
+
+        # =========================================================
+        # GOVERNANCE: 5) Unencrypted snapshots
+        #            + AWS Backup guardrail
+        # =========================================================
+        check_id = "aws.ec2.ebs.snapshot_unencrypted"
+        emitted = 0
+
+        paginator = ec2.get_paginator("describe_snapshots")
+        for page in _paginate(paginator, OwnerIds=["self"]):
+            for snap in page.get("Snapshots", []) or []:
+                snap_id = str(snap.get("SnapshotId") or "")
+                if not snap_id:
+                    continue
+
+                if snap.get("Encrypted") is True:
+                    continue
+
+                tags = _tags_to_dict(snap.get("Tags") or [])
+                if _is_suppressed(tags, cfg):
+                    continue
+
+                # Guardrail: do not flag AWS Backup-managed snapshots here (usually governed elsewhere).
+                if _is_aws_backup_snapshot(snap, tags):
+                    continue
+
+                size_gb = int(snap.get("VolumeSize") or 0)
+
+                yield FindingDraft(
+                    check_id=check_id,
+                    check_name="Unencrypted EBS snapshot",
+                    category="governance",
+                    sub_category="encryption",
+                    status="fail",
+                    severity=Severity(level="medium", score=750),
+                    title=f"Unencrypted EBS snapshot {snap_id}",
+                    message=f"EBS snapshot {snap_id} (~{size_gb} GB) is not encrypted at rest.",
+                    recommendation=(
+                        "Copy the snapshot with encryption enabled, then delete the unencrypted snapshot "
+                        "if it is no longer required."
+                    ),
+                    scope=_scope(
+                        ctx,
+                        account_id=self._account_id,
+                        region=region,
+                        service="AmazonEC2",
+                        resource_type="ebs_snapshot",
+                        resource_id=snap_id,
+                    ),
+                    estimate_confidence=100,
+                    estimate_notes="Encryption is a binary compliance requirement.",
+                    tags=tags,
+                    dimensions={
+                        "volume_size_gb": str(size_gb),
+                        "encrypted": "false",
+                        "aws_backup_managed": "false",
                     },
                     issue_key={"check_id": check_id, "snapshot_id": snap_id},
                 )
@@ -378,7 +587,7 @@ class EBSStorageChecker(Checker):
 
 
 # -----------------------------
-# Registry factory
+# Registry wiring
 # -----------------------------
 
 
