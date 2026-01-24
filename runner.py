@@ -517,6 +517,10 @@ def main(argv: Sequence[str]) -> int:
         enriched_out_dir=enriched_out_dir,
     )
 
+    # --- Environment ---
+    logger.info("python: %s", sys.version.replace("\n", " "))
+    logger.info("cwd: %s", os.getcwd())
+
     # --- Summary ---
     logger.info("=== Run summary ===")
     logger.info("tenant: %s", args.tenant)
@@ -574,6 +578,10 @@ def main(argv: Sequence[str]) -> int:
         logger.info("--- Sample storage cast errors (storage boundary) ---")
         for e in stats.cast_errors[:10]:
             logger.info("- %s", e)
+
+    # --- Error counts ---
+    logger.info("validation_errors_count: %s", len(total_invalid_errors))
+    logger.info("cast_errors_count: %s", len(stats.cast_errors or []))
 
     # Non-zero exit code if nothing was written but we did receive records
     if stats.written == 0 and stats.received > 0:
