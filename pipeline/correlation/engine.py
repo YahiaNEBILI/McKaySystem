@@ -58,6 +58,9 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+import json
+import traceback
+
 import duckdb
 
 from contracts.finops_contracts import build_ids_and_validate, normalize_str
@@ -125,7 +128,8 @@ class CorrelationStats:
     emitted_by_rule: Dict[str, int] = field(default_factory=dict)
     timings_by_rule: Dict[str, Dict[str, float]] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
-
+    errors_by_rule: Dict[str, str] = field(default_factory=dict)
+    report_path: str = ""
 
 # -------------------------------
 # Engine
@@ -212,8 +216,36 @@ class CorrelationEngine:
                 except Exception as exc:  # pylint: disable=broad-except
                     msg = f"[{rule.rule_id}] {exc}"
                     stats.errors.append(msg)
+                    stats.errors_by_rule[rule.rule_id] = str(exc)
+
+                    err_txt = self._safe_exc_text(exc)
+                    self._write_text(
+                        Path(cfg.out_dir) / "_errors" / f"{rule.rule_id}.log",
+                        err_txt,
+                    )
+
                     if cfg.fail_fast:
                         raise CorrelationError(msg) from exc
+                    
+            report = {
+                "tenant_id": cfg.tenant_id,
+                "workspace_id": cfg.workspace_id,
+                "run_id": cfg.run_id,
+                "findings_glob": cfg.findings_glob,
+                "out_dir": cfg.out_dir,
+                "threads": cfg.threads,
+                "rules_total": stats.rules_total,
+                "rules_enabled": stats.rules_enabled,
+                "emitted": stats.emitted,
+                "emitted_by_rule": stats.emitted_by_rule,
+                "timings_by_rule": stats.timings_by_rule,
+                "errors": stats.errors,
+                "errors_by_rule": stats.errors_by_rule,
+            }
+            report_path = Path(cfg.out_dir) / "correlation_report.json"
+            report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+            stats.report_path = str(report_path)
+
             return stats
 
         finally:
@@ -235,6 +267,15 @@ class CorrelationEngine:
                 continue
             lines.append(line)
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _write_text(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _safe_exc_text(exc: Exception) -> str:
+        return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
     @classmethod
     def _normalize_single_statement(cls, sql: str) -> str:
@@ -390,6 +431,14 @@ class CorrelationEngine:
               ON b.check_id = r.check_id
             """
         )
+
+        try:
+            desc_rows = con.execute("DESCRIBE rule_input").fetchall()
+            desc_txt = "\n".join([f"{r[0]}\t{r[1]}" for r in desc_rows])
+            self._write_text(Path(cfg.out_dir) / "_debug" / f"{rule.rule_id}.rule_input_schema.tsv", desc_txt)
+        except Exception:
+            # never fail the run on debug output
+            pass
 
         timings["setup_ms"] = (perf_counter() - t0) * 1000.0
 

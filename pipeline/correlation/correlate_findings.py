@@ -103,6 +103,7 @@ def run_correlation(
         "emitted": stats.emitted,
         "errors": errors_count,
         "out_dir": out_dir,
+        "report_path": getattr(stats, "report_path", ""),
     }
 
 
