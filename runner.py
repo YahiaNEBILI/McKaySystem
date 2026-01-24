@@ -45,6 +45,7 @@ import importlib
 import os
 import pkgutil
 import sys
+import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Sequence, Tuple
 
@@ -55,10 +56,12 @@ from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
 from contracts.services import ServicesFactory, Services
 from infra.aws_config import SDK_CONFIG
+from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
+logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -225,7 +228,10 @@ def _run_correlation_step(
             run_correlation,
         )
     except Exception as exc:  # pragma: no cover
-        print(f"[WARN] Correlation step skipped: pipeline/correlate_findings.py not available ({exc})")
+        logger.warning(
+            "Correlation step skipped: pipeline/correlate_findings.py not available (%s)",
+            exc,
+        )
         return {"enabled": False, "emitted": 0, "errors": 0, "out_dir": out_dir}
 
     stats = run_correlation(
@@ -262,11 +268,11 @@ def run_cost_enrichment_if_available(
         from pipeline.cur.normalize_cur import CurNormalizeConfig, normalize_cur
         from pipeline.cur.cost_enrich import CostEnrichConfig, enrich_findings_with_cur
     except Exception as exc:  # pragma: no cover
-        print(f"[WARN] CUR enrichment unavailable (modules missing): {exc}")
+        logger.warning("CUR enrichment unavailable (modules missing): %s", exc)
         return False
 
     if _has_parquet(raw_cur_globs):
-        print("[INFO] CUR raw files detected, normalizing...")
+        logger.info("CUR raw files detected, normalizing...")
         normalize_cur(
             CurNormalizeConfig(
                 tenant_id=tenant_id,
@@ -275,13 +281,13 @@ def run_cost_enrichment_if_available(
             )
         )
     else:
-        print("[INFO] No raw CUR files detected, skipping normalization")
+        logger.info("No raw CUR files detected, skipping normalization")
 
     if not _has_parquet(cur_facts_globs):
-        print("[INFO] No CUR facts available, skipping cost enrichment")
+        logger.info("No CUR facts available, skipping cost enrichment")
         return False
 
-    print("[INFO] Enriching findings with actual costs from CUR")
+    logger.info("Enriching findings with actual costs from CUR")
     enrich_findings_with_cur(
         CostEnrichConfig(
             tenant_id=tenant_id,
@@ -380,6 +386,8 @@ def main(argv: Sequence[str]) -> int:
         print(f"RULEPACK_VERSION={RULEPACK_VERSION}")
         print(f"SCHEMA_VERSION={SCHEMA_VERSION}")
         return 0
+    
+    setup_logging(extra_fields={"app": "mckay", "component": "runner"})
 
     paths = PipelinePaths()
 
@@ -510,62 +518,62 @@ def main(argv: Sequence[str]) -> int:
     )
 
     # --- Summary ---
-    print("=== Run summary ===")
-    print(f"tenant: {args.tenant}")
-    print(f"workspace: {args.workspace}")
-    print(f"cloud: {args.cloud}")
-    print(f"run_id: {run_id}")
-    print(f"run_ts: {run_ts.astimezone(timezone.utc).isoformat().replace('+00:00','Z')}")
+    logger.info("=== Run summary ===")
+    logger.info("tenant: %s", args.tenant)
+    logger.info("workspace: %s", args.workspace)
+    logger.info("cloud: %s", args.cloud)
+    logger.info("run_id: %s", run_id)
+    logger.info("run_ts: %s", run_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
 
-    print(f"regions_configured: {len(regions)}")
-    print(f"regions: {', '.join(regions)}")
-    print(f"control_region: {control_region}")
+    logger.info("regions_configured: %s", len(regions))
+    logger.info("regions: %s", ", ".join(regions))
+    logger.info("control_region: %s", control_region)
 
-    print(f"out_raw: {raw_out_dir}")
-    print(f"out_correlated: {corr_out_dir}")
-    print(f"out_enriched: {enriched_out_dir}")
+    logger.info("out_raw: %s", raw_out_dir)
+    logger.info("out_correlated: %s", corr_out_dir)
+    logger.info("out_enriched: %s", enriched_out_dir)
 
-    print(f"checkers_selected: {len(checker_specs)}")
-    print(f"global_checkers: {len(global_checkers)}")
-    print(f"regional_checkers: {len(regional_specs)}")
+    logger.info("checkers_selected: %s", len(checker_specs))
+    logger.info("global_checkers: %s", len(global_checkers))
+    logger.info("regional_checkers: %s", len(regional_specs))
 
     if per_region_valid:
-        print("--- Findings per region ---")
+        logger.info("--- Findings per region ---")
         for r in regions:
-            print(f"{r}: {per_region_valid.get(r, 0)}")
+            logger.info("%s: %s", r, per_region_valid.get(r, 0))
 
-    print(f"engine_name: {ENGINE_NAME}")
-    print(f"engine_version: {ENGINE_VERSION}")
-    print(f"rulepack_version: {RULEPACK_VERSION}")
-    print(f"schema_version: {SCHEMA_VERSION}")
+    logger.info("engine_name: %s", ENGINE_NAME)
+    logger.info("engine_version: %s", ENGINE_VERSION)
+    logger.info("rulepack_version: %s", RULEPACK_VERSION)
+    logger.info("schema_version: %s", SCHEMA_VERSION)
 
-    print(f"valid_findings: {total_valid}")
-    print(f"invalid_findings: {total_invalid_count}")
+    logger.info("valid_findings: %s", total_valid)
+    logger.info("invalid_findings: %s", total_invalid_count)
 
-    print(f"writer_received: {stats.received}")
-    print(f"writer_written: {stats.written}")
-    print(f"writer_dropped_cast_errors: {stats.dropped_cast_errors}")
+    logger.info("writer_received: %s", stats.received)
+    logger.info("writer_written: %s", stats.written)
+    logger.info("writer_dropped_cast_errors: %s", stats.dropped_cast_errors)
 
     # Correlation summary
     if corr_stats.get("enabled"):
-        print("--- Correlation ---")
-        print(f"correlation_out: {corr_stats.get('out_dir', '')}")
-        print(f"correlation_rules_enabled: {corr_stats.get('rules_enabled', '')}")
-        print(f"correlation_emitted: {corr_stats.get('emitted', 0)}")
-        print(f"correlation_errors: {corr_stats.get('errors', 0)}")
+        logger.info("--- Correlation ---")
+        logger.info("correlation_out: %s", corr_stats.get("out_dir", ""))
+        logger.info("correlation_rules_enabled: %s", corr_stats.get("rules_enabled", ""))
+        logger.info("correlation_emitted: %s", corr_stats.get("emitted", 0))
+        logger.info("correlation_errors: %s", corr_stats.get("errors", 0))
     else:
-        print("--- Correlation ---")
-        print("correlation: disabled/skipped")
+        logger.info("--- Correlation ---")
+        logger.info("correlation: disabled/skipped")
 
     if total_invalid_errors:
-        print("\n--- Sample validation errors (contract layer) ---")
+        logger.info("--- Sample validation errors (contract layer) ---")
         for e in total_invalid_errors[:10]:
-            print(f"- {e}")
+            logger.info("- %s", e)
 
     if stats.cast_errors:
-        print("\n--- Sample storage cast errors (storage boundary) ---")
+        logger.info("--- Sample storage cast errors (storage boundary) ---")
         for e in stats.cast_errors[:10]:
-            print(f"- {e}")
+            logger.info("- %s", e)
 
     # Non-zero exit code if nothing was written but we did receive records
     if stats.written == 0 and stats.received > 0:
