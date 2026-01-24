@@ -4,22 +4,30 @@ checks/aws/rds_instances_optimizations.py
 RDS Instances Optimization Checker
 =================================
 
-This checker emits multiple infra-native FinOps signals for Amazon RDS DB instances:
+Emits infra-native FinOps / governance signals for Amazon RDS DB instances:
 
 1) Stopped instances with storage cost
-2) Storage overprovisioned (CloudWatch FreeStorageSpace)
+2) Storage overprovisioned (CloudWatch FreeStorageSpace, p95)
 3) Multi-AZ enabled on non-production (tag-based)
 4) Old-generation instance family (e.g., db.m3, db.m4, db.t2)
-5) Engine needs upgrade:
+5) Engine needs upgrade (policy):
    - MySQL: 5.6 or 5.7
    - Postgres: 9 / 10 / 11
+6) Unused read replicas (batched CloudWatch GetMetricData):
+   - sustained near-zero ReadIOPS (p95 under threshold)
+   - optional suppression tags for DR/reporting/analytics/migration
+
+Performance Notes
+-----------------
+Metric collection uses CloudWatch GetMetricData with batching (up to 500 metric queries per call)
+and a coarse period (default 1 day) to keep the pipeline fast and scalable.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from botocore.exceptions import ClientError
 
@@ -32,6 +40,19 @@ _NONPROD_VALUES = {
 _ENV_TAG_KEYS = {"env", "environment", "Environment"}
 
 _OLD_FAMILIES = {"m1", "m2", "m3", "m4", "r3", "r4", "t1", "t2", "x1"}
+
+# Suppression tags for replica checks (treat as intent flags; conservative to avoid false positives)
+_REPLICA_PURPOSE_KEYS = {"purpose", "role", "usage", "workload", "service", "component"}
+_REPLICA_PURPOSE_VALUES = {
+    "failover",
+    "disaster-recovery",
+    "disasterrecovery",
+    "reporting",
+    "analytics",
+    "migration",
+}
+_GENERIC_SUPPRESS_KEYS = {"retain", "do_not_delete", "donotdelete", "keep"}
+_GENERIC_SUPPRESS_VALUES = {"1", "true", "yes", "y"}
 
 
 @dataclass(frozen=True)
@@ -135,6 +156,138 @@ def _postgres_needs_upgrade(engine: str, engine_version: str) -> bool:
     return major in {9, 10, 11}
 
 
+def _is_aurora_engine(engine: str) -> bool:
+    return "aurora" in (engine or "").lower()
+
+
+def _tag_suppresses_replica_check(tags: Dict[str, str]) -> bool:
+    # Any explicit keep/retain flags
+    for k, v in tags.items():
+        kk = str(k or "").strip().lower()
+        vv = str(v or "").strip().lower()
+        if kk in _GENERIC_SUPPRESS_KEYS and vv in _GENERIC_SUPPRESS_VALUES:
+            return True
+
+    # Purpose/role tags indicating intended replica usage
+    for k, v in tags.items():
+        kk = str(k or "").strip().lower()
+        vv = str(v or "").strip().lower()
+        if kk in _REPLICA_PURPOSE_KEYS and vv.replace("_", "-") in _REPLICA_PURPOSE_VALUES:
+            return True
+        if kk in _REPLICA_PURPOSE_KEYS and vv in _REPLICA_PURPOSE_VALUES:
+            return True
+    return False
+
+
+class _CloudWatchBatchMetrics:
+    """
+    Fetch per-instance time series metrics using CloudWatch GetMetricData in large batches.
+
+    Returns raw values for each instance so caller can compute percentiles and apply rules.
+    """
+
+    def __init__(self, cw: Any) -> None:
+        self._cw = cw
+        # Cache within a run: (metric, stat, period, start_iso, end_iso, instance_id) -> values
+        self._cache: Dict[Tuple[str, str, int, str, str, str], List[float]] = {}
+
+    def fetch_values_by_instance(
+        self,
+        *,
+        namespace: str,
+        metric_name: str,
+        stat: str,
+        period: int,
+        start: datetime,
+        end: datetime,
+        instance_ids: Sequence[str],
+    ) -> Dict[str, List[float]]:
+        start_key = start.isoformat()
+        end_key = end.isoformat()
+
+        results: Dict[str, List[float]] = {}
+        to_query: List[str] = []
+
+        for iid in instance_ids:
+            key = (metric_name, stat, period, start_key, end_key, iid)
+            cached = self._cache.get(key)
+            if cached is not None:
+                results[iid] = list(cached)
+            else:
+                to_query.append(iid)
+
+        if not to_query:
+            return results
+
+        # Build metric queries, 1 query per instance (keep query count low).
+        # Max 500 per call; we batch at 400 for safer payload sizing.
+        batch_size = 400
+        for i in range(0, len(to_query), batch_size):
+            batch = to_query[i : i + batch_size]
+            metric_data_queries: List[Dict[str, Any]] = []
+            id_to_instance: Dict[str, str] = {}
+
+            for idx, iid in enumerate(batch):
+                qid = f"m{idx}"
+                id_to_instance[qid] = iid
+                metric_data_queries.append(
+                    {
+                        "Id": qid,
+                        "MetricStat": {
+                            "Metric": {
+                                "Namespace": namespace,
+                                "MetricName": metric_name,
+                                "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": iid}],
+                            },
+                            "Period": period,
+                            "Stat": stat,
+                        },
+                        "ReturnData": True,
+                    }
+                )
+
+            next_token: Optional[str] = None
+            # Paginate GetMetricData if needed
+            while True:
+                kwargs: Dict[str, Any] = {
+                    "MetricDataQueries": metric_data_queries,
+                    "StartTime": start,
+                    "EndTime": end,
+                    "ScanBy": "TimestampAscending",
+                }
+                if next_token:
+                    kwargs["NextToken"] = next_token
+
+                resp = self._cw.get_metric_data(**kwargs)
+                for r in resp.get("MetricDataResults", []) or []:
+                    qid = str(r.get("Id") or "")
+                    iid = id_to_instance.get(qid)
+                    if not iid:
+                        continue
+                    vals = r.get("Values", []) or []
+                    numbers: List[float] = []
+                    for v in vals:
+                        if isinstance(v, (int, float)):
+                            numbers.append(float(v))
+                    # Merge pages: append
+                    results.setdefault(iid, []).extend(numbers)
+
+                next_token = resp.get("NextToken")
+                if not next_token:
+                    break
+
+        # Write to cache
+        for iid, vals in results.items():
+            key = (metric_name, stat, period, start_key, end_key, iid)
+            self._cache[key] = list(vals)
+
+        # Ensure all requested instance_ids appear in dict (maybe empty)
+        for iid in instance_ids:
+            results.setdefault(iid, [])
+
+        return results
+
+
 class RDSInstancesOptimizationsChecker:
     checker_id = "aws.rds.instances.optimizations"
 
@@ -144,14 +297,25 @@ class RDSInstancesOptimizationsChecker:
         account: AwsAccountContext,
         storage_gb_month_price_usd: float = 0.115,
         storage_window_days: int = 14,
+        storage_period_seconds: int = 86400,
         overprov_used_ratio_threshold: float = 0.40,
         overprov_min_excess_gb: float = 20.0,
+        replica_unused_window_days: int = 14,
+        replica_period_seconds: int = 86400,
+        replica_read_iops_p95_threshold: float = 0.1,
+        replica_min_datapoints: int = 7,  # at least ~1 week with daily period
     ) -> None:
         self._account = account
         self._storage_gb_month_price_usd = float(storage_gb_month_price_usd)
         self._storage_window_days = int(storage_window_days)
+        self._storage_period_seconds = int(storage_period_seconds)
         self._overprov_used_ratio_threshold = float(overprov_used_ratio_threshold)
         self._overprov_min_excess_gb = float(overprov_min_excess_gb)
+
+        self._replica_unused_window_days = int(replica_unused_window_days)
+        self._replica_period_seconds = int(replica_period_seconds)
+        self._replica_read_iops_p95_threshold = float(replica_read_iops_p95_threshold)
+        self._replica_min_datapoints = int(replica_min_datapoints)
 
     def run(self, ctx) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
@@ -167,8 +331,97 @@ class RDSInstancesOptimizationsChecker:
             yield self._access_error(region, "describe_db_instances", exc)
             return
 
+        # Pre-fetch metrics in batches for performance.
+        metric_fetcher: Optional[_CloudWatchBatchMetrics] = _CloudWatchBatchMetrics(cw) if cw is not None else None
+
+        # Build lists for metric queries
+        ids_for_storage: List[str] = []
+        ids_for_replicas: List[str] = []
+
+        inst_by_id: Dict[str, Dict[str, Any]] = {}
+        tags_by_id: Dict[str, Dict[str, str]] = {}
+
         for inst in instances:
-            yield from self._evaluate_instance(ctx, rds, cw, inst, region)
+            instance_id = str(inst.get("DBInstanceIdentifier") or "")
+            if not instance_id:
+                continue
+            inst_by_id[instance_id] = inst
+
+            arn = str(inst.get("DBInstanceArn") or "")
+            try:
+                tags = self._list_tags(rds, arn)
+            except ClientError:
+                tags = {}
+            tags_by_id[instance_id] = tags
+
+            allocated_gb = float(inst.get("AllocatedStorage") or 0.0)
+            if metric_fetcher is not None and allocated_gb > 0:
+                ids_for_storage.append(instance_id)
+
+            # Candidate for replica unused check
+            if metric_fetcher is not None and self._is_read_replica(inst) and not _is_aurora_engine(str(inst.get("Engine") or "")):
+                if not _tag_suppresses_replica_check(tags):
+                    status = str(inst.get("DBInstanceStatus") or "").lower()
+                    if status == "available":
+                        # Avoid very new replicas (creation time may be absent in some fakes)
+                        created = inst.get("InstanceCreateTime")
+                        if isinstance(created, datetime):
+                            if created.replace(tzinfo=created.tzinfo or timezone.utc) > (_now_utc() - timedelta(days=7)):
+                                continue
+                        ids_for_replicas.append(instance_id)
+
+        storage_metrics: Dict[str, List[float]] = {}
+        replica_read_iops: Dict[str, List[float]] = {}
+        replica_connections: Dict[str, List[float]] = {}
+
+        if metric_fetcher is not None and ids_for_storage:
+            end = _now_utc()
+            start = end - timedelta(days=self._storage_window_days)
+            storage_metrics = metric_fetcher.fetch_values_by_instance(
+                namespace="AWS/RDS",
+                metric_name="FreeStorageSpace",
+                stat="Average",
+                period=self._storage_period_seconds,
+                start=start,
+                end=end,
+                instance_ids=ids_for_storage,
+            )
+
+        if metric_fetcher is not None and ids_for_replicas:
+            end = _now_utc()
+            start = end - timedelta(days=self._replica_unused_window_days)
+            replica_read_iops = metric_fetcher.fetch_values_by_instance(
+                namespace="AWS/RDS",
+                metric_name="ReadIOPS",
+                stat="Average",
+                period=self._replica_period_seconds,
+                start=start,
+                end=end,
+                instance_ids=ids_for_replicas,
+            )
+            # Connections is optional evidence; never required to trigger.
+            replica_connections = metric_fetcher.fetch_values_by_instance(
+                namespace="AWS/RDS",
+                metric_name="DatabaseConnections",
+                stat="Average",
+                period=self._replica_period_seconds,
+                start=start,
+                end=end,
+                instance_ids=ids_for_replicas,
+            )
+
+        # Evaluate instance-level checks
+        for instance_id, inst in inst_by_id.items():
+            tags = tags_by_id.get(instance_id, {})
+            yield from self._evaluate_instance(
+                ctx=ctx,
+                inst=inst,
+                tags=tags,
+                region=region,
+                free_storage_values=storage_metrics.get(instance_id, []),
+                replica_read_iops_values=replica_read_iops.get(instance_id, []),
+                replica_conn_values=replica_connections.get(instance_id, []),
+            )
 
     def _list_db_instances(self, rds: Any) -> Iterator[Dict[str, Any]]:
         paginator = rds.get_paginator("describe_db_instances")
@@ -183,22 +436,28 @@ class RDSInstancesOptimizationsChecker:
         resp = rds.list_tags_for_resource(ResourceName=arn)
         return _extract_tags(resp.get("TagList", []) or [])
 
+    def _is_read_replica(self, inst: Dict[str, Any]) -> bool:
+        # On replicas, this key is typically present.
+        src = inst.get("ReadReplicaSourceDBInstanceIdentifier")
+        if src:
+            return True
+        # Some cases have ReadReplicaDBInstanceIdentifiers on primary, not the replica.
+        return False
+
     def _evaluate_instance(
         self,
-        ctx,
-        rds: Any,
-        cw: Any,
+        *,
+        ctx: Any,
         inst: Dict[str, Any],
+        tags: Dict[str, str],
         region: str,
+        free_storage_values: Sequence[float],
+        replica_read_iops_values: Sequence[float],
+        replica_conn_values: Sequence[float],
     ) -> Iterable[FindingDraft]:
         instance_id = str(inst.get("DBInstanceIdentifier") or "")
         arn = str(inst.get("DBInstanceArn") or "")
         partition = _arn_partition(arn) or self._account.partition
-
-        try:
-            tags = self._list_tags(rds, arn)
-        except ClientError:
-            tags = {}
 
         scope = Scope(
             cloud="aws",
@@ -245,15 +504,14 @@ class RDSInstancesOptimizationsChecker:
                 tags=tags,
             ).with_issue(check="stopped_storage", db_instance=instance_id)
 
-        # 2) storage_overprovisioned (CloudWatch)
-        if cw is not None and allocated_gb > 0:
-            overprov = self._storage_overprovisioned(
-                cw=cw,
-                db_instance_id=instance_id,
+        # 2) storage_overprovisioned (uses pre-fetched FreeStorageSpace values)
+        if allocated_gb > 0:
+            overprov = self._storage_overprovisioned_from_values(
                 allocated_gb=allocated_gb,
+                free_storage_avg_bytes=free_storage_values,
             )
             if overprov is not None:
-                used_gb, p95_free_gb, excess_gb = overprov
+                used_gb, p95_free_gb, excess_gb, dp_count = overprov
                 monthly_savings = excess_gb * self._storage_gb_month_price_usd
                 yield FindingDraft(
                     check_id="aws.rds.storage.overprovisioned",
@@ -275,13 +533,18 @@ class RDSInstancesOptimizationsChecker:
                     estimated_monthly_savings=_fmt_money_usd(monthly_savings),
                     estimated_monthly_cost="0",
                     estimate_confidence=70,
-                    estimate_notes="Excess GB inferred from FreeStorageSpace p95 * default USD/GB-month; savings depend on migration feasibility.",
+                    estimate_notes=(
+                        "Excess GB inferred from FreeStorageSpace p95 * default USD/GB-month; "
+                        "savings depend on migration feasibility."
+                    ),
                     tags=tags,
                     dimensions={
                         "allocated_gb": f"{allocated_gb:.0f}",
                         "estimated_used_gb": f"{used_gb:.1f}",
                         "p95_free_gb": f"{p95_free_gb:.1f}",
                         "window_days": str(self._storage_window_days),
+                        "period_seconds": str(self._storage_period_seconds),
+                        "datapoints": str(dp_count),
                     },
                 ).with_issue(check="storage_overprovisioned", db_instance=instance_id)
 
@@ -330,7 +593,7 @@ class RDSInstancesOptimizationsChecker:
                 dimensions={"instance_class": instance_class, "family": fam},
             ).with_issue(check="old_generation_family", db_instance=instance_id, family=fam)
 
-        # 5) needs_engine_upgrade
+        # 5) needs_engine_upgrade (policy)
         if _mysql_needs_upgrade(engine, engine_version) or _postgres_needs_upgrade(engine, engine_version):
             yield FindingDraft(
                 check_id="aws.rds.engine.needs_upgrade",
@@ -351,36 +614,58 @@ class RDSInstancesOptimizationsChecker:
                 dimensions={"engine": engine, "engine_version": engine_version},
             ).with_issue(check="engine_upgrade", db_instance=instance_id, engine=engine, engine_version=engine_version)
 
-    def _storage_overprovisioned(
+        # 6) unused read replica (batched ReadIOPS values)
+        if self._is_read_replica(inst) and not _is_aurora_engine(engine) and not _tag_suppresses_replica_check(tags):
+            if status == "available":
+                rr = self._unused_read_replica_from_values(
+                    read_iops_values=replica_read_iops_values,
+                    conn_values=replica_conn_values,
+                )
+                if rr is not None:
+                    p95_read_iops, dp_count, p95_conns = rr
+                    # Cost is meaningful with PricingService; for now we keep savings unknown (0) but provide strong evidence.
+                    yield FindingDraft(
+                        check_id="aws.rds.read_replica.unused",
+                        check_name="RDS unused read replica",
+                        category="cost",
+                        sub_category="waste",
+                        status="fail",
+                        severity=Severity(level="medium", score=560),
+                        title=f"Read replica appears unused (near-zero reads): {instance_id}",
+                        scope=scope,
+                        message=(
+                            f"Replica shows near-zero read activity (p95 ReadIOPS={p95_read_iops:.3f}) "
+                            f"over {self._replica_unused_window_days}d."
+                        ),
+                        recommendation=(
+                            "Confirm the replica is not required for DR/reporting/migration. "
+                            "If unused, consider deleting it, or keeping it only during reporting windows."
+                        ),
+                        estimated_monthly_savings="0",
+                        estimated_monthly_cost="0",
+                        estimate_confidence=70,
+                        estimate_notes=(
+                            "Signal based on CloudWatch ReadIOPS. Accurate savings requires instance pricing enrichment."
+                        ),
+                        tags=tags,
+                        dimensions={
+                            "window_days": str(self._replica_unused_window_days),
+                            "period_seconds": str(self._replica_period_seconds),
+                            "datapoints": str(dp_count),
+                            "p95_read_iops": f"{p95_read_iops:.6f}",
+                            "p95_connections": (f"{p95_conns:.3f}" if p95_conns is not None else ""),
+                            "replica_source": str(inst.get("ReadReplicaSourceDBInstanceIdentifier") or ""),
+                        },
+                    ).with_issue(check="unused_read_replica", db_instance=instance_id)
+
+    def _storage_overprovisioned_from_values(
         self,
         *,
-        cw: Any,
-        db_instance_id: str,
         allocated_gb: float,
-    ) -> Optional[Tuple[float, float, float]]:
-        end = _now_utc()
-        start = end - timedelta(days=self._storage_window_days)
-
-        try:
-            resp = cw.get_metric_statistics(
-                Namespace="AWS/RDS",
-                MetricName="FreeStorageSpace",
-                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_instance_id}],
-                StartTime=start,
-                EndTime=end,
-                Period=3600,
-                Statistics=["Average"],
-            )
-        except ClientError:
-            return None
-
-        values: List[float] = []
-        for dp in (resp.get("Datapoints", []) or []):
-            v = dp.get("Average")
-            if isinstance(v, (int, float)):
-                values.append(float(v))
-
-        if len(values) < 12:
+        free_storage_avg_bytes: Sequence[float],
+    ) -> Optional[Tuple[float, float, float, int]]:
+        values = [float(v) for v in free_storage_avg_bytes if isinstance(v, (int, float))]
+        if len(values) < 3:
             return None
 
         p95_free_bytes = _percentile(values, 95.0)
@@ -399,7 +684,29 @@ class RDSInstancesOptimizationsChecker:
         if excess_gb < self._overprov_min_excess_gb:
             return None
 
-        return (used_gb, p95_free_gb, excess_gb)
+        return (used_gb, p95_free_gb, excess_gb, len(values))
+
+    def _unused_read_replica_from_values(
+        self,
+        *,
+        read_iops_values: Sequence[float],
+        conn_values: Sequence[float],
+    ) -> Optional[Tuple[float, int, Optional[float]]]:
+        reads = [float(v) for v in read_iops_values if isinstance(v, (int, float))]
+        if len(reads) < self._replica_min_datapoints:
+            return None
+
+        p95_read = _percentile(reads, 95.0)
+        if p95_read is None:
+            return None
+
+        if float(p95_read) >= self._replica_read_iops_p95_threshold:
+            return None
+
+        conns = [float(v) for v in conn_values if isinstance(v, (int, float))]
+        p95_conns = _percentile(conns, 95.0) if conns else None
+
+        return (float(p95_read), len(reads), p95_conns)
 
     def _access_error(self, region: str, action: str, exc: ClientError) -> FindingDraft:
         code = ""
@@ -425,7 +732,10 @@ class RDSInstancesOptimizationsChecker:
             title="RDS permissions missing for instances optimization checks",
             scope=scope,
             message=f"Access denied calling {action} in region '{region}'. ErrorCode={code}",
-            recommendation="Grant rds:DescribeDBInstances, rds:ListTagsForResource, cloudwatch:GetMetricStatistics.",
+            recommendation=(
+                "Grant rds:DescribeDBInstances, rds:ListTagsForResource, cloudwatch:GetMetricData "
+                "(and optionally cloudwatch:GetMetricStatistics)."
+            ),
             estimated_monthly_cost="0",
             estimated_monthly_savings="0",
             estimate_confidence=0,
@@ -437,7 +747,7 @@ SPEC = "checks.aws.rds_instances_optimizations:RDSInstancesOptimizationsChecker"
 
 
 @register_checker(SPEC)
-def _factory(ctx, bootstrap: Dict[str, Any]) -> RDSInstancesOptimizationsChecker:
+def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> RDSInstancesOptimizationsChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     billing_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     if not account_id:

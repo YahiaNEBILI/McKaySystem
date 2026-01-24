@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import pytest
 
@@ -45,19 +45,51 @@ class _FakeRdsClient:
         return {"TagList": [{"Key": k, "Value": v} for k, v in tags.items()]}
 
 
-class _FakeCloudWatchClient:
-    def __init__(self, *, free_storage_bytes: Optional[List[float]] = None) -> None:
-        self._free_storage_bytes = free_storage_bytes
+def _gb_to_bytes(gb: float) -> float:
+    return gb * 1024.0 * 1024.0 * 1024.0
 
-    def get_metric_statistics(self, **kwargs: Any) -> Dict[str, Any]:
-        # Only support the metric used by this checker.
-        assert kwargs.get("Namespace") == "AWS/RDS"
-        assert kwargs.get("MetricName") == "FreeStorageSpace"
-        if self._free_storage_bytes is None:
-            return {"Datapoints": []}
-        return {
-            "Datapoints": [{"Average": v} for v in self._free_storage_bytes],
-        }
+
+class _FakeCloudWatchClient:
+    """
+    Fake CloudWatch that supports get_metric_data (used by the checker).
+
+    It inspects MetricDataQueries and returns the configured values for each:
+      (MetricName, DBInstanceIdentifier) -> values
+    """
+    def __init__(self, *, series_by_metric_and_instance: Optional[Dict[str, Dict[str, List[float]]]] = None) -> None:
+        # e.g. {"FreeStorageSpace": {"db2":[...bytes...]}, "ReadIOPS":{"replica1":[...]} }
+        self._data = series_by_metric_and_instance or {}
+
+    def get_metric_data(self, **kwargs: Any) -> Dict[str, Any]:
+        queries: Sequence[Dict[str, Any]] = kwargs.get("MetricDataQueries", []) or []
+        results: List[Dict[str, Any]] = []
+
+        for q in queries:
+            qid = q.get("Id")
+            metric_stat = q.get("MetricStat", {}) or {}
+            metric = metric_stat.get("Metric", {}) or {}
+            metric_name = metric.get("MetricName")
+            dims = metric.get("Dimensions", []) or []
+            iid = ""
+            for d in dims:
+                if d.get("Name") == "DBInstanceIdentifier":
+                    iid = str(d.get("Value") or "")
+                    break
+
+            values = []
+            if metric_name and iid:
+                values = list(self._data.get(str(metric_name), {}).get(iid, []))
+
+            results.append(
+                {
+                    "Id": qid,
+                    "Values": values,
+                    "Timestamps": [],
+                    "StatusCode": "Complete",
+                }
+            )
+
+        return {"MetricDataResults": results}
 
 
 @dataclass
@@ -76,13 +108,14 @@ def _mk_checker() -> RDSInstancesOptimizationsChecker:
         account=AwsAccountContext(account_id="111111111111", billing_account_id="111111111111"),
         storage_gb_month_price_usd=0.115,
         storage_window_days=14,
+        storage_period_seconds=86400,
         overprov_used_ratio_threshold=0.40,
         overprov_min_excess_gb=20.0,
+        replica_unused_window_days=14,
+        replica_period_seconds=86400,
+        replica_read_iops_p95_threshold=0.1,
+        replica_min_datapoints=7,
     )
-
-
-def _gb_to_bytes(gb: float) -> float:
-    return gb * 1024.0 * 1024.0 * 1024.0
 
 
 def test_stopped_instances_with_storage_emits() -> None:
@@ -103,8 +136,9 @@ def test_stopped_instances_with_storage_emits() -> None:
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
     ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=_FakeCloudWatchClient(free_storage_bytes=None))
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     f = next(x for x in findings if x.check_id == "aws.rds.instances.stopped_storage")
@@ -117,9 +151,13 @@ def test_stopped_instances_with_storage_emits() -> None:
 
 def test_storage_overprovisioned_emits_using_free_storage_p95() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db2"
-    # Allocated 100GB, free ~90GB => used ~10GB => overprovisioned
-    free_series = [_gb_to_bytes(90.0)] * 24
-    cw = _FakeCloudWatchClient(free_storage_bytes=free_series)
+    # Allocated 100GB, "free" ~90GB => used ~10GB => overprovisioned
+    free_series = [_gb_to_bytes(90.0)] * 14  # daily for 14d
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "FreeStorageSpace": {"db2": free_series},
+        }
+    )
     rds = _FakeRdsClient(
         region="eu-west-3",
         instances=[
@@ -166,8 +204,9 @@ def test_multi_az_non_prod_emits_when_env_tag_non_prod() -> None:
         ],
         tags_by_arn={arn: {"env": "staging"}},
     )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
     ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=_FakeCloudWatchClient(free_storage_bytes=None))
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     f = next(x for x in findings if x.check_id == "aws.rds.multi_az.non_prod")
@@ -194,8 +233,9 @@ def test_multi_az_non_prod_suppressed_when_env_prod() -> None:
         ],
         tags_by_arn={arn: {"env": "prod"}},
     )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
     ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=_FakeCloudWatchClient(free_storage_bytes=None))
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     assert all(x.check_id != "aws.rds.multi_az.non_prod" for x in findings)
@@ -219,8 +259,9 @@ def test_instance_family_old_generation_emits() -> None:
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
     ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=_FakeCloudWatchClient(free_storage_bytes=None))
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     f = next(x for x in findings if x.check_id == "aws.rds.instance_family.old_generation")
@@ -260,8 +301,9 @@ def test_engine_needs_upgrade_policy(engine: str, version: str, should_emit: boo
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
     ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=_FakeCloudWatchClient(free_storage_bytes=None))
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     has = any(x.check_id == "aws.rds.engine.needs_upgrade" for x in findings)
