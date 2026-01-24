@@ -13,13 +13,13 @@ This contract standardizes:
 | column | type (DuckDB) | notes |
 |---|---|---|
 | rule_id | VARCHAR | stable id of the rule |
-| status | VARCHAR | `pass` / `fail` / `warn` (your convention) |
+| status | VARCHAR | `pass` / `fail` / `warn` |
 | resource_id | VARCHAR | the primary resource identifier |
 | account_id | VARCHAR | AWS account id |
 | region | VARCHAR | AWS region or `global` |
 | title | VARCHAR | short human title |
 | description | VARCHAR | longer human explanation |
-| severity | VARCHAR | `info/low/medium/high/critical` (your convention) |
+| severity | VARCHAR | `info/low/medium/high/critical` |
 | detected_at | TIMESTAMP | when the rule evaluated / detected |
 | tags | MAP(VARCHAR, VARCHAR) | arbitrary key/value metadata (empty allowed) |
 | labels | MAP(VARCHAR, VARCHAR) | normalized labels (empty allowed) |

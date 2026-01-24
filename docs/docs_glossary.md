@@ -190,6 +190,17 @@ Used for:
 - early prioritization
 - UI sorting
 
+confidence normalization : 
+0 = unknown / not estimated
+
+10–30 = heuristic / missing key inputs (e.g., size unknown → cost default 0)
+
+40–70 = based on resource attributes (size/type/age) with fixed public price defaults
+
+80–90 = based on exact metering inputs (GB, hours, class) but still no CUR
+
+95+ = CUR-enriched (later)
+
 ---
 
 ### Actual cost
