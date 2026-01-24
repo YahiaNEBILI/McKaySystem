@@ -6,3 +6,4 @@ class Services:
     s3: Any
     rds: Any
     backup: Any
+    ec2: Any

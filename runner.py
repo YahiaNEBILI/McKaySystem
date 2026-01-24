@@ -241,12 +241,13 @@ def main(argv: Sequence[str]) -> int:
     sts = session.client("sts")
     s3 = session.client("s3", config=SDK_CONFIG)
     rds = session.client("rds", config=SDK_CONFIG)
-    # backup client is used by your backup checkers
     backup = session.client("backup", config=SDK_CONFIG)
+    ec2 = session.client("ec2", config=SDK_CONFIG)
+
 
     account_id = sts.get_caller_identity()["Account"]
 
-    services = Services(s3=s3, rds=rds, backup=backup)
+    services = Services(s3=s3, rds=rds, backup=backup, ec2=ec2)
 
     # Bootstrap is runtime data that checker factories may need.
     bootstrap: dict = {
