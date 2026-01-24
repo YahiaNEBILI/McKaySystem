@@ -147,6 +147,8 @@ class CorrelationEngine:
         # Ensure output directory exists
         Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
 
+        writer: FindingsParquetWriter | None = None
+
         con = duckdb.connect(database=":memory:")
         try:
             con.execute(f"PRAGMA threads={int(cfg.threads)};")
@@ -205,12 +207,59 @@ class CorrelationEngine:
                     stats.errors.append(msg)
                     if cfg.fail_fast:
                         raise CorrelationError(msg) from exc
-
-            writer.close()
             return stats
 
         finally:
+            if writer is not None:
+                writer.close()
             con.close()
+
+
+    @staticmethod
+    def _strip_sql_comments(sql: str) -> str:
+        """
+        Remove line comments (--) and trim whitespace.
+        This is a lightweight guard, not a full SQL parser.
+        """
+        lines: List[str] = []
+        for line in sql.splitlines():
+            s = line.strip()
+            if s.startswith("--"):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _normalize_single_statement(cls, sql: str) -> str:
+        """
+        Ensure the rule SQL is a single statement (typically a single SELECT).
+
+        DuckDB allows multi-statements, but permitting them in correlation rules
+        increases blast radius (DDL side-effects, PRAGMA changes, etc.).
+        """
+        cleaned = cls._strip_sql_comments(sql).strip()
+        # Allow one optional trailing semicolon
+        cleaned = cleaned.rstrip()
+        if cleaned.endswith(";"):
+            cleaned = cleaned[:-1].rstrip()
+
+        # If there's still a semicolon, it is very likely multi-statement.
+        if ";" in cleaned:
+            raise CorrelationError("Rule SQL must be a single statement (remove extra ';').")
+
+        return cleaned
+
+    @classmethod
+    def _validate_rule_sql(cls, con: duckdb.DuckDBPyConnection, sql: str) -> str:
+        """
+        Validate rule SQL early to fail fast with clearer errors.
+
+        Returns a normalized single-statement SQL string.
+        """
+        normalized = cls._normalize_single_statement(sql)
+        # EXPLAIN is cheap and catches parser/binder errors early.
+        con.execute("EXPLAIN " + normalized)
+        return normalized
 
     # -------------------------------
     # Internals
@@ -230,7 +279,7 @@ class CorrelationEngine:
         required = [normalize_str(x, lower=False) for x in rule.required_check_ids if str(x).strip()]
         if not required:
             # If a rule declares nothing, it risks scanning everything. Block it.
-            raise CorrelationError("required_check_ids is empty; refusing to scan full dataset")
+            raise CorrelationError("required_check_ids is empty; add `-- required_check_ids: ...` to the SQL rule header to avoid scanning the full dataset")
 
         # Pre-filter to reduce parquet scan cost.
         # DuckDB does not allow prepared parameters in CREATE VIEW statements,
@@ -251,7 +300,9 @@ class CorrelationEngine:
             """
         )
 
-        cur = con.execute(rule.sql)
+        sql = self._validate_rule_sql(con, rule.sql)
+
+        cur = con.execute(sql)
 
         cols = [d[0] for d in cur.description]
         if not cols:
