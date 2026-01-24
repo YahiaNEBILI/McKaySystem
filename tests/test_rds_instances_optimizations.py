@@ -308,3 +308,146 @@ def test_engine_needs_upgrade_policy(engine: str, version: str, should_emit: boo
     findings = list(_mk_checker().run(ctx))
     has = any(x.check_id == "aws.rds.engine.needs_upgrade" for x in findings)
     assert has is should_emit
+
+def test_storage_overprovisioned_no_finding_when_datapoints_too_sparse() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:db_sparse"
+    # Only 2 datapoints -> checker requires >=3 for storage overprov
+    free_series = [_gb_to_bytes(90.0)] * 2
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={"FreeStorageSpace": {"db_sparse": free_series}}
+    )
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db_sparse",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 100,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    assert all(x.check_id != "aws.rds.storage.overprovisioned" for x in findings)
+
+
+def test_storage_overprovisioned_no_finding_when_allocated_storage_missing_or_zero() -> None:
+    arn0 = "arn:aws:rds:eu-west-3:111111111111:db:db0"
+    arn_missing = "arn:aws:rds:eu-west-3:111111111111:db:db_missing"
+
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "FreeStorageSpace": {
+                "db0": [_gb_to_bytes(90.0)] * 14,
+                "db_missing": [_gb_to_bytes(90.0)] * 14,
+            }
+        }
+    )
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db0",
+                "DBInstanceArn": arn0,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 0,  # explicit 0
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+            },
+            {
+                "DBInstanceIdentifier": "db_missing",
+                "DBInstanceArn": arn_missing,
+                "DBInstanceStatus": "available",
+                # AllocatedStorage missing -> treated as 0.0 in checker
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+            },
+        ],
+        tags_by_arn={arn0: {"env": "dev"}, arn_missing: {"env": "dev"}},
+    )
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    assert all(x.check_id != "aws.rds.storage.overprovisioned" for x in findings)
+
+
+def test_multi_az_missing_env_tag_no_finding() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:db_no_env"
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db_no_env",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": True,
+                "DBInstanceClass": "db.t3.small",
+                "Engine": "mysql",
+                "EngineVersion": "8.0.34",
+            }
+        ],
+        tags_by_arn={arn: {"owner": "team-a"}},  # no env-related tag
+    )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    assert all(x.check_id != "aws.rds.multi_az.non_prod" for x in findings)
+
+
+@pytest.mark.parametrize(
+    "engine,version",
+    [
+        ("postgres", ""),          # empty version
+        ("postgres", "abc"),       # non-numeric
+        ("postgres", "11beta"),    # weird format
+        ("mysql", ""),             # empty
+        ("mysql", "v5.7"),         # doesn't start with 5.7 exactly
+        ("mysql", "unknown"),      # nonsense
+        ("", "11.0"),              # empty engine
+        ("not-a-db", "1.2.3"),     # unknown engine
+    ],
+)
+
+
+def test_weird_engine_versions_do_not_crash(engine: str, version: str) -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:db_weird"
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db_weird",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": engine,
+                "EngineVersion": version,
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    # Must not raise
+    findings = list(_mk_checker().run(ctx))
+    # And should not incorrectly emit the engine upgrade finding for weird inputs
+    assert all(x.check_id != "aws.rds.engine.needs_upgrade" for x in findings)
