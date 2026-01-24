@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, Union
 
 from .finops_contracts import (
     ValidationError,
@@ -127,7 +127,7 @@ class FindingDraft:
     # Estimation fields: keep them optional
     estimated_monthly_savings: Optional[str] = None  # store as string for decimal-friendly upstream
     estimated_monthly_cost: Optional[str] = None
-    estimate_confidence: Optional[int] = None  # 0..100
+    estimate_confidence: Optional[Union[int, str]] = None  # allow "low"/"medium"/"high" too
     estimate_notes: str = ""
 
     # Extra dimensions
@@ -254,6 +254,52 @@ class CheckerRunner:
 # -----------------------------
 
 
+def _money_or_zero(value: Any) -> str:
+    """Return a decimal-friendly string money value. Missing/blank -> "0"."""
+    if value is None:
+        return "0"
+    if isinstance(value, str):
+        txt = value.strip()
+        return txt if txt != "" else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
+
+
+def _normalize_estimate_confidence(value: Any) -> int:
+    """Normalize confidence to an int 0..100.
+
+    Accepts:
+      - None -> 0
+      - int/float -> clamped 0..100
+      - str: "low"|"medium"|"high"|"unknown" plus numeric strings
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        try:
+            n = int(round(float(value)))
+        except (ValueError, TypeError):
+            return 0
+        return max(0, min(100, n))
+    if isinstance(value, str):
+        txt = value.strip().lower()
+        if txt in {"", "unknown", "n/a", "na", "none"}:
+            return 0
+        if txt in {"low", "l"}:
+            return 30
+        if txt in {"medium", "med", "m"}:
+            return 60
+        if txt in {"high", "h"}:
+            return 85
+        try:
+            n = int(round(float(txt)))
+        except (ValueError, TypeError):
+            return 0
+        return max(0, min(100, n))
+    return 0
+
+
 def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: str) -> Dict[str, Any]:
     """
     Convert a FindingDraft into a finops_findings dict.
@@ -303,10 +349,12 @@ def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: st
 
         # estimation
         "estimated": {
-            "monthly_savings": draft.estimated_monthly_savings if draft.estimated_monthly_savings is not None else "",
-            "monthly_cost": draft.estimated_monthly_cost if draft.estimated_monthly_cost is not None else "",
-            "one_time_savings": "",
-            "confidence": int(draft.estimate_confidence) if draft.estimate_confidence is not None else 0,
+            # Enforce: cost fields always present ("0" if missing)
+            "monthly_savings": _money_or_zero(draft.estimated_monthly_savings),
+            "monthly_cost": _money_or_zero(draft.estimated_monthly_cost),
+            "one_time_savings": "0",
+            # Normalize: confidence is always 0..100 int
+            "confidence": _normalize_estimate_confidence(draft.estimate_confidence),
             "notes": normalize_str(draft.estimate_notes, lower=False),
         },
 

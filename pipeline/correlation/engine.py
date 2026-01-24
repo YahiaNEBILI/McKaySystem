@@ -78,6 +78,44 @@ class CorrelationError(RuntimeError):
 # -------------------------------
 
 
+def _money_or_zero(value: Any) -> str:
+    if value is None:
+        return "0"
+    if isinstance(value, str):
+        txt = value.strip()
+        return txt if txt != "" else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
+
+
+def _normalize_confidence(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        try:
+            n = int(round(float(value)))
+        except (ValueError, TypeError):
+            return 0
+        return max(0, min(100, n))
+    if isinstance(value, str):
+        txt = value.strip().lower()
+        if txt in {"", "unknown", "n/a", "na", "none"}:
+            return 0
+        if txt in {"low", "l"}:
+            return 30
+        if txt in {"medium", "med", "m"}:
+            return 60
+        if txt in {"high", "h"}:
+            return 85
+        try:
+            n = int(round(float(txt)))
+        except (ValueError, TypeError):
+            return 0
+        return max(0, min(100, n))
+    return 0
+
+
 @dataclass(frozen=True)
 class CorrelationConfig:
     """
@@ -375,6 +413,7 @@ class CorrelationEngine:
     # -------------------------------
     # Internals
     # -------------------------------
+    
 
     def _apply_rule(
         self,
@@ -542,15 +581,18 @@ class CorrelationEngine:
         remediation = raw.get("remediation") or ""
         links = raw.get("links") or []
 
-        estimated = raw.get("estimated")
-        if not estimated:
-            estimated = {
-                "monthly_savings": None,
-                "monthly_cost": None,
-                "one_time_savings": None,
-                "confidence": 0,
-                "notes": "Correlated meta-finding.",
-            }
+        estimated_in = raw.get("estimated")
+        estimated: Dict[str, Any] = dict(estimated_in) if isinstance(estimated_in, Mapping) else {}
+        estimated.setdefault("monthly_savings", "0")
+        estimated.setdefault("monthly_cost", "0")
+        estimated.setdefault("one_time_savings", "0")
+        estimated.setdefault("confidence", 0)
+        estimated.setdefault("notes", "Correlated meta-finding.")
+
+        estimated["monthly_savings"] = _money_or_zero(estimated.get("monthly_savings"))
+        estimated["monthly_cost"] = _money_or_zero(estimated.get("monthly_cost"))
+        estimated["one_time_savings"] = _money_or_zero(estimated.get("one_time_savings"))
+        estimated["confidence"] = _normalize_confidence(estimated.get("confidence"))
 
         actual = raw.get("actual") or None
         lifecycle = raw.get("lifecycle") or None
