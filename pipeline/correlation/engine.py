@@ -274,20 +274,83 @@ class CorrelationEngine:
     @classmethod
     def _normalize_single_statement(cls, sql: str) -> str:
         """
-        Ensure the rule SQL is a single statement (typically a single SELECT).
+        Ensure the rule SQL is a single statement.
 
-        DuckDB allows multi-statements, but permitting them in correlation rules
-        increases blast radius (DDL side-effects, PRAGMA changes, etc.).
+        Allowed:
+          - semicolons inside string literals
+          - semicolons inside comments
+          - one or more trailing semicolons at the very end (common copy/paste)
+
+        Rejected:
+          - any semicolon that appears outside comments/strings (multi-statement)
         """
-        cleaned = cls._strip_sql_comments(sql).strip()
-        # Allow one optional trailing semicolon
+        if sql is None:
+            raise CorrelationError("Rule SQL is empty")
+
+        cleaned = sql.strip()
+        if not cleaned:
+            raise CorrelationError("Rule SQL is empty")
+
+        # Strip trailing semicolons (and trailing whitespace) only.
         cleaned = cleaned.rstrip()
-        if cleaned.endswith(";"):
+        while cleaned.endswith(";"):
             cleaned = cleaned[:-1].rstrip()
 
-        # If there's still a semicolon, it is very likely multi-statement.
-        if ";" in cleaned:
-            raise CorrelationError("Rule SQL must be a single statement (remove extra ';').")
+        # Scan for semicolons outside comments/strings (simple state machine).
+        i = 0
+        n = len(cleaned)
+        in_squote = False
+        in_line_comment = False
+        in_block_comment = False
+
+        while i < n:
+            ch = cleaned[i]
+            nxt = cleaned[i + 1] if i + 1 < n else ""
+
+            if in_line_comment:
+                if ch == "":
+                    in_line_comment = False
+                i += 1
+                continue
+
+            if in_block_comment:
+                if ch == "*" and nxt == "/":
+                    in_block_comment = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            if in_squote:
+                if ch == "'":
+                    # handle escaped quote ''
+                    if nxt == "'":
+                        i += 2
+                        continue
+                    in_squote = False
+                i += 1
+                continue
+
+            # entering comment or string?
+            if ch == "-" and nxt == "-":
+                in_line_comment = True
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                in_block_comment = True
+                i += 2
+                continue
+            if ch == "'":
+                in_squote = True
+                i += 1
+                continue
+
+            if ch == ";":
+                raise CorrelationError(
+                    "Rule SQL must be a single statement: remove extra ';' (only trailing ';' is allowed)."
+                )
+
+            i += 1
 
         return cleaned
 
