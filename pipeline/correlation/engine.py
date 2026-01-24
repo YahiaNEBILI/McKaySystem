@@ -55,6 +55,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import duckdb
@@ -105,6 +106,10 @@ class CorrelationConfig:
     max_rows_per_file: int = 200_000
     max_buffered_rows: int = 50_000
 
+    # Safety knobs (rule sandboxing)
+    # 0 means unlimited.
+    max_rows_per_rule: int = 0
+
     # Contract knobs
     finding_id_salt: Optional[str] = None  # if you want per-run/per-day salt, pass it here
 
@@ -118,6 +123,7 @@ class CorrelationStats:
     rules_enabled: int = 0
     emitted: int = 0
     emitted_by_rule: Dict[str, int] = field(default_factory=dict)
+    timings_by_rule: Dict[str, Dict[str, float]] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
 
 
@@ -199,9 +205,10 @@ class CorrelationEngine:
             # 4) Apply each rule
             for rule in enabled_rules:
                 try:
-                    emitted = self._apply_rule(con, writer, rule, cfg)
+                    emitted, timings = self._apply_rule(con, writer, rule, cfg)
                     stats.emitted += emitted
                     stats.emitted_by_rule[rule.rule_id] = emitted
+                    stats.timings_by_rule[rule.rule_id] = timings
                 except Exception as exc:  # pylint: disable=broad-except
                     msg = f"[{rule.rule_id}] {exc}"
                     stats.errors.append(msg)
@@ -334,15 +341,36 @@ class CorrelationEngine:
         writer: FindingsParquetWriter,
         rule: CorrelationRule,
         cfg: CorrelationConfig,
-    ) -> int:
+    ) -> tuple[int, Dict[str, float]]:
         """
         Execute one rule and write emitted meta-findings.
-        Returns emitted count.
+
+        Returns:
+          (emitted_count, timings_ms)
+
+        Timings keys (milliseconds):
+          - setup_ms: building tmp_required_check_ids + rule_input view
+          - validate_ms: EXPLAIN + normalization checks
+          - exec_ms: query execution + row materialization (excluding parquet write)
+          - write_ms: time spent in writer.extend()
+          - total_ms: sum of the above (approx)
         """
+        timings: Dict[str, float] = {
+            "setup_ms": 0.0,
+            "validate_ms": 0.0,
+            "exec_ms": 0.0,
+            "write_ms": 0.0,
+            "total_ms": 0.0,
+        }
+
         required = [normalize_str(x, lower=False) for x in rule.required_check_ids if str(x).strip()]
         if not required:
             # If a rule declares nothing, it risks scanning everything. Block it.
-            raise CorrelationError("required_check_ids is empty; add `-- required_check_ids: ...` to the SQL rule header to avoid scanning the full dataset")
+            raise CorrelationError(
+                "required_check_ids is empty; add `-- required_check_ids: ...` to the SQL rule header to avoid scanning the full dataset"
+            )
+
+        t0 = perf_counter()
 
         # Pre-filter to reduce parquet scan cost.
         # DuckDB does not allow prepared parameters in CREATE VIEW statements,
@@ -363,22 +391,39 @@ class CorrelationEngine:
             """
         )
 
-        sql = self._validate_rule_sql(con, rule.sql)
+        timings["setup_ms"] = (perf_counter() - t0) * 1000.0
 
+        # Validate rule SQL (fail-fast + clearer errors)
+        t1 = perf_counter()
+        sql = self._validate_rule_sql(con, rule.sql)
+        timings["validate_ms"] = (perf_counter() - t1) * 1000.0
+
+        # Execute + stream results (don't fetchall on huge result sets)
+        t2 = perf_counter()
         cur = con.execute(sql)
 
         cols = [d[0] for d in cur.description]
         if not cols:
-            return 0
+            timings["exec_ms"] = (perf_counter() - t2) * 1000.0
+            timings["total_ms"] = (
+                timings["setup_ms"] + timings["validate_ms"] + timings["exec_ms"] + timings["write_ms"]
+            )
+            return 0, timings
 
         emitted = 0
         now_ts = datetime.now(timezone.utc)
+        row_cap = int(cfg.max_rows_per_rule or 0)
 
-        # Stream results (don't fetchall on huge result sets)
         while True:
             rows = cur.fetchmany(10_000)
             if not rows:
                 break
+
+            # Enforce row cap early to avoid runaway writes/cost.
+            if row_cap and (emitted + len(rows)) > row_cap:
+                raise CorrelationError(
+                    f"Rule exceeded max_rows_per_rule={row_cap}: emitted_so_far={emitted}, next_batch={len(rows)}"
+                )
 
             wire_findings: List[Dict[str, Any]] = []
             for row in rows:
@@ -391,10 +436,18 @@ class CorrelationEngine:
                 )
                 wire_findings.append(wire)
 
+            # Parquet write timing (writer.extend does casting/partitioning)
+            tw = perf_counter()
             writer.extend(wire_findings)
+            timings["write_ms"] += (perf_counter() - tw) * 1000.0
+
             emitted += len(wire_findings)
 
-        return emitted
+        timings["exec_ms"] = (perf_counter() - t2) * 1000.0
+        timings["total_ms"] = (
+            timings["setup_ms"] + timings["validate_ms"] + timings["exec_ms"] + timings["write_ms"]
+        )
+        return emitted, timings
 
     def _finalize_wire_meta_finding(
         self,
