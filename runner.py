@@ -16,6 +16,11 @@ Pipeline:
     -> correlation -> findings_correlated parquet
       -> duckdb/json export (should UNION both datasets)
 
+Multi-region execution
+----------------------
+Regions are configured in infra/aws_config.py (AWS_REGIONS).
+No CLI args are used for region selection.
+
 Run everything (default):
 python runner.py --tenant acme --workspace prod
 
@@ -39,14 +44,14 @@ import importlib
 import pkgutil
 import sys
 from datetime import datetime, timezone
-from typing import List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import boto3
 
 import checks  # IMPORTANT: used for module discovery
 from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
-from contracts.services import Services
+from contracts.services import ServicesFactory, Services
 from infra.aws_config import SDK_CONFIG
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
@@ -200,8 +205,9 @@ def _run_correlation_step(
     Returns a dict of stats for printing.
     """
     try:
-        # You will add this module as part of correlation wiring.
-        from pipeline.correlation.correlate_findings import run_correlation # pylint: disable=import-error
+        from pipeline.correlation.correlate_findings import (  # pylint: disable=import-error
+            run_correlation,
+        )
     except Exception as exc:  # pragma: no cover
         print(f"[WARN] Correlation step skipped: pipeline/correlate_findings.py not available ({exc})")
         return {"enabled": False, "emitted": 0, "errors": 0, "out_dir": out_dir}
@@ -216,11 +222,91 @@ def _run_correlation_step(
         finding_id_mode=finding_id_mode,
     )
 
-    # run_correlation should return something like:
-    # {"enabled": True, "emitted": int, "errors": int, "out_dir": str, "rules_enabled": int}
     if not isinstance(stats, dict):
         return {"enabled": True, "emitted": 0, "errors": 0, "out_dir": out_dir}
     return stats
+
+
+def _get_configured_regions() -> List[str]:
+    """
+    Read region list from configuration (infra/aws_config.py).
+
+    Expected: AWS_REGIONS = ["eu-west-3", "us-east-1", ...]
+    """
+    try:
+        # This constant should be defined by you in infra/aws_config.py
+        # Example:
+        # AWS_REGIONS = ["eu-west-3", "eu-west-1"]
+        from infra.aws_config import AWS_REGIONS  # type: ignore  # pylint: disable=import-error
+    except Exception as exc:
+        raise RuntimeError(
+            "Multi-region runner requires AWS_REGIONS in infra/aws_config.py "
+            "(e.g. AWS_REGIONS = ['eu-west-3'])."
+        ) from exc
+
+    regions = [str(r).strip() for r in (AWS_REGIONS or []) if str(r).strip()]
+    if not regions:
+        raise RuntimeError(
+            "AWS_REGIONS is empty. Configure infra/aws_config.py with at least one region."
+        )
+
+    # Deduplicate while preserving order
+    seen = set()
+    ordered: List[str] = []
+    for r in regions:
+        if r not in seen:
+            seen.add(r)
+            ordered.append(r)
+    return ordered
+
+
+def _make_ctx(
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    run_ts: datetime,
+    services: Services,
+) -> RunContext:
+    return RunContext(
+        tenant_id=args.tenant,
+        workspace_id=args.workspace,
+        run_id=run_id,
+        run_ts=run_ts,
+        engine_name=ENGINE_NAME,
+        engine_version=ENGINE_VERSION,
+        rulepack_version=RULEPACK_VERSION,
+        schema_version=SCHEMA_VERSION,
+        default_currency=args.currency,
+        cloud=args.cloud,
+        services=services,
+    )
+
+
+def _partition_checkers_by_scope(
+    *,
+    checker_specs: List[str],
+    ctx_control: RunContext,
+    bootstrap: dict,
+) -> Tuple[List[Checker], List[str]]:
+    """
+    Instantiate once using the control ctx so we can detect checker.is_regional.
+
+    Returns:
+      - global_checkers: instantiated (run once)
+      - regional_specs: specs to instantiate per region
+    """
+    global_checkers: List[Checker] = []
+    regional_specs: List[str] = []
+
+    for spec in checker_specs:
+        inst = _load_checker(spec, ctx=ctx_control, bootstrap=bootstrap)
+        is_regional = bool(getattr(inst, "is_regional", True))
+        if is_regional:
+            regional_specs.append(spec)
+        else:
+            global_checkers.append(inst)
+
+    return global_checkers, regional_specs
 
 
 def main(argv: Sequence[str]) -> int:
@@ -236,41 +322,28 @@ def main(argv: Sequence[str]) -> int:
     run_ts = _utc_now()
     run_id = _make_run_id(run_ts)
 
+    # --- Regions (config-driven) ---
+    regions = _get_configured_regions()
+    control_region = regions[0]
+
     # --- Services / AWS bootstrapping ---
     session = boto3.Session()
     sts = session.client("sts")
-    s3 = session.client("s3", config=SDK_CONFIG)
-    rds = session.client("rds", config=SDK_CONFIG)
-    backup = session.client("backup", config=SDK_CONFIG)
-    ec2 = session.client("ec2", config=SDK_CONFIG)
-
-
     account_id = sts.get_caller_identity()["Account"]
 
-    services = Services(s3=s3, rds=rds, backup=backup, ec2=ec2)
+    factory = ServicesFactory(session=session, sdk_config=SDK_CONFIG)
 
     # Bootstrap is runtime data that checker factories may need.
     bootstrap: dict = {
         "aws_account_id": account_id,
         "aws_billing_account_id": account_id,
-        # Optional: configure RDS snapshot cleanup heuristics
-        # "rds_snapshot_stale_days": 30,
-        # "rds_snapshot_gb_month_price_usd": 0.095,
     }
 
-    ctx = RunContext(
-        tenant_id=args.tenant,
-        workspace_id=args.workspace,
-        run_id=run_id,
-        run_ts=run_ts,
-        engine_name=ENGINE_NAME,
-        engine_version=ENGINE_VERSION,
-        rulepack_version=RULEPACK_VERSION,
-        schema_version=SCHEMA_VERSION,
-        default_currency=args.currency,
-        cloud=args.cloud,
-        services=services,
-    )
+    # Control ctx (first region) is used for:
+    #  - instantiating once to detect is_regional
+    #  - running global checkers
+    control_services = factory.for_region(control_region)
+    ctx_control = _make_ctx(args=args, run_id=run_id, run_ts=run_ts, services=control_services)
 
     # --- Resolve which checkers to run ---
     if args.checker is None:
@@ -284,22 +357,59 @@ def main(argv: Sequence[str]) -> int:
     if not checker_specs:
         raise RuntimeError("No checkers selected to run (after exclusions).")
 
-    # --- Instantiate checkers ---
-    checkers: List[Checker] = []
-    for spec in checker_specs:
-        checkers.append(_load_checker(spec, ctx=ctx, bootstrap=bootstrap))
+    # --- Partition checkers: global (run once) vs regional (run per region) ---
+    global_checkers, regional_specs = _partition_checkers_by_scope(
+        checker_specs=checker_specs,
+        ctx_control=ctx_control,
+        bootstrap=bootstrap,
+    )
 
-    # --- Run + persist raw findings ---
     runner = CheckerRunner(finding_id_salt_mode=args.finding_id_mode)
-    result = runner.run_many(checkers, ctx)
 
+    # Writer is shared for the whole run (all regions).
     writer = FindingsParquetWriter(
         ParquetWriterConfig(
             base_dir=args.out,
             drop_invalid_on_cast=bool(args.drop_invalid_on_cast),
         )
     )
-    writer.extend(result.valid_findings)
+
+    # Aggregate stats
+    total_valid = 0
+    total_invalid_count = 0
+    total_invalid_errors: List[str] = []
+    per_region_valid: Dict[str, int] = {}
+
+    # --- Run global checkers (once, in control region) ---
+    if global_checkers:
+        global_result = runner.run_many(global_checkers, ctx_control)
+        writer.extend(global_result.valid_findings)
+
+        total_valid += len(global_result.valid_findings)
+        total_invalid_count += int(global_result.invalid_findings)
+        total_invalid_errors.extend(global_result.invalid_errors or [])
+
+    # --- Run regional checkers per configured region ---
+    for region in regions:
+        svcs = factory.for_region(region)
+        ctx_region = _make_ctx(args=args, run_id=run_id, run_ts=run_ts, services=svcs)
+
+        regional_checkers: List[Checker] = []
+        for spec in regional_specs:
+            regional_checkers.append(_load_checker(spec, ctx=ctx_region, bootstrap=bootstrap))
+
+        if not regional_checkers:
+            per_region_valid[region] = 0
+            continue
+
+        region_result = runner.run_many(regional_checkers, ctx_region)
+        writer.extend(region_result.valid_findings)
+
+        per_region_valid[region] = len(region_result.valid_findings)
+        total_valid += len(region_result.valid_findings)
+        total_invalid_count += int(region_result.invalid_findings)
+        total_invalid_errors.extend(region_result.invalid_errors or [])
+
     stats = writer.close()
 
     # --- Optional: Correlation step (meta-findings) ---
@@ -325,15 +435,27 @@ def main(argv: Sequence[str]) -> int:
     print(f"cloud: {args.cloud}")
     print(f"run_id: {run_id}")
     print(f"run_ts: {run_ts.astimezone(timezone.utc).isoformat().replace('+00:00','Z')}")
-    print(f"checkers_selected: {len(checkers)}")
+
+    print(f"regions_configured: {len(regions)}")
+    print(f"regions: {', '.join(regions)}")
+    print(f"control_region: {control_region}")
+
+    print(f"checkers_selected: {len(checker_specs)}")
+    print(f"global_checkers: {len(global_checkers)}")
+    print(f"regional_checkers: {len(regional_specs)}")
+
+    if per_region_valid:
+        print("--- Findings per region ---")
+        for r in regions:
+            print(f"{r}: {per_region_valid.get(r, 0)}")
 
     print(f"engine_name: {ENGINE_NAME}")
     print(f"engine_version: {ENGINE_VERSION}")
     print(f"rulepack_version: {RULEPACK_VERSION}")
     print(f"schema_version: {SCHEMA_VERSION}")
 
-    print(f"valid_findings: {len(result.valid_findings)}")
-    print(f"invalid_findings: {result.invalid_findings}")
+    print(f"valid_findings: {total_valid}")
+    print(f"invalid_findings: {total_invalid_count}")
 
     print(f"writer_received: {stats.received}")
     print(f"writer_written: {stats.written}")
@@ -350,9 +472,9 @@ def main(argv: Sequence[str]) -> int:
         print("--- Correlation ---")
         print("correlation: disabled/skipped")
 
-    if result.invalid_errors:
+    if total_invalid_errors:
         print("\n--- Sample validation errors (contract layer) ---")
-        for e in result.invalid_errors[:10]:
+        for e in total_invalid_errors[:10]:
             print(f"- {e}")
 
     if stats.cast_errors:

@@ -33,6 +33,7 @@ def _normalize_s3_location_constraint(value: Optional[str]) -> str:
 
 class S3LifecycleMissingChecker:
     checker_id = "aws.s3.governance.lifecycle_missing"
+    is_regional = False
 
     def __init__(self, *, account: AwsAccountContext) -> None:
         self._account = account
@@ -95,7 +96,7 @@ class S3LifecycleMissingChecker:
                             resource_id=name,
                             resource_arn=f"arn:aws:s3:::{name}",
                         ),
-                        issue_key={"lifecycle": "missing"},
+                        issue_key={"lifecycle": "missing", "bucket": name},
                         estimated_monthly_savings="",
                         estimate_confidence=0,
                     )
@@ -122,7 +123,7 @@ class S3LifecycleMissingChecker:
                             resource_id=name,
                             resource_arn=f"arn:aws:s3:::{name}",
                         ),
-                        issue_key={"lifecycle": "unknown_access_denied"},
+                        issue_key={"lifecycle": "unknown_access_denied", "bucket": name},
                         estimated_monthly_savings="",
                         estimate_confidence=0,
                     )
