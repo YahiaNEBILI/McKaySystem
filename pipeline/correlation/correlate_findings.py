@@ -49,7 +49,7 @@ def run_correlation(
     """
     Pipeline step: correlate raw findings and emit meta-findings.
 
-    This is the function the updated runner.py calls.
+    This is the function the runner.py calls.
 
     Returns a dict so the runner can print a summary and decide exit codes, e.g.:
       {

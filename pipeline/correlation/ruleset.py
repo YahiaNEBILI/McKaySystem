@@ -1,184 +1,140 @@
-# pipeline/correlation/ruleset.py
+"""
+Correlation ruleset registry.
+
+Goals
+- Deterministic rule registration & ordering
+- Rule metadata lives in SQL headers to avoid drift
+- Consistent output contract enforcement (at the SQL edge)
+
+SQL rule header format (top of file, -- comments):
+
+-- rule_id: aws_backup_vault_risk
+-- name: AWS Backup vault risk
+-- description: Detects risky Backup Vault settings and missing protections.
+-- severity: medium
+-- category: backup
+-- service: aws.backup
+-- enabled: true
+-- requires: aws.backup.vaults, aws.backup.plans   # comma-separated table/view ids
+-- tags_type: map                                 # map | json_string (default map)
+
+Only rule_id is required; everything else is optional.
+"""
+
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-
-from pipeline.correlation.engine import CorrelationRule, load_rule_sql
-
-
-@dataclass(frozen=True)
-class RuleSetConfig:
-    """
-    Ruleset configuration.
-
-    - rules_dir: directory containing *.sql files
-    - allow_rule_ids: if set, only these rule_ids are enabled
-    - deny_rule_ids: if set, these rule_ids are disabled
-    """
-    rules_dir: str = "pipeline/correlation/rules"
-    allow_rule_ids: Optional[Sequence[str]] = None
-    deny_rule_ids: Optional[Sequence[str]] = None
 
 
 @dataclass(frozen=True)
 class RuleSpec:
-    """
-    Declarative mapping for one SQL rule file.
-
-    We keep rule_id & name here for stability, but we also allow SQL header comments:
-      -- rule_id: ...
-      -- name: ...
-      -- REQUIRED CHECK IDS for this rule:
-      --   <check_id>
-    """
-    filename: str
     rule_id: str
-    name: str
+    sql_path: Path
+    name: str = ""
+    description: str = ""
+    severity: str = "info"
+    category: str = ""
+    service: str = ""
     enabled: bool = True
+    requires: Tuple[str, ...] = ()
+    tags_type: str = "map"  # "map" or "json_string"
+    extra: Dict[str, str] = field(default_factory=dict)
 
 
-# Keep ordering deterministic (important for predictable outputs / tests)
-RULE_SPECS: Tuple[RuleSpec, ...] = (
-    RuleSpec(
-        filename="aws_backup_vault_risk.sql",
-        rule_id="aws.backup.correlation.vault_risk",
-        name="AWS Backup vault risk (correlated)",
-        enabled=True,
-    ),
-)
-
-
-def build_rules(cfg: RuleSetConfig | None = None) -> List[CorrelationRule]:
+def _parse_sql_header(sql_text: str) -> Dict[str, str]:
     """
-    Build enabled correlation rules.
-
-    required_check_ids are parsed from the SQL header block so the rule remains
-    self-contained. This is important for:
-      - scalability (engine pre-filters findings)
-      - correctness (no mismatch between SQL and Python)
-    """
-    cfg = cfg or RuleSetConfig()
-
-    allow = set(cfg.allow_rule_ids or [])
-    deny = set(cfg.deny_rule_ids or [])
-
-    rules: List[CorrelationRule] = []
-    for spec in RULE_SPECS:
-        sql_path = Path(cfg.rules_dir) / spec.filename
-        sql_text = load_rule_sql(str(sql_path))
-
-        meta = _parse_sql_header_metadata(sql_text)
-
-        rule_id = meta.get("rule_id") or spec.rule_id
-        name = meta.get("name") or spec.name
-        required_check_ids = _parse_required_check_ids(sql_text)
-
-        enabled = spec.enabled
-        if allow and rule_id not in allow:
-            enabled = False
-        if deny and rule_id in deny:
-            enabled = False
-
-        rules.append(
-            CorrelationRule(
-                rule_id=rule_id,
-                name=name,
-                required_check_ids=tuple(required_check_ids),
-                sql=sql_text,
-                enabled=enabled,
-            )
-        )
-
-    return rules
-
-
-_META_LINE_RE = re.compile(
-    r"^--\s*(?P<key>[a-zA-Z_][a-zA-Z0-9_\- ]*)\s*:\s*(?P<value>.+?)\s*$"
-)
-
-
-def _parse_sql_header_metadata(sql_text: str) -> Dict[str, str]:
-    """
-    Parse simple header metadata lines like:
-      -- rule_id: foo
-      -- name: Bar
+    Parse leading -- key: value lines.
+    Stops at first non-comment, non-empty line.
     """
     meta: Dict[str, str] = {}
-    for line in sql_text.splitlines()[:50]:
-        m = _META_LINE_RE.match(line.strip())
-        if not m:
+    for line in sql_text.splitlines():
+        s = line.strip()
+        if not s:
             continue
-        key = m.group("key").strip().lower()
-        value = m.group("value").strip()
-        if key and value:
-            meta[key] = value
+        if not s.startswith("--"):
+            break
+        # allow "-- key: value"
+        body = s[2:].strip()
+        if ":" in body:
+            k, v = body.split(":", 1)
+            meta[k.strip().lower()] = v.strip()
     return meta
 
 
-def _parse_required_check_ids(sql_text: str) -> Sequence[str]:
+def _coerce_bool(v: str, default: bool = True) -> bool:
+    if v is None:
+        return default
+    s = v.strip().lower()
+    if s in ("1", "true", "yes", "y", "on", "enabled"):
+        return True
+    if s in ("0", "false", "no", "n", "off", "disabled"):
+        return False
+    return default
+
+
+def load_rules_from_dir(
+    rules_dir: Path,
+    allow_rule_ids: Optional[Sequence[str]] = None,
+    deny_rule_ids: Optional[Sequence[str]] = None,
+) -> List[RuleSpec]:
     """
-    Parse the 'REQUIRED CHECK IDS' block from SQL comments.
-
-    Accepted formats:
-
-      -- REQUIRED CHECK IDS for this rule:
-      --   a.b.c
-      --   d.e.f
-
-    or
-
-      -- REQUIRED CHECK IDS:
-      -- - a.b.c
-      -- - d.e.f
+    Loads *.sql rules from a directory with stable ordering.
+    Supports allow/deny lists by rule_id.
     """
-    lines = sql_text.splitlines()
+    allow = set(r.lower() for r in (allow_rule_ids or []))
+    deny = set(r.lower() for r in (deny_rule_ids or []))
 
-    start = None
-    for idx, line in enumerate(lines[:200]):  # only scan top of file
-        if "REQUIRED CHECK IDS" in line.upper():
-            start = idx + 1
-            break
-    if start is None:
-        return ()
+    rule_specs: List[RuleSpec] = []
+    for p in sorted(rules_dir.glob("*.sql")):
+        sql_text = p.read_text(encoding="utf-8")
+        meta = _parse_sql_header(sql_text)
 
-    check_ids: List[str] = []
-    for line in lines[start : start + 80]:
-        stripped = line.strip()
+        rule_id = meta.get("rule_id") or p.stem
+        rid = rule_id.strip()
+        if not rid:
+            raise ValueError(f"Missing rule_id in SQL header and empty filename stem: {p}")
 
-        # Stop once we reach real SQL after collecting at least one ID
-        if not stripped.startswith("--"):
-            if check_ids:
-                break
+        rid_l = rid.lower()
+        if allow and rid_l not in allow:
+            continue
+        if rid_l in deny:
             continue
 
-        # remove comment prefix
-        content = stripped[2:].strip()
+        requires_raw = meta.get("requires", "")
+        requires = tuple(
+            r.strip()
+            for r in requires_raw.split(",")
+            if r.strip()
+        )
 
-        # tolerate bullets
-        content = content.lstrip("-").strip()
+        spec = RuleSpec(
+            rule_id=rid,
+            sql_path=p,
+            name=meta.get("name", ""),
+            description=meta.get("description", ""),
+            severity=meta.get("severity", "info"),
+            category=meta.get("category", ""),
+            service=meta.get("service", ""),
+            enabled=_coerce_bool(meta.get("enabled", "true"), True),
+            requires=requires,
+            tags_type=(meta.get("tags_type", "map") or "map").strip().lower(),
+            extra={k: v for k, v in meta.items() if k not in {
+                "rule_id", "name", "description", "severity", "category",
+                "service", "enabled", "requires", "tags_type"
+            }},
+        )
+        rule_specs.append(spec)
 
-        if not content:
-            if check_ids:
-                break
-            continue
+    # deterministic: enabled first, then rule_id
+    rule_specs.sort(key=lambda r: (not r.enabled, r.rule_id.lower()))
+    return rule_specs
 
-        # stop on obvious end of block
-        if content.upper().startswith(("WITH", "SELECT", "CREATE")):
-            break
 
-        # basic validation: allow dot-separated ids, no spaces
-        if "." in content and " " not in content:
-            check_ids.append(content)
-
-    # de-dupe while preserving order
-    seen = set()
-    out: List[str] = []
-    for cid in check_ids:
-        if cid in seen:
-            continue
-        seen.add(cid)
-        out.append(cid)
-    return tuple(out)
+def default_rules_dir(repo_root: Path) -> Path:
+    """
+    Adjust if your repository layout differs.
+    Expected: pipeline/correlation/rules/*.sql
+    """
+    return repo_root / "pipeline" / "correlation" / "rules"
