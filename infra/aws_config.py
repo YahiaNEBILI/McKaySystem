@@ -7,4 +7,4 @@ SDK_CONFIG = Config(
     read_timeout=60,
 )
 
-AWS_REGIONS = ["eu-west-3", "eu-west-1"]
+AWS_REGIONS = ["eu-west-3", "eu-west-1", "us-east-2"]
