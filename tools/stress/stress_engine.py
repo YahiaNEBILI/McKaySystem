@@ -1,7 +1,7 @@
 # scripts/stress/stress_end_to_end.py
 """
 To run the stress engine : 
-python tools/stress/stress_engine.py --n 200000 --workdir .stress --clean
+python tools.stress.stress_engine --n 200000 --workdir .stress --clean
 """
 from __future__ import annotations
 
