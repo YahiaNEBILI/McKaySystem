@@ -52,8 +52,19 @@ Therefore this engine avoids passing parameters into CREATE VIEW and instead:
 
 from __future__ import annotations
 
-
 import re
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+import duckdb
+
+from contracts.finops_contracts import build_ids_and_validate, normalize_str
+from pipeline.writer_parquet import ParquetWriterConfig, FindingsParquetWriter
+
+from .contracts import CorrelationRule
 
 
 def _validate_rule_sql(sql: str) -> str:
@@ -85,8 +96,7 @@ def _validate_rule_sql(sql: str) -> str:
     # Remove comments and string literals, then look for semicolons
     sanitized = normalized
     sanitized = re.sub(r"/\*.*?\*/", " ", sanitized, flags=re.S)
-    sanitized = re.sub(r"--[^
-]*", " ", sanitized)
+    sanitized = re.sub(r"--[^]*", " ", sanitized)
     sanitized = re.sub(r"'([^']|'')*'", "''", sanitized)
 
     if ";" in sanitized:
@@ -95,21 +105,7 @@ def _validate_rule_sql(sql: str) -> str:
             "Rule SQL must be a single statement: remove extra ';' (only a trailing ';' is allowed)."
         )  # type: ignore[name-defined]
 
-    return normalized + "
-"
-
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
-
-import duckdb
-
-from contracts.finops_contracts import build_ids_and_validate, normalize_str
-from pipeline.writer_parquet import ParquetWriterConfig, FindingsParquetWriter
-
-from .contracts import CorrelationRule
-
+    return normalized + ""
 
 class CorrelationError(RuntimeError):
     """Raised when correlation execution fails."""
