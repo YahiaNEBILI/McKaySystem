@@ -223,26 +223,26 @@ def _run_correlation_step(
 
     Returns a dict of stats for printing.
     """
+
     try:
-        from pipeline.correlation.correlate_findings import (  # pylint: disable=import-error
-            run_correlation,
-        )
-    except Exception as exc:  # pragma: no cover
-        logger.warning(
-            "Correlation step skipped: pipeline/correlate_findings.py not available (%s)",
-            exc,
-        )
+        from pipeline.correlation.correlate_findings import run_correlation
+    except Exception as exc:
+        logger.warning("Correlation step skipped: not available (%s)", exc)
         return {"enabled": False, "emitted": 0, "errors": 0, "out_dir": out_dir}
 
-    stats = run_correlation(
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        run_id=run_id,
-        findings_glob=findings_glob,
-        out_dir=out_dir,
-        threads=int(threads),
-        finding_id_mode=finding_id_mode,
-    )
+    try:
+        stats = run_correlation(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            findings_glob=findings_glob,
+            out_dir=out_dir,
+            threads=int(threads),
+            finding_id_mode=finding_id_mode,
+        )
+    except Exception:
+        logger.exception("Correlation failed at runtime")
+        return {"enabled": True, "emitted": 0, "errors": 1, "out_dir": out_dir, "failed": True}
 
     if not isinstance(stats, dict):
         return {"enabled": True, "emitted": 0, "errors": 0, "out_dir": out_dir}
@@ -588,6 +588,8 @@ def main(argv: Sequence[str]) -> int:
         return 2
 
     if corr_stats.get("enabled") and int(corr_stats.get("errors", 0)) > 0:
+        return 3
+    if corr_stats.get("failed"):
         return 3
 
     return 0
