@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 import boto3
 from botocore.config import Config
-
+from services.pricing_service import PricingService, make_pricing_cache, default_cache_dir
 
 @dataclass(frozen=True)
 class Services:
@@ -35,6 +35,7 @@ class Services:
     ec2: Any
     cloudwatch: Any = None
     region: str = ""
+    pricing: Any = None
 
 
 class ServicesFactory:
@@ -59,6 +60,9 @@ class ServicesFactory:
         self._sdk_config = sdk_config
         self._by_region: Dict[str, Services] = {}
         self._s3_global: Optional[Any] = None
+        self._pricing_client = self._client("pricing", region="us-east-1")
+        self._pricing_cache = make_pricing_cache(base_dir=default_cache_dir(), ttl_days=7)
+        self._pricing_service = PricingService(pricing_client=self._pricing_client, cache=self._pricing_cache)
 
     def _client(self, service: str, *, region: Optional[str]) -> Any:
         kwargs: Dict[str, Any] = {}
@@ -95,6 +99,7 @@ class ServicesFactory:
             backup=self._client("backup", region=reg),
             ec2=self._client("ec2", region=reg),
             cloudwatch=self._client("cloudwatch", region=reg),
+            pricing=self._pricing_service,
             region=reg,
         )
         self._by_region[reg] = svcs
