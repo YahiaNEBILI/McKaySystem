@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import glob as _glob
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -36,20 +36,14 @@ def _rows_to_jsonable(cols: List[str], rows: List[tuple]) -> List[Dict[str, Any]
 
 @dataclass(frozen=True)
 class ExportConfig:
-    """
-    findings_glob remains for backward compatibility.
-
-    Preferred: findings_globs for multiple datasets, e.g.:
-      [
-        "data/finops_findings/**/*.parquet",
-        "data/finops_findings_correlated/**/*.parquet"
-      ]
-    """
     tenant_id: str
     out_dir: str = "webapp_data"
     limit_findings: int = 500
 
+    # Back-compat single glob
     findings_glob: str = ""
+
+    # Preferred for multiple datasets
     findings_globs: Optional[List[str]] = None
 
     # Optional: also export correlated-only JSON
@@ -61,21 +55,13 @@ class FinOpsJsonExporter:
         self.cfg = cfg
         self.con = duckdb.connect(":memory:")
         self.con.execute("PRAGMA threads=4;")
+        self.con.execute("PRAGMA enable_progress_bar=false;")
 
-        # Expand globs -> real files once, and create a view over them
-        files = self._expand_globs_to_files(self._effective_globs())
-        if not files:
+        self._files = self._expand_globs_to_files(self._effective_globs())
+        if not self._files:
             raise ValueError("No parquet files matched findings_glob(s). Check your paths/globs.")
 
-        # DuckDB accepts a Python list as a parameter for read_parquet in SELECTs.
-        # We create a view for reuse in all exports.
-        self.con.execute(
-            "CREATE OR REPLACE VIEW findings_all AS SELECT * FROM read_parquet(?, union_by_name=true)",
-            [files],
-        )
-
-        # Handy debug: show how many files you’re exporting from
-        print(f"[export_json] matched parquet files: {len(files)}")
+        print(f"[export_json] matched parquet files: {len(self._files)}")
 
     def close(self) -> None:
         self.con.close()
@@ -91,18 +77,12 @@ class FinOpsJsonExporter:
 
     @staticmethod
     def _expand_globs_to_files(globs: List[str]) -> List[str]:
-        """
-        Expand '**' globs in Python to concrete parquet file paths.
-        This avoids DuckDB list-literal glob expansion edge cases.
-        """
         files: List[str] = []
         for g in globs:
-            # glob.glob supports ** with recursive=True
             matches = _glob.glob(g, recursive=True)
             for m in matches:
                 if m.endswith(".parquet"):
                     files.append(m)
-        # stable order helps reproducibility
         return sorted(set(files))
 
     # -------------------------
@@ -111,6 +91,9 @@ class FinOpsJsonExporter:
 
     def export_findings(self) -> None:
         sql = """
+        WITH findings_all AS (
+            SELECT * FROM read_parquet(?, union_by_name=true)
+        )
         SELECT
             tenant_id,
             workspace_id,
@@ -145,13 +128,16 @@ class FinOpsJsonExporter:
         ORDER BY run_ts DESC
         LIMIT ?;
         """
-        cur = self.con.execute(sql, [self.cfg.tenant_id, self.cfg.limit_findings])
+        cur = self.con.execute(sql, [self._files, self.cfg.tenant_id, self.cfg.limit_findings])
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         self._write_json("findings.json", _rows_to_jsonable(cols, rows))
 
     def export_summary(self) -> None:
         sql = """
+        WITH findings_all AS (
+            SELECT * FROM read_parquet(?, union_by_name=true)
+        )
         SELECT
             status,
             severity.level AS severity_level,
@@ -161,7 +147,7 @@ class FinOpsJsonExporter:
         GROUP BY 1, 2
         ORDER BY 1, 2;
         """
-        cur = self.con.execute(sql, [self.cfg.tenant_id])
+        cur = self.con.execute(sql, [self._files, self.cfg.tenant_id])
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         matrix = _rows_to_jsonable(cols, rows)
@@ -182,6 +168,9 @@ class FinOpsJsonExporter:
 
     def export_top_savings(self) -> None:
         sql = """
+        WITH findings_all AS (
+            SELECT * FROM read_parquet(?, union_by_name=true)
+        )
         SELECT
             finding_id,
             check_id,
@@ -200,18 +189,16 @@ class FinOpsJsonExporter:
         ORDER BY estimated.monthly_savings DESC
         LIMIT 50;
         """
-        cur = self.con.execute(sql, [self.cfg.tenant_id])
+        cur = self.con.execute(sql, [self._files, self.cfg.tenant_id])
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         self._write_json("top_savings.json", _rows_to_jsonable(cols, rows))
 
     def export_correlated_findings(self) -> None:
-        """
-        Export correlated-only findings to a dedicated file.
-
-        Correlation engine sets source.source_ref like 'correlation:<rule_id>'.
-        """
         sql = """
+        WITH findings_all AS (
+            SELECT * FROM read_parquet(?, union_by_name=true)
+        )
         SELECT
             tenant_id,
             workspace_id,
@@ -243,7 +230,7 @@ class FinOpsJsonExporter:
         ORDER BY run_ts DESC
         LIMIT ?;
         """
-        cur = self.con.execute(sql, [self.cfg.tenant_id, self.cfg.limit_findings])
+        cur = self.con.execute(sql, [self._files, self.cfg.tenant_id, self.cfg.limit_findings])
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         self._write_json("correlated_findings.json", _rows_to_jsonable(cols, rows))
