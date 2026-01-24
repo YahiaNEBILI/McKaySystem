@@ -310,4 +310,4 @@ SELECT
   c.source_fingerprints AS source_fingerprints
 
 FROM combined c
-WHERE c.signal_count >= 2;
+WHERE c.signal_count >= 2
