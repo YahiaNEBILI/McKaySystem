@@ -52,8 +52,6 @@ Therefore this engine avoids passing parameters into CREATE VIEW and instead:
 
 from __future__ import annotations
 
-import re
-
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,46 +64,6 @@ from pipeline.writer_parquet import ParquetWriterConfig, FindingsParquetWriter
 
 from .contracts import CorrelationRule
 
-
-def _validate_rule_sql(sql: str) -> str:
-    """
-    Ensure rule SQL is a *single* statement.
-
-    We allow:
-      - semicolons inside comments and string literals
-      - an optional trailing semicolon at the very end
-
-    We reject:
-      - any statement terminator ';' that appears outside comments/strings
-        (because it implies multiple statements)
-
-    Returns a normalized SQL string (with trailing semicolons stripped).
-    """
-    if sql is None:
-        raise CorrelationError("Rule SQL is empty")  # type: ignore[name-defined]
-
-    normalized = sql.strip()
-    if not normalized:
-        raise CorrelationError("Rule SQL is empty")  # type: ignore[name-defined]
-
-    # Strip one or more trailing semicolons (common copy/paste)
-    normalized = normalized.rstrip()
-    while normalized.endswith(";"):
-        normalized = normalized[:-1].rstrip()
-
-    # Remove comments and string literals, then look for semicolons
-    sanitized = normalized
-    sanitized = re.sub(r"/\*.*?\*/", " ", sanitized, flags=re.S)
-    sanitized = re.sub(r"--[^]*", " ", sanitized)
-    sanitized = re.sub(r"'([^']|'')*'", "''", sanitized)
-
-    if ";" in sanitized:
-        # show a small hint to fix
-        raise CorrelationError(
-            "Rule SQL must be a single statement: remove extra ';' (only a trailing ';' is allowed)."
-        )  # type: ignore[name-defined]
-
-    return normalized + ""
 
 class CorrelationError(RuntimeError):
     """Raised when correlation execution fails."""
@@ -308,7 +266,7 @@ class CorrelationEngine:
             nxt = cleaned[i + 1] if i + 1 < n else ""
 
             if in_line_comment:
-                if ch == "":
+                if ch == "\n":
                     in_line_comment = False
                 i += 1
                 continue
