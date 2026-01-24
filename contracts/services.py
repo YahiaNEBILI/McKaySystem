@@ -33,6 +33,7 @@ class Services:
     rds: Any
     backup: Any
     ec2: Any
+    cloudwatch: Any = None
     region: str = ""
 
 
@@ -93,6 +94,7 @@ class ServicesFactory:
             rds=self._client("rds", region=reg),
             backup=self._client("backup", region=reg),
             ec2=self._client("ec2", region=reg),
+            cloudwatch=self._client("cloudwatch", region=reg),
             region=reg,
         )
         self._by_region[reg] = svcs
