@@ -42,8 +42,8 @@ This README reflects the **current state of the system**, including:
       ├──────────────┐
       ▼              ▼
 ┌────────────┐  ┌───────────────┐
-│ Correlator │  │ CUR Enrichment │
-│ (DuckDB)  │  │ (actual cost)  │
+│ Correlator │  │ CUR Enrichment│
+│ (DuckDB)   │  │ (actual cost) │
 └─────┬──────┘  └──────┬────────┘
       │               │
       └──────┬────────┘
@@ -94,7 +94,6 @@ This README reflects the **current state of the system**, including:
 │   └── __init__.py
 │
 ├── tests/                       # Extensive pytest suite
-│   ├── stress/                  # Determinism & scale tests
 │   ├── test_writer_parquet.py
 │   ├── test_storage_cast.py
 │   └── ...
@@ -112,6 +111,10 @@ This README reflects the **current state of the system**, including:
 │   ├── top_savings.json
 │   ├── correlated_findings.json
 │   └── coverage.json
+│
+├── tools/                       # Extensive pytest suite
+│   ├── stress/  
+│   │   └── stress_engine.py     # Determinism & scale tests
 │
 ├── README.md
 └── pyproject.toml
