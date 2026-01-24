@@ -1,8 +1,11 @@
+-- rule_id: aws.backup.correlation.vault_risk
+-- name: AWS Backup vault risk (correlated)
+-- enabled: true
+-- required_check_ids: aws.backup.vaults.no_lifecycle, aws.backup.vaults.access_policy_misconfig, aws.backup.recovery_points.stale, aws.backup.rules.no_lifecycle, aws.backup.plans.no_selections
+
 -- pipeline/correlation/rules/aws_backup_vault_risk.sql
 --
 -- Correlation: AWS Backup "Vault Risk" meta finding
--- rule_id: aws.backup.correlation.vault_risk
--- name: AWS Backup vault risk (correlated)
 -- -------------------------------------------------
 -- Uses findings emitted by:
 --   - checks/aws/backup_vaults_audit.py

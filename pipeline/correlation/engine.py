@@ -156,7 +156,7 @@ class CorrelationEngine:
     """
 
     def __init__(self, rules: Sequence[CorrelationRule]) -> None:
-        self._rules: List[CorrelationRule] = list(rules)
+        self._rules = list(rules)
 
     def run(self, cfg: CorrelationConfig) -> CorrelationStats:
         stats = CorrelationStats(rules_total=len(self._rules))

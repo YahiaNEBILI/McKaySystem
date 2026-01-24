@@ -5,8 +5,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from pathlib import Path
+
 from pipeline.correlation.engine import CorrelationConfig, CorrelationEngine
-from pipeline.correlation.ruleset import build_rules
+from pipeline.correlation.ruleset import load_rules_from_dir
 
 LOG = logging.getLogger(__name__)
 
@@ -66,7 +68,8 @@ def run_correlation(
         run_ts=run_ts,
     )
 
-    engine = CorrelationEngine(build_rules())
+    rules_dir = Path(__file__).resolve().parent / "rules"  # if this file is under pipeline/correlation/
+    engine = CorrelationEngine(load_rules_from_dir(rules_dir))
 
     stats = engine.run(
         CorrelationConfig(

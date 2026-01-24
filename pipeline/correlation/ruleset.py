@@ -1,52 +1,60 @@
 """
-Correlation ruleset registry.
+Correlation ruleset loader.
 
-Goals
-- Deterministic rule registration & ordering
-- Rule metadata lives in SQL headers to avoid drift
-- Consistent output contract enforcement (at the SQL edge)
+This module loads correlation rules from *.sql files stored in a directory, and
+returns a list[CorrelationRule] that your CorrelationEngine already expects.
 
-SQL rule header format (top of file, -- comments):
+SQL header format (top of file, '--' comments):
 
 -- rule_id: aws_backup_vault_risk
 -- name: AWS Backup vault risk
--- description: Detects risky Backup Vault settings and missing protections.
--- severity: medium
--- category: backup
--- service: aws.backup
 -- enabled: true
--- requires: aws.backup.vaults, aws.backup.plans   # comma-separated table/view ids
--- tags_type: map                                 # map | json_string (default map)
+-- required_check_ids: aws.backup.vaults, aws.backup.plans
 
-Only rule_id is required; everything else is optional.
+Only rule_id is recommended. If missing, filename stem is used.
+required_check_ids is optional; if missing, an empty list is used.
+
+Why this exists:
+- avoids hardcoding rules in Python (scales with more rules)
+- keeps rule metadata close to SQL
+- stable ordering for deterministic runs
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
-@dataclass(frozen=True)
-class RuleSpec:
-    rule_id: str
-    sql_path: Path
-    name: str = ""
-    description: str = ""
-    severity: str = "info"
-    category: str = ""
-    service: str = ""
-    enabled: bool = True
-    requires: Tuple[str, ...] = ()
-    tags_type: str = "map"  # "map" or "json_string"
-    extra: Dict[str, str] = field(default_factory=dict)
+# ---- Keep this type identical to your engine expectation ----
 
+@dataclass(frozen=True)
+class CorrelationRule:
+    """
+    A correlation rule expressed as SQL.
+
+    required_check_ids is used to pre-filter findings for scan reduction.
+
+    The SQL runs against a view named `rule_input` (created by the engine),
+    and should return 1 row == 1 *meta finding*.
+    """
+    rule_id: str
+    name: str
+    required_check_ids: Sequence[str]
+    sql: str
+    enabled: bool = True
+
+
+# ---- SQL header parsing ----
 
 def _parse_sql_header(sql_text: str) -> Dict[str, str]:
     """
-    Parse leading -- key: value lines.
-    Stops at first non-comment, non-empty line.
+    Parse leading SQL comment lines of the form:
+      -- key: value
+
+    Stops at the first non-comment, non-empty line.
+    Keys are lowercased.
     """
     meta: Dict[str, str] = {}
     for line in sql_text.splitlines():
@@ -55,18 +63,20 @@ def _parse_sql_header(sql_text: str) -> Dict[str, str]:
             continue
         if not s.startswith("--"):
             break
-        # allow "-- key: value"
+
         body = s[2:].strip()
-        if ":" in body:
-            k, v = body.split(":", 1)
-            meta[k.strip().lower()] = v.strip()
+        if ":" not in body:
+            continue
+
+        key, value = body.split(":", 1)
+        meta[key.strip().lower()] = value.strip()
     return meta
 
 
-def _coerce_bool(v: str, default: bool = True) -> bool:
-    if v is None:
+def _coerce_bool(value: Optional[str], default: bool = True) -> bool:
+    if value is None:
         return default
-    s = v.strip().lower()
+    s = value.strip().lower()
     if s in ("1", "true", "yes", "y", "on", "enabled"):
         return True
     if s in ("0", "false", "no", "n", "off", "disabled"):
@@ -74,67 +84,88 @@ def _coerce_bool(v: str, default: bool = True) -> bool:
     return default
 
 
+def _parse_csv_list(value: str) -> Tuple[str, ...]:
+    """
+    Parses 'a, b, c' -> ('a','b','c')
+    """
+    if not value:
+        return ()
+    items = []
+    for part in value.split(","):
+        p = part.strip()
+        if p:
+            items.append(p)
+    return tuple(items)
+
+
+# ---- Public API ----
+
+def default_rules_dir(repo_root: Path) -> Path:
+    """
+    Expected repository layout:
+      pipeline/correlation/rules/*.sql
+    """
+    return repo_root / "pipeline" / "correlation" / "rules"
+
+
 def load_rules_from_dir(
     rules_dir: Path,
     allow_rule_ids: Optional[Sequence[str]] = None,
     deny_rule_ids: Optional[Sequence[str]] = None,
-) -> List[RuleSpec]:
+) -> List[CorrelationRule]:
     """
-    Loads *.sql rules from a directory with stable ordering.
-    Supports allow/deny lists by rule_id.
-    """
-    allow = set(r.lower() for r in (allow_rule_ids or []))
-    deny = set(r.lower() for r in (deny_rule_ids or []))
+    Load rules from a directory and return List[CorrelationRule] for the engine.
 
-    rule_specs: List[RuleSpec] = []
-    for p in sorted(rules_dir.glob("*.sql")):
-        sql_text = p.read_text(encoding="utf-8")
+    - Stable ordering (by rule_id)
+    - Optional allow/deny filtering
+    """
+    if not rules_dir.exists() or not rules_dir.is_dir():
+        raise FileNotFoundError(f"Rules directory not found: {rules_dir}")
+
+    allow = {r.strip().lower() for r in (allow_rule_ids or []) if r.strip()}
+    deny = {r.strip().lower() for r in (deny_rule_ids or []) if r.strip()}
+
+    rules: List[CorrelationRule] = []
+
+    for sql_path in sorted(rules_dir.glob("*.sql")):
+        sql_text = sql_path.read_text(encoding="utf-8")
         meta = _parse_sql_header(sql_text)
 
-        rule_id = meta.get("rule_id") or p.stem
-        rid = rule_id.strip()
-        if not rid:
-            raise ValueError(f"Missing rule_id in SQL header and empty filename stem: {p}")
+        rule_id = (meta.get("rule_id") or sql_path.stem).strip()
+        if not rule_id:
+            # Should never happen due to stem fallback, but keep it safe.
+            continue
 
-        rid_l = rid.lower()
+        rid_l = rule_id.lower()
         if allow and rid_l not in allow:
             continue
         if rid_l in deny:
             continue
 
-        requires_raw = meta.get("requires", "")
-        requires = tuple(
-            r.strip()
-            for r in requires_raw.split(",")
-            if r.strip()
+        name = (meta.get("name") or rule_id).strip()
+        enabled = _coerce_bool(meta.get("enabled"), True)
+
+        required_check_ids = _parse_csv_list(meta.get("required_check_ids", ""))
+
+        rules.append(
+            CorrelationRule(
+                rule_id=rule_id,
+                name=name,
+                required_check_ids=list(required_check_ids),
+                sql=sql_text,
+                enabled=enabled,
+            )
         )
 
-        spec = RuleSpec(
-            rule_id=rid,
-            sql_path=p,
-            name=meta.get("name", ""),
-            description=meta.get("description", ""),
-            severity=meta.get("severity", "info"),
-            category=meta.get("category", ""),
-            service=meta.get("service", ""),
-            enabled=_coerce_bool(meta.get("enabled", "true"), True),
-            requires=requires,
-            tags_type=(meta.get("tags_type", "map") or "map").strip().lower(),
-            extra={k: v for k, v in meta.items() if k not in {
-                "rule_id", "name", "description", "severity", "category",
-                "service", "enabled", "requires", "tags_type"
-            }},
-        )
-        rule_specs.append(spec)
-
-    # deterministic: enabled first, then rule_id
-    rule_specs.sort(key=lambda r: (not r.enabled, r.rule_id.lower()))
-    return rule_specs
+    # deterministic ordering (enabled rules first, then rule_id)
+    rules.sort(key=lambda r: (not r.enabled, r.rule_id.lower()))
+    return rules
 
 
-def default_rules_dir(repo_root: Path) -> Path:
+# Backward-compatible alias if you had build_rules() before.
+def build_rules(rules_dir: Path) -> List[CorrelationRule]:
     """
-    Adjust if your repository layout differs.
-    Expected: pipeline/correlation/rules/*.sql
+    Backward-compatible wrapper.
+    If old code calls build_rules(...), it still works.
     """
-    return repo_root / "pipeline" / "correlation" / "rules"
+    return load_rules_from_dir(rules_dir)
