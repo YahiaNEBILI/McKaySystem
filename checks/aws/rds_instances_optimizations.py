@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from botocore.exceptions import ClientError
 
@@ -89,6 +89,54 @@ def _fmt_money_usd(amount: float) -> str:
 
 def _bytes_to_gb(b: float) -> float:
     return float(b) / (1024.0 * 1024.0 * 1024.0)
+
+
+def _hours_per_month() -> float:
+    """Average hours per month (365 days / 12 * 24)."""
+    return (365.0 / 12.0) * 24.0
+
+
+def _resolve_rds_instance_hour_price(
+    ctx: Any,
+    *,
+    region: str,
+    db_instance_class: str,
+    deployment_option: str,
+    engine: str,
+    license_model: str,
+) -> Tuple[Optional[float], str, int]:
+    """Best-effort pricing lookup for an RDS instance hourly on-demand price.
+
+    Returns (hourly_price_usd, notes, confidence).
+
+    - hourly_price_usd is None when unknown.
+    - confidence is a rough indicator used in findings (0-100).
+    """
+
+    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
+    if pricing is None:
+        return (None, "PricingService unavailable; leaving instance pricing unknown.", 20)
+
+    try:
+        quote = pricing.rds_instance_hour(
+            region=region,
+            db_instance_class=db_instance_class,
+            deployment_option=deployment_option,
+            database_engine=engine or None,
+            license_model=license_model or None,
+        )
+    except Exception:
+        quote = None
+
+    if quote is None:
+        return (None, "Pricing lookup failed/unknown; leaving instance pricing unknown.", 20)
+
+    conf = 70 if str(quote.source) == "pricing_api" else 60
+    return (
+        float(quote.unit_price_usd),
+        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
+        conf,
+    )
 
 
 def _percentile(values: Sequence[float], p: float) -> Optional[float]:
@@ -477,6 +525,7 @@ class RDSInstancesOptimizationsChecker:
         instance_class = str(inst.get("DBInstanceClass") or "")
         engine = str(inst.get("Engine") or "")
         engine_version = str(inst.get("EngineVersion") or "")
+        license_model = str(inst.get("LicenseModel") or "")
 
         # 1) stopped_instances_with_storage
         if status == "stopped" and allocated_gb > 0:
@@ -550,6 +599,41 @@ class RDSInstancesOptimizationsChecker:
 
         # 3) multi_az_non_prod
         if multi_az and _is_non_prod(tags):
+            # Best-effort savings estimate: Multi-AZ vs Single-AZ hourly delta.
+            hrs = _hours_per_month()
+            hz_multi, notes_multi, conf_multi = _resolve_rds_instance_hour_price(
+                ctx,
+                region=region,
+                db_instance_class=instance_class,
+                deployment_option="Multi-AZ",
+                engine=engine,
+                license_model=license_model,
+            )
+            hz_single, notes_single, conf_single = _resolve_rds_instance_hour_price(
+                ctx,
+                region=region,
+                db_instance_class=instance_class,
+                deployment_option="Single-AZ",
+                engine=engine,
+                license_model=license_model,
+            )
+
+            monthly_savings = 0.0
+            monthly_cost = 0.0
+            confidence = 30
+            estimate_notes = "Accurate savings requires instance pricing; this is a configuration signal without CUR."
+
+            if hz_multi is not None and hz_single is not None:
+                # Multi-AZ hourly is typically higher; we report the delta as a potential savings.
+                delta = max(0.0, float(hz_multi) - float(hz_single))
+                monthly_savings = delta * hrs
+                monthly_cost = float(hz_multi) * hrs
+                confidence = min(80, max(conf_multi, conf_single))
+                estimate_notes = (
+                    f"Estimated delta=(Multi-AZ - Single-AZ) * {hrs:.1f}h/mo. "
+                    f"multi: {notes_multi}; single: {notes_single}"
+                )
+
             yield FindingDraft(
                 check_id="aws.rds.multi_az.non_prod",
                 check_name="RDS Multi-AZ enabled on non-production",
@@ -561,10 +645,10 @@ class RDSInstancesOptimizationsChecker:
                 scope=scope,
                 message="Multi-AZ is enabled and the instance appears to be non-production based on env tags.",
                 recommendation="If HA is not required in non-prod, consider Single-AZ after validating compliance/DR needs.",
-                estimated_monthly_savings="0",
-                estimated_monthly_cost="0",
-                estimate_confidence=30,
-                estimate_notes="Accurate savings requires instance pricing; this is a configuration signal without CUR.",
+                estimated_monthly_savings=_fmt_money_usd(monthly_savings),
+                estimated_monthly_cost=_fmt_money_usd(monthly_cost),
+                estimate_confidence=confidence,
+                estimate_notes=estimate_notes,
                 tags=tags,
             ).with_issue(check="multi_az_non_prod", db_instance=instance_id)
 
@@ -623,7 +707,29 @@ class RDSInstancesOptimizationsChecker:
                 )
                 if rr is not None:
                     p95_read_iops, dp_count, p95_conns = rr
-                    # Cost is meaningful with PricingService; for now we keep savings unknown (0) but provide strong evidence.
+                    # Cost is meaningful with PricingService; if available we emit a best-effort savings estimate.
+                    hrs = _hours_per_month()
+                    dep = "Multi-AZ" if multi_az else "Single-AZ"
+                    hourly, notes, conf = _resolve_rds_instance_hour_price(
+                        ctx,
+                        region=region,
+                        db_instance_class=instance_class,
+                        deployment_option=dep,
+                        engine=engine,
+                        license_model=license_model,
+                    )
+                    est_cost = 0.0
+                    est_savings = 0.0
+                    est_conf = 70
+                    est_notes = (
+                        "Signal based on CloudWatch ReadIOPS. Accurate savings requires instance pricing enrichment."
+                    )
+                    if hourly is not None:
+                        est_cost = float(hourly) * hrs
+                        est_savings = est_cost
+                        est_conf = min(90, max(70, conf))
+                        est_notes = f"Estimated on-demand instance cost * {hrs:.1f}h/mo. {notes}"
+
                     yield FindingDraft(
                         check_id="aws.rds.read_replica.unused",
                         check_name="RDS unused read replica",
@@ -641,12 +747,10 @@ class RDSInstancesOptimizationsChecker:
                             "Confirm the replica is not required for DR/reporting/migration. "
                             "If unused, consider deleting it, or keeping it only during reporting windows."
                         ),
-                        estimated_monthly_savings="0",
-                        estimated_monthly_cost="0",
-                        estimate_confidence=70,
-                        estimate_notes=(
-                            "Signal based on CloudWatch ReadIOPS. Accurate savings requires instance pricing enrichment."
-                        ),
+                        estimated_monthly_savings=_fmt_money_usd(est_savings),
+                        estimated_monthly_cost=_fmt_money_usd(est_cost),
+                        estimate_confidence=est_conf,
+                        estimate_notes=est_notes,
                         tags=tags,
                         dimensions={
                             "window_days": str(self._replica_unused_window_days),
