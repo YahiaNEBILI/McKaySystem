@@ -20,7 +20,7 @@ def _draft_unattached_volume(
     volume_type: str = "gp3",
     size_gb: int = 100,
     age_days: int = 45,
-    monthly_cost: str = "9.500000",
+    monthly_cost: float = 9.5,
 ) -> FindingDraft:
     return FindingDraft(
         check_id="aws.ec2.ebs.unattached_volume",
@@ -173,7 +173,7 @@ def test_rule_is_deterministic_for_same_input(tmp_path: Path) -> None:
             account_id=account_id,
             region=region,
             volume_id=volume_id,
-            monthly_cost="55.000000",
+            monthly_cost=55.0,
         ),
         _draft_volume_unencrypted(account_id=account_id, region=region, volume_id=volume_id),
     ]

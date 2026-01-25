@@ -71,7 +71,7 @@ def _draft_stale_recovery_point(
         message="test fixture",
         recommendation="",
         estimate_confidence=50,
-        estimated_monthly_cost="12.345678",
+        estimated_monthly_cost=12.345678,
         # IMPORTANT: the rule joins via this dimension
         dimensions={"vault_name": vault_name},
         issue_key={

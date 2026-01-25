@@ -52,23 +52,23 @@ def _minimal_wire_record() -> dict:
         "remediation": "",
         "links": [],
 
-        # Estimated: in wire we allow numeric strings / empty strings
+        # Estimated: money fields are numeric or None (Option B)
         "estimated": {
-            "monthly_savings": "12.340000",
-            "monthly_cost": "",
-            "one_time_savings": "",
+            "monthly_savings": 12.34,
+            "monthly_cost": None,
+            "one_time_savings": None,
             "confidence": 70,
             "notes": "",
         },
 
         # Actual can be empty in wire
         "actual": {
-            "cost_7d": "",
-            "cost_30d": "",
-            "cost_mtd": "",
-            "cost_prev_month": "",
-            "savings_7d": "",
-            "savings_30d": "",
+            "cost_7d": None,
+            "cost_30d": None,
+            "cost_mtd": None,
+            "cost_prev_month": None,
+            "savings_7d": None,
+            "savings_30d": None,
             "model": {
                 "currency": "USD",
                 "cost_model": "",

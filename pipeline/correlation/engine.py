@@ -58,6 +58,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from decimal import Decimal
+
 import json
 import traceback
 
@@ -78,15 +80,27 @@ class CorrelationError(RuntimeError):
 # -------------------------------
 
 
-def _money_or_zero(value: Any) -> str:
+def _money_or_zero(value: Any) -> float:
+    """Normalize money to a numeric type for correlated findings.
+
+    Strict policy : money values must be numeric (float/int) or None.
+    In correlation output, we keep historical behavior of returning 0.0 when missing.
+    """
     if value is None:
-        return "0"
+        return 0.0
+    if isinstance(value, bool):
+        raise ValueError("money value cannot be bool")
+    if isinstance(value, (int, float, Decimal)):
+        return float(value)
     if isinstance(value, str):
-        txt = value.strip()
-        return txt if txt != "" else "0"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return str(value)
+        s = value.strip()
+        if s == "":
+            return 0.0
+        try:
+            return float(s)
+        except ValueError as exc:
+            raise ValueError(f"money value must be numeric, got {value!r}") from exc
+    raise ValueError(f"money value must be numeric, got {type(value).__name__}: {value!r}")
 
 
 def _normalize_confidence(value: Any) -> int:
