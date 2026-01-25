@@ -1,3 +1,5 @@
+"""Unit tests for the AWS Backup Vaults audit checker."""
+
 # tests/test_backup_vaults_audit.py
 from __future__ import annotations
 

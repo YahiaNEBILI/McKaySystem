@@ -1,3 +1,9 @@
+"""Casting helpers from wire-format findings to Arrow/storage format.
+
+The storage boundary is intentionally strict: any schema/type mismatch should be
+surfaced early (tests/CI) rather than silently drifting.
+"""
+
 # finops/contracts/storage_cast.py
 from __future__ import annotations
 

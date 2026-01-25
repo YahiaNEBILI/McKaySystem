@@ -1,3 +1,9 @@
+"""Test harness for correlation rules.
+
+These helpers build synthetic Parquet datasets and run the correlation engine
+end-to-end for rule-level tests.
+"""
+
 from __future__ import annotations
 
 import glob

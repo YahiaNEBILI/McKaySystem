@@ -15,6 +15,21 @@ This README reflects the **current state of the system**, including:
 - stress-testing and determinism guarantees
 - smart export for a Flask UI
 
+## Getting started
+
+- New here? Read `docs/onboarding.md`.
+- Want the detailed architecture? Start with `docs/architecture/architecture.md`
+  and `docs/architecture/pipeline_overview.md`.
+
+Quick commands:
+
+```bash
+pip install -e ".[dev]"
+pytest
+python runner.py --tenant acme --workspace prod
+python export_findings.py
+```
+
 ---
 
 ## High-level architecture

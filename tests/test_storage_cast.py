@@ -1,3 +1,5 @@
+"""Unit tests for wire-to-storage casting utilities."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

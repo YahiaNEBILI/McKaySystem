@@ -1,3 +1,5 @@
+"""Unit tests for the Parquet writer."""
+
 from __future__ import annotations
 
 import os

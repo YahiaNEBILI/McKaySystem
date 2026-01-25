@@ -1,3 +1,5 @@
+"""Unit tests for the RDS instances optimizations checker."""
+
 # tests/test_rds_instances_optimizations.py
 from __future__ import annotations
 

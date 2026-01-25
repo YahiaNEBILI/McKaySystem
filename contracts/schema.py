@@ -1,3 +1,11 @@
+"""Arrow schema definitions for storage datasets.
+
+This module is the single source of truth for how findings are represented on
+disk (Parquet/Arrow). Checkers should *not* depend on Arrow types directly;
+instead they emit wire-format dicts that are validated and then cast using
+:func:`contracts.storage_cast.cast_for_storage`.
+"""
+
 import pyarrow as pa
 
 # -----------------------------

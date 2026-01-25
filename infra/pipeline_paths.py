@@ -1,3 +1,10 @@
+"""Path and glob conventions for pipeline datasets.
+
+All code that needs to know where datasets live (raw findings, correlated
+findings, CUR inputs, exports, ...) should go through
+:class:`infra.pipeline_paths.PipelinePaths`.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

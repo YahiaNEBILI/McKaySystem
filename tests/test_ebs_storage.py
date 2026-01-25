@@ -1,3 +1,5 @@
+"""Unit tests for the EBS storage checker."""
+
 # tests/checks/aws/test_ebs_storage.py
 from __future__ import annotations
 

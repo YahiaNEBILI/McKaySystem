@@ -1,3 +1,12 @@
+"""AWS SDK configuration for the engine.
+
+The runner and service factory import from this module to keep AWS/client tuning
+in one place.
+
+Configuration knobs you are expected to edit:
+- :data:`AWS_REGIONS` controls which AWS regions the runner will iterate over.
+"""
+
 from botocore.config import Config
 
 SDK_CONFIG = Config(

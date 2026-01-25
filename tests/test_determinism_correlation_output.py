@@ -1,3 +1,8 @@
+"""Determinism tests for correlated findings output.
+
+These tests ensure that correlation results do not depend on input ordering.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

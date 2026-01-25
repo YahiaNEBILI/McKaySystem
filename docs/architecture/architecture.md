@@ -77,8 +77,6 @@ Rules:
 - should remain fast and safe (timeouts, error handling)
 - checker module must register itself in the checker registry at import time.
 
-Example : 
-
 ```python
 @register_checker("checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker")
 def _factory(ctx, bootstrap):

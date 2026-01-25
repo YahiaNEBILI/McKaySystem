@@ -1,3 +1,5 @@
+"""Shared helpers for determinism tests."""
+
 # tests/_determinism.py
 from __future__ import annotations
 

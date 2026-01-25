@@ -1,3 +1,11 @@
+"""DuckDB-powered JSON export.
+
+The Flask UI (and other thin consumers) read pre-materialized JSON files.
+This module loads the Parquet datasets (raw + correlated + optionally enriched)
+into DuckDB and writes a few JSON artifacts (summary, top savings, findings
+lists, coverage).
+"""
+
 from __future__ import annotations
 
 import glob as _glob

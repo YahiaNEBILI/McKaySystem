@@ -1,3 +1,5 @@
+"""Unit tests for the RDS snapshots cleanup checker."""
+
 # tests/test_rds_snapshots_cleanup.py
 from __future__ import annotations
 

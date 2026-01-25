@@ -1,3 +1,9 @@
+"""Enrich findings with actual costs derived from CUR facts.
+
+This stage joins findings (resource-level signals) with normalized CUR data to
+populate ``actual_*`` fields where possible.
+"""
+
 from __future__ import annotations
 
 import glob

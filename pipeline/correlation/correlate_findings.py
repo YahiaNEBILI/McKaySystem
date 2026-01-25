@@ -1,4 +1,11 @@
-# pipeline/correlate_findings.py
+"""Runner-facing entrypoint for correlation.
+
+This module glues the correlation engine into the main runner:
+- loads rules
+- scans the raw findings dataset
+- writes correlated findings to a separate dataset
+"""
+
 from __future__ import annotations
 
 import logging

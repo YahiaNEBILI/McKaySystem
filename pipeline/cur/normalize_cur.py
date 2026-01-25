@@ -1,3 +1,9 @@
+"""Normalize AWS Cost and Usage Report (CUR) data into cost facts.
+
+The CUR ingestion is optional and intended to enrich findings with actual cost
+signals later in the pipeline.
+"""
+
 from __future__ import annotations
 
 import glob

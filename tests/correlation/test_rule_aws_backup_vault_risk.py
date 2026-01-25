@@ -1,3 +1,5 @@
+"""Rule-level tests for the AWS Backup vault risk correlation rule."""
+
 from __future__ import annotations
 
 from pathlib import Path

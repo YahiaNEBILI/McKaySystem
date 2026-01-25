@@ -1,3 +1,9 @@
+"""Thin wrapper utilities around DuckDB.
+
+Kept separate so higher-level pipeline modules can depend on a small surface
+area (connection creation, safe parameter handling, convenience helpers).
+"""
+
 from __future__ import annotations
 
 import json

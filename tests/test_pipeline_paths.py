@@ -1,3 +1,5 @@
+"""Unit tests for :class:`infra.pipeline_paths.PipelinePaths`."""
+
 from pathlib import Path
 
 import pytest

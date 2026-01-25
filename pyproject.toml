@@ -1,3 +1,14 @@
+[project]
+name = "mckaysystem"
+version = "0.1.0"
+description = "Infra-native FinOps signal engine (checkers + contracts + Parquet + correlation + export)."
+requires-python = ">=3.11"
+dependencies = [
+  "boto3>=1.28",
+  "duckdb>=0.9",
+  "pyarrow>=14",
+]
+
 [project.optional-dependencies]
 dev = [
   "pytest>=7.0",

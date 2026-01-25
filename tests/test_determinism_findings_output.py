@@ -1,3 +1,9 @@
+"""Determinism tests for raw findings output.
+
+The runner/writer should produce stable Parquet output regardless of discovery
+order or internal iteration ordering.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

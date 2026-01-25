@@ -1,4 +1,10 @@
-# infra/logging_config.py
+"""Centralized logging configuration.
+
+The repository supports both human-friendly text logs and structured JSON logs.
+The runner uses this module to configure logging in a defensive way (so it
+doesn't break environments that already configure root handlers).
+"""
+
 from __future__ import annotations
 
 import json

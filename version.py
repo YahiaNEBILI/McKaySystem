@@ -1,7 +1,12 @@
-# finops/version.py
+"""Project version constants.
 
-ENGINE_NAME = "finopsanalyzer"
-ENGINE_VERSION = "0.1.0"
+These constants are used in logs and embedded in produced datasets (Parquet) so
+that exported artifacts can be traced back to a specific engine/ruleset/schema
+version.
+"""
 
-RULEPACK_VERSION = "0.1.0"
-SCHEMA_VERSION = 1
+ENGINE_NAME: str = "finopsanalyzer"
+ENGINE_VERSION: str = "0.1.0"
+
+RULEPACK_VERSION: str = "0.1.0"
+SCHEMA_VERSION: int = 1

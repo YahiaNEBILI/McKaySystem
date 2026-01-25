@@ -1,3 +1,10 @@
+"""Typed Parquet writer for FinOps findings.
+
+This is the storage boundary: it validates records against the Arrow schema and
+writes partitioned Parquet datasets. The writer is designed to be deterministic
+and append-friendly.
+"""
+
 from __future__ import annotations
 
 import os

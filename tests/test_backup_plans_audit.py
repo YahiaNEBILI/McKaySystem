@@ -1,3 +1,5 @@
+"""Unit tests for the AWS Backup Plans audit checker."""
+
 # tests/test_backup_plans_audit.py
 from __future__ import annotations
 
