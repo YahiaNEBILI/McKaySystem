@@ -46,6 +46,16 @@ from typing import Any, Dict, Iterable, Iterator, Optional
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
+from checks.aws._common import (
+    AwsAccountContext,
+    gb_from_bytes,
+    is_suppressed,
+    money,
+    now_utc,
+    safe_float,
+    safe_region_from_client,
+    utc,
+)
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
@@ -60,32 +70,6 @@ _SUPPRESS_KEYS = {
     "keep",
 }
 _SUPPRESS_VALUES = set(_SUPPRESS_KEYS)
-
-
-@dataclass(frozen=True)
-class AwsAccountContext:
-    account_id: str
-    billing_account_id: Optional[str] = None
-    partition: str = "aws"
-
-
-def _utc(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _safe_region_from_client(client: Any) -> str:
-    try:
-        return str(getattr(getattr(client, "meta", None), "region_name", "") or "")
-    except Exception:  # pragma: no cover
-        return ""
 
 
 def _pricing_backup_gb_month_price(
@@ -142,61 +126,6 @@ def _pricing_backup_gb_month_price(
             continue
 
     return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
-
-def _money(amount: float) -> float:
-    """Return numeric money for storage. Formatting is presentation-only."""
-    return round(float(amount), 2)
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return float(default)
-        if isinstance(value, (int, float)):
-            return float(value)
-        return float(value)
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def _gb_from_bytes(size_bytes: Any) -> float:
-    size = _safe_float(size_bytes, default=0.0)
-    if size <= 0.0:
-        return 0.0
-    return size / (1024.0**3)
-
-
-def _is_suppressed(tags: Any) -> bool:
-    """
-    Return True if tags imply intentional retention.
-
-    `tags` may be:
-      - dict {k:v}
-      - list of {"Key":..,"Value":..}
-      - None
-    """
-    if not tags:
-        return False
-
-    if isinstance(tags, dict):
-        for k, v in tags.items():
-            if str(k).strip().lower() in _SUPPRESS_KEYS:
-                return True
-            if str(v).strip().lower() in _SUPPRESS_VALUES:
-                return True
-        return False
-
-    if isinstance(tags, list):
-        for item in tags:
-            if not isinstance(item, dict):
-                continue
-            key = str(item.get("Key") or "").strip().lower()
-            val = str(item.get("Value") or "").strip().lower()
-            if key in _SUPPRESS_KEYS or val in _SUPPRESS_VALUES:
-                return True
-        return False
-
-    return False
 
 
 def _paginate_items(
@@ -268,7 +197,7 @@ class AwsBackupPlansAuditChecker:
             raise RuntimeError("AwsBackupPlansAuditChecker requires ctx.services.backup")
 
         backup: BaseClient = ctx.services.backup
-        region = _safe_region_from_client(backup)
+        region = safe_region_from_client(backup)
 
         # Run sections independently so we can produce a single clear access error per missing permission set.
         try:
@@ -387,7 +316,7 @@ class AwsBackupPlansAuditChecker:
     # ------------------------- 3) stale recovery points --------------------------- #
 
     def _stale_recovery_points(self, ctx, backup: BaseClient, region: str) -> Iterable[FindingDraft]:
-        now = _now_utc()
+        now = now_utc()
         cutoff = (now - timedelta(days=self._stale_days)).replace(microsecond=0)
         skip_cutoff = now + timedelta(days=self._skip_if_deleting_within_days)
 
@@ -403,7 +332,7 @@ class AwsBackupPlansAuditChecker:
                 params={"BackupVaultName": vault_name},
             ):
                 arn = str(rp.get("RecoveryPointArn") or "")
-                created = _utc(rp.get("CreationDate"))
+                created = utc(rp.get("CreationDate"))
                 status = str(rp.get("Status") or "")
                 storage_class = str(rp.get("StorageClass") or "").upper()
 
@@ -416,15 +345,15 @@ class AwsBackupPlansAuditChecker:
 
                 # If AWS already plans to delete soon, skip to reduce noise.
                 calc_lifecycle = rp.get("CalculatedLifecycle") or {}
-                delete_at = _utc(calc_lifecycle.get("DeleteAt")) if isinstance(calc_lifecycle, dict) else None
+                delete_at = utc(calc_lifecycle.get("DeleteAt")) if isinstance(calc_lifecycle, dict) else None
                 if delete_at is not None and delete_at <= skip_cutoff:
                     continue
 
                 # Best-effort suppression (may not be present for all list responses).
-                if _is_suppressed(rp.get("Tags")):
+                if is_suppressed(rp.get("Tags"), suppress_keys=_SUPPRESS_KEYS, suppress_values=_SUPPRESS_VALUES):
                     continue
 
-                size_gb = _gb_from_bytes(rp.get("BackupSizeInBytes"))
+                size_gb = gb_from_bytes(rp.get("BackupSizeInBytes"))
 
                 fallback_unit = self._cold_price if storage_class == "COLD" else self._warm_price
                 unit, unit_notes, unit_conf = _pricing_backup_gb_month_price(
@@ -470,8 +399,8 @@ class AwsBackupPlansAuditChecker:
                         "delete_at": delete_at.isoformat().replace("+00:00", "Z") if delete_at else "",
                         "size_gb": f"{size_gb:.3f}",
                     },
-                    estimated_monthly_cost=_money(est_cost) if est_cost > 0.0 else None,
-                    estimated_monthly_savings=_money(potential) if potential > 0.0 else None,
+                    estimated_monthly_cost=money(est_cost) if est_cost > 0.0 else None,
+                    estimated_monthly_savings=money(potential) if potential > 0.0 else None,
                     estimate_confidence=(min(90, max(20, unit_conf + 10)) if est_cost > 0.0 else 10),
                     estimate_notes=(
                         f"Estimated from BackupSizeInBytes and $/GB-month unit price. {unit_notes} "
@@ -542,8 +471,8 @@ def _factory(ctx, bootstrap):
     stale_days = int(bootstrap.get("backup_stale_recovery_point_days", 90))
 
     # Cost estimation knobs (approximate defaults)
-    warm_price = _safe_float(bootstrap.get("backup_warm_gb_month_price_usd", 0.05), default=0.05)
-    cold_price = _safe_float(bootstrap.get("backup_cold_gb_month_price_usd", 0.01), default=0.01)
+    warm_price = safe_float(bootstrap.get("backup_warm_gb_month_price_usd", 0.05), default=0.05)
+    cold_price = safe_float(bootstrap.get("backup_cold_gb_month_price_usd", 0.01), default=0.01)
 
     skip_if_deleting_within_days = int(bootstrap.get("backup_skip_if_deleting_within_days", 14))
 

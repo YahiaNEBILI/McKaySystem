@@ -61,6 +61,17 @@ from typing import Any, Iterable, Optional, Set, Tuple
 
 from botocore.exceptions import ClientError
 
+from checks.aws._common import (
+    AwsAccountContext,
+    arn_region,
+    is_suppressed,
+    money,
+    now_utc,
+    safe_float,
+    safe_region_from_client,
+    utc,
+    normalize_tags,
+)
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
@@ -68,59 +79,7 @@ from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 SUPPRESS_TAG_KEYS = {"retain", "legal-hold", "backup-policy"}
 
 
-@dataclass(frozen=True)
-class AwsAccountContext:
-    """Provide account context"""
-    account_id: str
-    billing_account_id: Optional[str] = None
-    partition: str = "aws"
-
-
-def _utc(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _safe_region_from_client(rds_client) -> str:
-    try:
-        return str(getattr(getattr(rds_client, "meta", None), "region_name", "") or "")
-    except Exception:  # pragma: no cover
-        return ""
-
-
-def _arn_region(arn: str) -> str:
-    # arn:partition:service:region:account:resource...
-    try:
-        parts = arn.split(":")
-        if len(parts) >= 4 and parts[0] == "arn":
-            return parts[3] or ""
-    except Exception:  # pragma: no cover
-        return ""
-    return ""
-
-
-def _money(amount: float) -> float:
-    """Return numeric money for storage. Formatting is presentation-only."""
-    return round(float(amount), 2)
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Best-effort float conversion, mypy/pylance-friendly."""
-    try:
-        if value is None:
-            return default
-        if isinstance(value, (int, float)):
-            return float(value)
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+ 
 
 
 def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
@@ -154,24 +113,10 @@ class RDSSnapshotsCleanupChecker:
     checker_id = "aws.rds.snapshots.cleanup"
 
     def _extract_tags(self, snap: dict) -> dict[str, str]:
-        tags: dict[str, str] = {}
-        for t in snap.get("TagList", []) or []:
-            key = str(t.get("Key") or "").strip().lower()
-            val = str(t.get("Value") or "").strip().lower()
-            if key:
-                tags[key] = val
-        return tags
+        return normalize_tags(snap.get("TagList", []) or [])
 
     def _should_suppress(self, tags: dict[str, str]) -> bool:
-        # If tag key exists with any value → suppress
-        for k in tags:
-            if k in SUPPRESS_TAG_KEYS:
-                return True
-        # If tag value matches suppression keywords
-        for v in tags.values():
-            if v in SUPPRESS_TAG_KEYS:
-                return True
-        return False
+        return is_suppressed(tags, suppress_keys=SUPPRESS_TAG_KEYS, suppress_values=SUPPRESS_TAG_KEYS)
 
     def __init__(
         self,
@@ -189,8 +134,8 @@ class RDSSnapshotsCleanupChecker:
             raise RuntimeError("RDSSnapshotsCleanupChecker requires ctx.services.rds")
 
         rds = ctx.services.rds
-        region = _safe_region_from_client(rds)
-        cutoff = _now_utc() - timedelta(days=self._stale_days)
+        region = safe_region_from_client(rds)
+        cutoff = now_utc() - timedelta(days=self._stale_days)
 
         # Resolve pricing once per run/region (fast + cached).
         usd_per_gb_month, pricing_notes, pricing_conf = _resolve_rds_snapshot_storage_price_usd_per_gb_month(
@@ -256,7 +201,7 @@ class RDSSnapshotsCleanupChecker:
     ) -> Iterable[FindingDraft]:
         sid = str(snap.get("DBSnapshotIdentifier") or "")
         snapshot_type = str(snap.get("SnapshotType") or "").lower()
-        created = _utc(snap.get("SnapshotCreateTime"))
+        created = utc(snap.get("SnapshotCreateTime"))
         arn = self._snapshot_arn(snap, "db")
 
         tags = self._extract_tags(snap)
@@ -309,7 +254,7 @@ class RDSSnapshotsCleanupChecker:
     ) -> Iterable[FindingDraft]:
         sid = str(snap.get("DBClusterSnapshotIdentifier") or "")
         snapshot_type = str(snap.get("SnapshotType") or "").lower()
-        created = _utc(snap.get("SnapshotCreateTime"))
+        created = utc(snap.get("SnapshotCreateTime"))
         arn = self._snapshot_arn(snap, "cluster")
 
         tags = self._extract_tags(snap)
@@ -365,7 +310,7 @@ class RDSSnapshotsCleanupChecker:
         We estimate storage cost for snapshots as:
             allocated_storage_gb * usd_per_gb_month
         """
-        size_gb = _safe_float(snap.get("AllocatedStorage"), default=0.0)
+        size_gb = safe_float(snap.get("AllocatedStorage"), default=0.0)
         if size_gb <= 0.0:
             # Unknown sizing for many Aurora snapshots; avoid misleading 0.
             return (None, None, 10, f"Snapshot size unavailable for {kind} snapshot; cost not estimated.")
@@ -374,7 +319,7 @@ class RDSSnapshotsCleanupChecker:
         if est_cost <= 0.0:
             return (None, None, 10, f"Estimated cost <= 0 for {kind} snapshot; check pricing inputs.")
 
-        money = _money(est_cost)
+        cost_usd = money(est_cost)
 
         # Base heuristic confidence is 50 (we only know storage, not requests/backup deltas).
         confidence = 50
@@ -384,7 +329,7 @@ class RDSSnapshotsCleanupChecker:
             f"Estimated using AllocatedStorage={size_gb:.0f}GB and ${usd_per_gb_month}/GB-month."
         )
         # Potential savings assumes deletion of the snapshot.
-        return (money, money, confidence, notes)
+        return (cost_usd, cost_usd, confidence, notes)
 
     # ---------- findings ----------
 
@@ -496,8 +441,8 @@ class RDSSnapshotsCleanupChecker:
         source_region = str(snap.get("SourceRegion") or "")
         if source_region and current_region and source_region != current_region:
             return True
-        arn_region = _arn_region(snapshot_arn) if snapshot_arn else ""
-        if arn_region and current_region and arn_region != current_region:
+        arn_reg = arn_region(snapshot_arn) if snapshot_arn else ""
+        if arn_reg and current_region and arn_reg != current_region:
             return True
         return False
 
@@ -544,7 +489,7 @@ def _factory(ctx, bootstrap):
 
     billing_account_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     stale_days = int(bootstrap.get("rds_snapshot_stale_days", 30))
-    price = _safe_float(bootstrap.get("rds_snapshot_gb_month_price_usd", 0.095), default=0.095)
+    price = safe_float(bootstrap.get("rds_snapshot_gb_month_price_usd", 0.095), default=0.095)
     partition = str(bootstrap.get("aws_partition") or "aws")
 
     account = AwsAccountContext(account_id=account_id, billing_account_id=billing_account_id, partition=partition)

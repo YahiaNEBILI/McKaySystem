@@ -46,6 +46,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
+from checks.aws._common import AwsAccountContext, safe_region_from_client
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
@@ -68,18 +69,7 @@ _SENSITIVE_ACTIONS = {
 }
 
 
-@dataclass(frozen=True)
-class AwsAccountContext:
-    account_id: str
-    billing_account_id: Optional[str] = None
-    partition: str = "aws"
-
-
-def _safe_region_from_client(client: Any) -> str:
-    try:
-        return str(getattr(getattr(client, "meta", None), "region_name", "") or "")
-    except Exception:  # pragma: no cover
-        return ""
+ 
 
 
 def _paginate_items(
@@ -272,7 +262,7 @@ class AwsBackupVaultsAuditChecker:
             raise RuntimeError("AwsBackupVaultsAuditChecker requires ctx.services.backup")
 
         backup: BaseClient = ctx.services.backup
-        region = _safe_region_from_client(backup)
+        region = safe_region_from_client(backup)
 
         try:
             vaults = list(_paginate_items(backup, "list_backup_vaults", "BackupVaultList"))

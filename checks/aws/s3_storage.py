@@ -23,18 +23,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
+from checks.aws._common import AwsAccountContext, now_utc
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
 
-@dataclass(frozen=True)
-class AwsAccountContext:
-    account_id: str
-    billing_account_id: Optional[str] = None
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+ 
 
 
 def _normalize_s3_location_constraint(value: Optional[str]) -> str:
@@ -377,7 +371,7 @@ class S3StorageChecker:
           - 0.0: bucket has 0 bytes for this storage type
           - >0: GiB value
         """
-        end = _utc_now()
+        end = now_utc()
         start = end - timedelta(days=max(1, self._lookback_days))
         try:
             resp = cloudwatch.get_metric_statistics(

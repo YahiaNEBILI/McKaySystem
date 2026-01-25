@@ -31,6 +31,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 from botocore.exceptions import ClientError
 
+from checks.aws._common import normalize_tags
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
@@ -157,13 +158,8 @@ def _percentile(values: Sequence[float], p: float) -> Optional[float]:
 
 
 def _extract_tags(tag_list: Sequence[Dict[str, Any]]) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for t in tag_list or []:
-        k = str(t.get("Key") or "").strip()
-        v = str(t.get("Value") or "").strip()
-        if k:
-            out[k] = v
-    return out
+    # Normalize into lower-cased keys/values for consistent suppression and environment checks.
+    return normalize_tags(tag_list)
 
 
 def _is_non_prod(tags: Dict[str, str]) -> bool:

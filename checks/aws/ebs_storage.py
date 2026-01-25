@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from botocore.exceptions import BotoCoreError
 
+from checks.aws._common import is_suppressed
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
 
@@ -238,28 +239,20 @@ def _tags_to_dict(tags: Any) -> Dict[str, str]:
 
 
 def _is_suppressed(tags: Mapping[str, str], cfg: EBSStorageConfig) -> bool:
-    keys = {k.lower() for k in cfg.suppress_tag_keys}
-    values = {v.lower() for v in cfg.suppress_tag_values}
+    keys = {str(k).strip().lower() for k in cfg.suppress_tag_keys}
+    values = {str(v).strip().lower() for v in cfg.suppress_tag_values}
     prefixes = tuple(str(p).strip().lower() for p in getattr(cfg, "suppress_value_prefixes", ()))
 
-    for k, v in tags.items():
-        kl = str(k).strip().lower()
-        vl = str(v).strip().lower()
-
-        if kl not in keys:
-            continue
-
-        # Key-only suppression: retain tags are sometimes boolean/empty.
-        if not vl:
-            return True
-
-        if vl in values:
-            return True
-
-        if prefixes and any(vl.startswith(p) for p in prefixes):
-            return True
-
-    return False
+    # EBS suppression is intentionally conservative: only treat values/prefixes as a suppress
+    # signal when the tag key is one of the configured suppression keys.
+    return is_suppressed(
+        tags,
+        suppress_keys=keys,
+        suppress_values=values,
+        value_prefixes=prefixes,
+        value_only_if_key_suppressed=True,
+        prefix_only_if_key_suppressed=True,
+    )
 
 
 def _is_aws_backup_snapshot(snapshot: Mapping[str, Any], tags: Mapping[str, str]) -> bool:
