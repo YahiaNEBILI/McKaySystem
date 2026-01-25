@@ -76,11 +76,12 @@ This README reflects the **current state of the system**, including:
 │
 ├── checks/                      # FinOps checkers (signals)
 │   └── aws/
-│       ├── ec2_graviton.py
 │       ├── ebs_storage.py
 │       ├── rds_snapshots_cleanup.py
 │       └── ...
 │
+├── docs/                       # Contains project documentation
+├
 ├── pipeline/
 │   ├── writer_parquet.py        # Typed, partitioned Parquet writer
 │   ├── correlation/             # Correlation engine (DuckDB SQL)
@@ -111,6 +112,9 @@ This README reflects the **current state of the system**, including:
 │   ├── top_savings.json
 │   ├── correlated_findings.json
 │   └── coverage.json
+│
+├── services/                       
+│   ├── pricing_services.py      # Provide pricing API for checkers
 │
 ├── tools/                       # Extensive pytest suite
 │   ├── stress/  
