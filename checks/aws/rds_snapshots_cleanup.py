@@ -106,9 +106,9 @@ def _arn_region(arn: str) -> str:
     return ""
 
 
-def _fmt_money_usd(amount: float) -> str:
-    # Wire-format money as string (decimal-friendly downstream).
-    return f"{amount:.2f}"
+def _money(amount: float) -> float:
+    """Return numeric money for storage. Formatting is presentation-only."""
+    return round(float(amount), 2)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -359,7 +359,7 @@ class RDSSnapshotsCleanupChecker:
         usd_per_gb_month: float,
         pricing_notes: str,
         pricing_conf: int,
-    ) -> Tuple[Optional[str], Optional[str], Optional[int], str]:
+    ) -> Tuple[Optional[float], Optional[float], Optional[int], str]:
         """Return (estimated_monthly_cost, estimated_monthly_savings, confidence, notes).
 
         We estimate storage cost for snapshots as:
@@ -374,7 +374,7 @@ class RDSSnapshotsCleanupChecker:
         if est_cost <= 0.0:
             return (None, None, 10, f"Estimated cost <= 0 for {kind} snapshot; check pricing inputs.")
 
-        money = _fmt_money_usd(est_cost)
+        money = _money(est_cost)
 
         # Base heuristic confidence is 50 (we only know storage, not requests/backup deltas).
         confidence = 50
@@ -415,7 +415,7 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
-        est: Tuple[Optional[str], Optional[str], Optional[int], str],
+        est: Tuple[Optional[float], Optional[float], Optional[int], str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
@@ -446,7 +446,7 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
-        est: Tuple[Optional[str], Optional[str], Optional[int], str],
+        est: Tuple[Optional[float], Optional[float], Optional[int], str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est

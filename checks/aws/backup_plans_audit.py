@@ -143,8 +143,9 @@ def _pricing_backup_gb_month_price(
 
     return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
 
-def _fmt_money_usd(amount: float) -> str:
-    return f"{amount:.2f}"
+def _money(amount: float) -> float:
+    """Return numeric money for storage. Formatting is presentation-only."""
+    return round(float(amount), 2)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -469,13 +470,13 @@ class AwsBackupPlansAuditChecker:
                         "delete_at": delete_at.isoformat().replace("+00:00", "Z") if delete_at else "",
                         "size_gb": f"{size_gb:.3f}",
                     },
-                    estimated_monthly_cost=_fmt_money_usd(est_cost) if est_cost > 0.0 else None,
-                    estimated_monthly_savings=_fmt_money_usd(potential) if potential > 0.0 else None,
+                    estimated_monthly_cost=_money(est_cost) if est_cost > 0.0 else None,
+                    estimated_monthly_savings=_money(potential) if potential > 0.0 else None,
                     estimate_confidence=(min(90, max(20, unit_conf + 10)) if est_cost > 0.0 else 10),
-estimate_notes=(
-    f"Estimated from BackupSizeInBytes and $/GB-month unit price. {unit_notes} "
-    "Actual AWS Backup storage pricing varies by region and protected resource type."
-),
+                    estimate_notes=(
+                        f"Estimated from BackupSizeInBytes and $/GB-month unit price. {unit_notes} "
+                        "Actual AWS Backup storage pricing varies by region and protected resource type."
+                    ),
                 )
 
     # ------------------------------ findings helpers ------------------------------ #

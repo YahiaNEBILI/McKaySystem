@@ -83,8 +83,9 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _fmt_money_usd(amount: float) -> str:
-    return f"{amount:.2f}"
+def _money(amount: float) -> float:
+    """Return numeric money for storage. Formatting is presentation-only."""
+    return round(float(amount), 2)
 
 
 def _bytes_to_gb(b: float) -> float:
@@ -546,8 +547,8 @@ class RDSInstancesOptimizationsChecker:
                     "If the instance is no longer needed, delete it (after snapshot/backup as required). "
                     "If it must remain stopped, review storage footprint and snapshot retention."
                 ),
-                estimated_monthly_cost=_fmt_money_usd(monthly_cost),
-                estimated_monthly_savings=_fmt_money_usd(monthly_cost),
+                estimated_monthly_cost=_money(monthly_cost),
+                estimated_monthly_savings=_money(monthly_cost),
                 estimate_confidence=60,
                 estimate_notes="AllocatedStorage GB * default USD/GB-month. Excludes I/O and backup charges.",
                 tags=tags,
@@ -579,8 +580,8 @@ class RDSInstancesOptimizationsChecker:
                         "RDS storage typically cannot be reduced in-place. Consider snapshot+restore to a smaller size, "
                         "or rebuild with lower allocation. If enabled, use storage autoscaling with sensible limits."
                     ),
-                    estimated_monthly_savings=_fmt_money_usd(monthly_savings),
-                    estimated_monthly_cost="0",
+                    estimated_monthly_savings=_money(monthly_savings),
+                    estimated_monthly_cost=0.0,
                     estimate_confidence=70,
                     estimate_notes=(
                         "Excess GB inferred from FreeStorageSpace p95 * default USD/GB-month; "
@@ -645,8 +646,8 @@ class RDSInstancesOptimizationsChecker:
                 scope=scope,
                 message="Multi-AZ is enabled and the instance appears to be non-production based on env tags.",
                 recommendation="If HA is not required in non-prod, consider Single-AZ after validating compliance/DR needs.",
-                estimated_monthly_savings=_fmt_money_usd(monthly_savings),
-                estimated_monthly_cost=_fmt_money_usd(monthly_cost),
+                estimated_monthly_savings=_money(monthly_savings),
+                estimated_monthly_cost=_money(monthly_cost),
                 estimate_confidence=confidence,
                 estimate_notes=estimate_notes,
                 tags=tags,
@@ -669,8 +670,8 @@ class RDSInstancesOptimizationsChecker:
                     "Evaluate migrating to a newer generation (e.g., m6g/m7g, r6g/r7g, m6i/m7i) "
                     "for better price/perf. Validate compatibility and performance before changing."
                 ),
-                estimated_monthly_savings="0",
-                estimated_monthly_cost="0",
+                estimated_monthly_savings=0.0,
+                estimated_monthly_cost=0.0,
                 estimate_confidence=20,
                 estimate_notes="Modernization opportunity; savings not estimated without pricing enrichment.",
                 tags=tags,
@@ -690,8 +691,8 @@ class RDSInstancesOptimizationsChecker:
                 scope=scope,
                 message=f"Engine '{engine}' version '{engine_version}' is flagged as needing upgrade by policy.",
                 recommendation="Plan an upgrade to a supported major version; test in staging and validate app compatibility.",
-                estimated_monthly_savings="0",
-                estimated_monthly_cost="0",
+                estimated_monthly_savings=0.0,
+                estimated_monthly_cost=0.0,
                 estimate_confidence=40,
                 estimate_notes="Policy-based governance signal. Extended support cost not computed without a maintained dataset.",
                 tags=tags,
@@ -747,8 +748,8 @@ class RDSInstancesOptimizationsChecker:
                             "Confirm the replica is not required for DR/reporting/migration. "
                             "If unused, consider deleting it, or keeping it only during reporting windows."
                         ),
-                        estimated_monthly_savings=_fmt_money_usd(est_savings),
-                        estimated_monthly_cost=_fmt_money_usd(est_cost),
+                        estimated_monthly_savings=_money(est_savings),
+                        estimated_monthly_cost=_money(est_cost),
                         estimate_confidence=est_conf,
                         estimate_notes=est_notes,
                         tags=tags,
@@ -840,8 +841,8 @@ class RDSInstancesOptimizationsChecker:
                 "Grant rds:DescribeDBInstances, rds:ListTagsForResource, cloudwatch:GetMetricData "
                 "(and optionally cloudwatch:GetMetricStatistics)."
             ),
-            estimated_monthly_cost="0",
-            estimated_monthly_savings="0",
+            estimated_monthly_cost=0.0,
+            estimated_monthly_savings=0.0,
             estimate_confidence=0,
             estimate_notes="Informational finding emitted when permissions are missing.",
         ).with_issue(check="access_error", action=action, region=region)

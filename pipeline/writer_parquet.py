@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
@@ -23,6 +24,32 @@ def _utc_today_str() -> str:
 
 def _safe_str(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+def _assert_money_fields_numeric(wire_record: Mapping[str, Any]) -> None:
+    """Fail fast if any cost/savings fields are non-numeric.
+
+    This is a storage-boundary guardrail (Option B): money must be numeric (int/float/Decimal) or None.
+    """
+
+    def _is_money(v: Any) -> bool:
+        return v is None or isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
+
+    for path, obj, keys in (
+        ("estimated", wire_record.get("estimated"), ("monthly_savings", "monthly_cost", "one_time_savings")),
+        ("actual", wire_record.get("actual"), ("cost_7d", "cost_30d", "cost_mtd", "cost_prev_month", "savings_7d", "savings_30d")),
+    ):
+        if not isinstance(obj, Mapping):
+            continue
+        for k in keys:
+            if k not in obj:
+                continue
+            v = obj.get(k)
+            if not _is_money(v):
+                raise ParquetWriteError(
+                    f"Money field must be numeric or None: {path}.{k}={v!r} ({type(v).__name__}) "
+                    f"check_id={wire_record.get('check_id')!r}"
+                )
 
 
 @dataclass
@@ -141,6 +168,7 @@ class FindingsParquetWriter:
         """
         Cast wire record to storage types and add derived partition fields (run_date).
         """
+        _assert_money_fields_numeric(wire_record)
         storage = cast_for_storage(wire_record, self._cfg.schema)
 
         # Derive run_date from run_ts if possible; fallback to today.

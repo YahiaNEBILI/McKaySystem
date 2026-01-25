@@ -325,9 +325,9 @@ def _scope(ctx: RunContext, account_id: str, region: str, service: str, resource
     )
 
 
-def _money_str(val: float) -> str:
-    # Stored as string for decimal-friendly upstream.
-    return f"{val:.6f}"
+def _money_val(val: float) -> float:
+    """Money values must be numeric for storage; formatting is presentation-only."""
+    return round(float(val), 6)
 
 
 # -----------------------------
@@ -445,8 +445,8 @@ class EBSStorageChecker(Checker):
                         resource_type="ebs_volume",
                         resource_id=vol_id,
                     ),
-                    estimated_monthly_cost=_money_str(monthly_cost),
-                    estimated_monthly_savings=_money_str(monthly_cost),
+                    estimated_monthly_cost=_money_val(monthly_cost),
+                    estimated_monthly_savings=_money_val(monthly_cost),
                     estimate_confidence=int(pricing_conf_out),
                     estimate_notes=pricing_notes_out,
                     tags=tags,
@@ -523,7 +523,7 @@ class EBSStorageChecker(Checker):
                             resource_type="ebs_volume",
                             resource_id=vol_id,
                         ),
-                        estimated_monthly_savings=_money_str(monthly_savings),
+                        estimated_monthly_savings=_money_val(monthly_savings),
                         estimate_confidence=int(pricing_conf_out),
                         estimate_notes=str(pricing_notes_out),
                         tags=tags,
@@ -623,8 +623,8 @@ class EBSStorageChecker(Checker):
                         resource_type="ebs_snapshot",
                         resource_id=snap_id,
                     ),
-                    estimated_monthly_cost=_money_str(monthly_cost),
-                    estimated_monthly_savings=_money_str(monthly_cost),
+                    estimated_monthly_cost=_money_val(monthly_cost),
+                    estimated_monthly_savings=_money_val(monthly_cost),
                     estimate_confidence=40 if snapshot_pricing_conf <= 30 else int(snapshot_pricing_conf),
                     estimate_notes=(
                         "Conservative estimate; snapshot storage may be lower (incremental blocks). "

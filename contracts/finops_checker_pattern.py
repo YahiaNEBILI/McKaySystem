@@ -125,8 +125,9 @@ class FindingDraft:
     frameworks: Tuple[str, ...] = ()
 
     # Estimation fields: keep them optional
-    estimated_monthly_savings: Optional[str] = None  # store as string for decimal-friendly upstream
-    estimated_monthly_cost: Optional[str] = None
+    # NOTE: money values must be numeric (float) or None. Formatting is a presentation concern.
+    estimated_monthly_savings: Optional[float] = None
+    estimated_monthly_cost: Optional[float] = None
     estimate_confidence: Optional[Union[int, str]] = None  # allow "low"/"medium"/"high" too
     estimate_notes: str = ""
 
@@ -254,16 +255,20 @@ class CheckerRunner:
 # -----------------------------
 
 
-def _money_or_zero(value: Any) -> str:
-    """Return a decimal-friendly string money value. Missing/blank -> "0"."""
+def _money_or_zero(value: Any) -> float:
+    """Normalize money to a numeric type.
+
+    Strict policy (Option B): money values must be numeric (float/int) or None.
+    We keep downstream invariants stable by returning 0.0 when missing.
+    """
     if value is None:
-        return "0"
-    if isinstance(value, str):
-        txt = value.strip()
-        return txt if txt != "" else "0"
+        return 0.0
+    if isinstance(value, bool):
+        raise ValueError("money value cannot be bool")
     if isinstance(value, (int, float)):
-        return str(value)
-    return str(value)
+        return float(value)
+    # Any string formatting must happen at presentation time, never in findings.
+    raise ValueError(f"money value must be numeric or None, got {type(value).__name__}: {value!r}")
 
 
 def _normalize_estimate_confidence(value: Any) -> int:
@@ -352,7 +357,7 @@ def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: st
             # Enforce: cost fields always present ("0" if missing)
             "monthly_savings": _money_or_zero(draft.estimated_monthly_savings),
             "monthly_cost": _money_or_zero(draft.estimated_monthly_cost),
-            "one_time_savings": "0",
+            "one_time_savings": 0.0,
             # Normalize: confidence is always 0..100 int
             "confidence": _normalize_estimate_confidence(draft.estimate_confidence),
             "notes": normalize_str(draft.estimate_notes, lower=False),
@@ -360,12 +365,12 @@ def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: st
 
         # actual is optional; keep empty structure to ease downstream usage
         "actual": {
-            "cost_7d": "",
-            "cost_30d": "",
-            "cost_mtd": "",
-            "cost_prev_month": "",
-            "savings_7d": "",
-            "savings_30d": "",
+            "cost_7d": None,
+            "cost_30d": None,
+            "cost_mtd": None,
+            "cost_prev_month": None,
+            "savings_7d": None,
+            "savings_30d": None,
             "model": {
                 "currency": normalize_str(ctx.default_currency, lower=False),
                 "cost_model": "",
@@ -463,7 +468,7 @@ class ExampleGravitonChecker:
                 message="This x86_64 instance appears compatible with Graviton families.",
                 recommendation="Evaluate switching to m7g/c7g/r7g families.",
                 scope=scope,
-                estimated_monthly_savings="12.340000",
+                estimated_monthly_savings=12.340000,
                 estimate_confidence=70,
                 issue_key={
                     "recommended_arch": "arm64",

@@ -138,7 +138,7 @@ class S3StorageChecker:
                     recommendation="Add lifecycle rules to transition or expire objects where appropriate.",
                     scope=scope,
                     issue_key={"check_id": self._CID_LIFECYCLE, "bucket": name},
-                    estimated_monthly_savings="",
+                    estimated_monthly_savings=None,
                     estimate_confidence=0,
                     estimate_notes=lifecycle_note,
                 )
@@ -154,7 +154,7 @@ class S3StorageChecker:
                     recommendation="Grant s3:GetLifecycleConfiguration to the scanner role.",
                     scope=scope,
                     issue_key={"check_id": self._CID_LIFECYCLE, "bucket": name, "reason": "access_denied"},
-                    estimated_monthly_savings="",
+                    estimated_monthly_savings=None,
                     estimate_confidence=0,
                     estimate_notes=lifecycle_note,
                 )
@@ -175,7 +175,7 @@ class S3StorageChecker:
                     recommendation="Enable default encryption (SSE-S3 or SSE-KMS) for the bucket.",
                     scope=scope,
                     issue_key={"check_id": self._CID_ENCRYPTION, "bucket": name},
-                    estimated_monthly_savings="",
+                    estimated_monthly_savings=None,
                     estimate_confidence=0,
                     estimate_notes=enc_note,
                 )
@@ -191,7 +191,7 @@ class S3StorageChecker:
                     recommendation="Grant s3:GetEncryptionConfiguration to the scanner role.",
                     scope=scope,
                     issue_key={"check_id": self._CID_ENCRYPTION, "bucket": name, "reason": "access_denied"},
-                    estimated_monthly_savings="",
+                    estimated_monthly_savings=None,
                     estimate_confidence=0,
                     estimate_notes=enc_note,
                 )
@@ -215,7 +215,7 @@ class S3StorageChecker:
                     recommendation="Enable S3 Public Access Block (all 4 settings) unless explicitly required.",
                     scope=scope,
                     issue_key={"check_id": self._CID_PAB, "bucket": name},
-                    estimated_monthly_savings="",
+                    estimated_monthly_savings=None,
                     estimate_confidence=0,
                     estimate_notes=pab_note,
                 )
@@ -231,7 +231,7 @@ class S3StorageChecker:
                     recommendation="Grant s3:GetBucketPublicAccessBlock to the scanner role.",
                     scope=scope,
                     issue_key={"check_id": self._CID_PAB, "bucket": name, "reason": "access_denied"},
-                    estimated_monthly_savings="",
+                    estimated_monthly_savings=None,
                     estimate_confidence=0,
                     estimate_notes=pab_note,
                 )
@@ -285,7 +285,7 @@ class S3StorageChecker:
                         scope=scope,
                         issue_key={"check_id": self._CID_COST, "bucket": name, "mode": "multi_class"},
                         estimated_monthly_cost=round(total_cost, 2),
-                        estimated_monthly_savings="",
+                        estimated_monthly_savings=None,
                         estimate_confidence=int(breakdown["estimate_confidence"]),
                         estimate_notes=breakdown["estimate_notes"],
                         dimensions={
