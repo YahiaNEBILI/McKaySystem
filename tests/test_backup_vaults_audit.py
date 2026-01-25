@@ -126,6 +126,7 @@ def _mk_checker(
 # -------------------------
 
 def test_vault_lock_missing_fields_emits_no_lifecycle():
+    """Vault Lock fields absent -> treat as missing retention guardrail (no_lifecycle)."""
     checker = _mk_checker()
 
     vaults = [
@@ -146,7 +147,36 @@ def test_vault_lock_missing_fields_emits_no_lifecycle():
     assert f.scope.resource_id == "vault-a"
 
 
+def test_vault_lock_disabled_zero_zero_emits_missing():
+    """Vault Lock present but ineffective (Locked=False, min/max=0) -> treat as missing guardrail."""
+    checker = _mk_checker()
+
+    vaults = [
+        {"BackupVaultName": "vault-a2", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-a2"}
+    ]
+    describe = {
+        # Common AWS scenario: Vault Lock exists but is effectively disabled (no guardrail)
+        "vault-a2": {"BackupVaultName": "vault-a2", "Locked": False, "MinRetentionDays": 0, "MaxRetentionDays": 0},
+    }
+    # Provide an access policy to ensure we'd get a second finding if policy checks ran.
+    backup = _FakeBackupClient(
+        region="eu-west-1",
+        vaults=vaults,
+        describe_by_name=describe,
+        policy_by_name={"vault-a2": {"Version": "2012-10-17", "Statement": []}},
+    )
+    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.issue_key["rule"] == "vault_lock_missing"
+    assert f.scope.resource_id == "vault-a2"
+
+
 def test_vault_lock_no_max_emits_indefinite_retention():
+    """MaxRetentionDays=0 -> indefinite retention risk -> emit no_lifecycle with vault_lock_no_max rule."""
     checker = _mk_checker()
 
     vaults = [
@@ -167,6 +197,7 @@ def test_vault_lock_no_max_emits_indefinite_retention():
 
 
 def test_vault_lock_out_of_standard_emits_low():
+    """Configured Vault Lock that violates expected min/max -> emit low severity out_of_standard finding."""
     checker = _mk_checker(expected_min=14, expected_max=90)
 
     vaults = [
@@ -191,6 +222,7 @@ def test_vault_lock_out_of_standard_emits_low():
 # -------------------------
 
 def test_access_policy_missing_emits_low_misconfig():
+    """When lifecycle is OK but access policy is missing -> emit low access_policy_misconfig."""
     checker = _mk_checker()
 
     vaults = [
@@ -211,6 +243,7 @@ def test_access_policy_missing_emits_low_misconfig():
 
 
 def test_access_policy_wildcard_principal_emits_high():
+    """Wildcard principal in access policy should be flagged as high severity misconfiguration."""
     checker = _mk_checker()
 
     vaults = [
@@ -237,6 +270,7 @@ def test_access_policy_wildcard_principal_emits_high():
 
 
 def test_access_policy_cross_account_not_allowlisted_emits_fail():
+    """Cross-account access not in allowlist should emit fail with cross_account_access rule."""
     checker = _mk_checker(allowlist=["222222222222"])
 
     vaults = [
@@ -269,6 +303,7 @@ def test_access_policy_cross_account_not_allowlisted_emits_fail():
 
 
 def test_access_policy_emits_only_worst_per_vault():
+    """If multiple policy issues exist, only the worst finding should be emitted per vault."""
     checker = _mk_checker()
 
     vaults = [
@@ -303,6 +338,7 @@ def test_access_policy_emits_only_worst_per_vault():
 # -------------------------
 
 def test_list_vaults_access_error_emits_single_info_and_stops():
+    """Access denied listing vaults -> emit single info access_error and stop."""
     checker = _mk_checker()
 
     # Raise on direct op name ("list_backup_vaults") so both paginator and fallback path fail consistently.
@@ -316,6 +352,7 @@ def test_list_vaults_access_error_emits_single_info_and_stops():
 
 
 def test_describe_vault_access_error_emits_single_info_and_stops():
+    """Access denied describing a vault -> emit single info access_error and stop."""
     checker = _mk_checker()
 
     vaults = [

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
@@ -125,6 +125,39 @@ def _safe_int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return int(default)
 
+
+
+def _pricing_backup_gb_month_price(
+    ctx: Any,
+    *,
+    region: str,
+    storage_class: str,
+    fallback_usd: float,
+) -> tuple[float, str, int]:
+    """Best-effort lookup of AWS Backup storage $/GB-month.
+
+    Uses ctx.services.pricing if available. Falls back to provided default price.
+
+    Returns: (unit_price_usd, notes, confidence)
+    """
+    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
+    if pricing is None:
+        return fallback_usd, "Fallback pricing (no PricingService)", 0
+
+    fn = getattr(pricing, "backup_storage_gb_month", None)
+    if fn is None:
+        return fallback_usd, "Fallback pricing (PricingService missing backup_storage_gb_month)", 0
+
+    try:
+        val = fn(region=region, storage_class=storage_class)
+        if val is None:
+            return fallback_usd, "Fallback pricing (PricingService returned None)", 0
+        unit = float(val)
+        if unit <= 0.0:
+            return fallback_usd, "Fallback pricing (PricingService returned non-positive)", 0
+        return unit, "PricingService", 70
+    except Exception as exc:  # pragma: no cover
+        return fallback_usd, f"Fallback pricing (PricingService error: {exc})", 0
 
 def _parse_account_id_from_principal(principal: str) -> Optional[str]:
     """
@@ -233,6 +266,7 @@ class AwsBackupVaultsAuditChecker:
         self._expected_lock_max_days = expected_lock_max_days
         self._allowed_cross_account_ids = allowed_cross_account_ids or set()
 
+
     def run(self, ctx) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupVaultsAuditChecker requires ctx.services.backup")
@@ -246,134 +280,159 @@ class AwsBackupVaultsAuditChecker:
             yield self._access_error_finding(ctx, region, "list_backup_vaults", exc)
             return
 
-        # Vault Lock / "vault lifecycle guardrail"
-        try:
-            for v in vaults:
-                yield from self._check_vault_lock(ctx, backup, region, v)
-        except ClientError as exc:
-            yield self._access_error_finding(ctx, region, "describe_backup_vault", exc)
-            return
+        # Per-vault evaluation:
+        # 1) Vault Lock / lifecycle guardrail
+        # 2) Access policy (only if lifecycle is OK)
+        for v in vaults:
+            try:
+                lock_findings = list(self._check_vault_lock(ctx, backup, region, v))
+            except ClientError as exc:
+                # Tests expect: single access_error and stop on describe_backup_vault failure
+                yield self._access_error_finding(ctx, region, "describe_backup_vault", exc)
+                return
 
-        # Access policy checks
-        try:
-            for v in vaults:
+            if lock_findings:
+                for f in lock_findings:
+                    yield f
+                # Important: if lifecycle guardrail is failing, do not emit policy findings too
+                continue
+
+            try:
                 yield from self._check_access_policy(ctx, backup, region, v)
-        except ClientError as exc:
-            yield self._access_error_finding(ctx, region, "get_backup_vault_access_policy", exc)
-            return
+            except ClientError as exc:
+                yield self._access_error_finding(ctx, region, "get_backup_vault_access_policy", exc)
+                return
 
     # ------------------------------ Check 1: Vault Lock ------------------------------ #
 
-    def _check_vault_lock(self, ctx, backup: BaseClient, region: str, vault: Dict[str, Any]) -> Iterable[FindingDraft]:
-        vault_name = str(vault.get("BackupVaultName") or "")
+    def _estimate_vault_monthly_cost(
+        self,
+        ctx: Any,
+        backup: BaseClient,
+        region: str,
+        vault: Dict[str, Any],
+    ) -> Tuple[Optional[float], str, Optional[str]]:
+        """Best-effort monthly cost estimate for a vault. Override/extend as needed."""
+        return None, "", None
+
+
+    def _check_vault_lock(
+        self,
+        ctx,
+        backup: BaseClient,
+        region: str,
+        vault: Dict[str, Any],
+    ) -> Iterable[FindingDraft]:
+        """
+        Vault Lock / retention guardrails.
+
+        Keeps legacy check_id 'aws.backup.vaults.no_lifecycle' to avoid regressions,
+        but sets issue_key['rule'] to match existing test expectations.
+        """
+        vault_name = str(vault.get("BackupVaultName") or "unknown")
         vault_arn = str(vault.get("BackupVaultArn") or "")
-        if not vault_name:
+
+        # Let ClientError bubble to run() so tests expecting "single access_error and stop" keep passing.
+        desc = backup.describe_backup_vault(BackupVaultName=vault_name)
+        vlc = desc.get("VaultLockConfiguration") or {}
+
+        locked_flag = desc.get("Locked", vlc.get("Locked"))
+        min_days_raw = vlc.get("MinRetentionDays", desc.get("MinRetentionDays"))
+        max_days_raw = vlc.get("MaxRetentionDays", desc.get("MaxRetentionDays"))
+
+        min_days = _safe_int(min_days_raw) or 0
+        max_days = _safe_int(max_days_raw) or 0
+
+        # Case 1: no Vault Lock configured at all
+        no_lock_fields = (
+            locked_flag is None
+            and min_days_raw is None
+            and max_days_raw is None
+        )
+
+        # New: configured but ineffective (no guardrail)
+        disabled_guardrail = (
+            locked_flag is False
+            and min_days == 0
+            and max_days == 0
+        )
+
+        # Case 2 (existing tests): no max retention => indefinite retention risk
+        no_max = (max_days <= 0)
+
+        # "Standard" expectations can be unset/None; enforce only when provided.
+        expected_min = _safe_int(getattr(self, "_expected_lock_min_days", None)) or 0
+        expected_max = _safe_int(getattr(self, "_expected_lock_max_days", None)) or 0
+
+        out_of_standard = False
+        if expected_min > 0 and min_days < expected_min:
+            out_of_standard = True
+        if expected_max > 0 and max_days > expected_max:
+            out_of_standard = True
+
+        # Decide whether to emit + which rule label to use (to satisfy tests)
+        if not (no_lock_fields or disabled_guardrail or no_max or out_of_standard):
             return
 
-        # `DescribeBackupVault` exposes Vault Lock-related fields when present:
-        # Locked, MinRetentionDays, MaxRetentionDays.
-        desc = backup.describe_backup_vault(BackupVaultName=vault_name) or {}
-        locked_flag = desc.get("Locked")
-        min_days_raw = desc.get("MinRetentionDays")
-        max_days_raw = desc.get("MaxRetentionDays")
+        # Rule mapping (tests assert these exact strings)
+        if no_lock_fields or disabled_guardrail:
+            rule = "vault_lock_missing"
+        elif no_max:
+            rule = "vault_lock_no_max"
+        else:
+            rule = "vault_lock_out_of_standard"
 
-        has_any_lock_fields = any(x is not None for x in (locked_flag, min_days_raw, max_days_raw))
-        if not has_any_lock_fields:
-            yield FindingDraft(
-                check_id="aws.backup.vaults.no_lifecycle",
-                check_name="AWS Backup vault retention guardrails (Vault Lock)",
-                category="governance",
-                status="fail",
-                severity=Severity(level="medium", score=70),
-                title="Backup vault has no Vault Lock (no retention guardrail)",
-                message=(
-                    f"Backup vault '{vault_name}' has no Vault Lock configuration (no min/max retention guardrails). "
-                    "Retention is entirely dependent on backup plan rules and can drift to 'retain forever'."
-                ),
-                recommendation=(
-                    "Consider configuring Vault Lock (min/max retention) for this vault to enforce "
-                    "organization retention standards and prevent indefinite accumulation."
-                ),
-                scope=self._base_scope(
-                    ctx,
-                    region=region,
-                    resource_type="backup_vault",
-                    resource_id=vault_name,
-                    resource_arn=vault_arn,
-                ),
-                issue_key={"rule": "vault_lock_missing", "vault": vault_name},
-                dimensions={"vault_arn": vault_arn},
-                estimated_monthly_cost=None,
-                estimated_monthly_savings=None,
-                estimate_confidence=0,
-                estimate_notes="Vault-level retention guardrail; cost impact depends on current recovery points and plan rules.",
+        # Severity mapping: out_of_standard is low, everything else medium
+        severity = Severity(level="low", score=40) if rule == "vault_lock_out_of_standard" else Severity(level="medium", score=70)
+
+        if rule == "vault_lock_missing":
+            if no_lock_fields:
+                reason = "Vault Lock is not configured."
+            else:
+                reason = "Vault Lock is configured but ineffective (Locked=False and min/max retention are 0)."
+        elif rule == "vault_lock_no_max":
+            reason = "Vault Lock does not enforce a maximum retention (MaxRetentionDays is missing/0)."
+        else:
+            reason = (
+                "Vault Lock retention does not match the expected standard "
+                f"(min={min_days}, max={max_days}, expected_min={expected_min or 'n/a'}, expected_max={expected_max or 'n/a'})."
             )
-            return
 
-        min_days = _safe_int(min_days_raw, default=0)
-        max_days = _safe_int(max_days_raw, default=0)
-
-        # If MaxRetentionDays is missing/0, treat as "allows never delete" for governance.
-        if max_days <= 0:
-            yield FindingDraft(
-                check_id="aws.backup.vaults.no_lifecycle",
-                check_name="AWS Backup vault retention guardrails (Vault Lock)",
-                category="governance",
-                status="fail",
-                severity=Severity(level="medium", score=75),
-                title="Backup vault Vault Lock allows indefinite retention",
-                message=(
-                    f"Backup vault '{vault_name}' has Vault Lock-related fields but MaxRetentionDays is not set "
-                    "or is zero. This can allow recovery points to be retained indefinitely."
-                ),
-                recommendation="Set a MaxRetentionDays value aligned with your retention standards.",
-                scope=self._base_scope(
-                    ctx,
-                    region=region,
-                    resource_type="backup_vault",
-                    resource_id=vault_name,
-                    resource_arn=vault_arn,
-                ),
-                issue_key={"rule": "vault_lock_no_max", "vault": vault_name},
-                dimensions={
-                    "vault_arn": vault_arn,
-                    "min_retention_days": str(min_days),
-                    "max_retention_days": str(max_days),
-                    "locked": str(bool(locked_flag)).lower() if locked_flag is not None else "",
-                },
-                estimated_monthly_cost=None,
-                estimated_monthly_savings=None,
-                estimate_confidence=0,
-                estimate_notes="Vault Lock max retention missing/zero; cost impact depends on actual retained recovery points.",
-            )
-            return
-
-        # Optional org standards enforcement
-        if self._expected_lock_min_days is not None and min_days != int(self._expected_lock_min_days):
-            yield self._vault_lock_out_of_standard(
+        yield FindingDraft(
+            check_id="aws.backup.vaults.no_lifecycle",
+            check_name="AWS Backup vault retention guardrails",
+            category="backup.governance",
+            status="fail",
+            severity=severity,
+            title="Backup vault has no effective retention guardrail",
+            message=(
+                f"Backup vault '{vault_name}' has no effective retention guardrail. {reason} "
+                "Retention may drift to indefinite accumulation."
+            ),
+            recommendation=(
+                "Configure Vault Lock with explicit minimum and maximum retention aligned with policy "
+                "(or adjust expected min/max thresholds)."
+            ),
+            scope=self._base_scope(
                 ctx,
-                region,
-                vault_name,
-                vault_arn,
-                min_days,
-                max_days,
-                0,
-                reason="MinRetentionDays differs from expected org standard.",
-            )
-            return
+                region=region,
+                resource_type="backup_vault",
+                resource_id=vault_name,
+                resource_arn=vault_arn,
+            ),
+            issue_key={
+                "rule": rule,
+                "vault": vault_name,
+            },
+            dimensions={
+                "vault_arn": vault_arn,
+                "locked": str(locked_flag),
+                "min_retention_days": str(min_days),
+                "max_retention_days": str(max_days),
+            },
+        )
 
-        if self._expected_lock_max_days is not None and max_days != int(self._expected_lock_max_days):
-            yield self._vault_lock_out_of_standard(
-                ctx,
-                region,
-                vault_name,
-                vault_arn,
-                min_days,
-                max_days,
-                0,
-                reason="MaxRetentionDays differs from expected org standard.",
-            )
-            return
+
 
     # ------------------------------ Check 2: Access Policy ------------------------------ #
 
@@ -634,6 +693,74 @@ class AwsBackupVaultsAuditChecker:
         if int(candidate.severity.score) > int(current.severity.score):
             return candidate
         return current
+
+    def _estimate_vault_monthly_storage_cost(
+        self,
+        ctx: Any,
+        backup: BaseClient,
+        *,
+        region: str,
+        vault_name: str,
+        warm_fallback_usd: float = 0.05,
+        cold_fallback_usd: float = 0.01,
+    ) -> tuple[Optional[float], str, int]:
+        """Estimate monthly storage cost for recovery points currently in a vault.
+
+        Best-effort only:
+          - enumerates recovery points via ListRecoveryPointsByBackupVault
+          - sums bytes by StorageClass (WARM/COLD)
+          - applies PricingService unit prices when available, else fallbacks
+
+        Returns (monthly_cost_usd | None, notes, confidence).
+        """
+        total_warm_bytes = 0
+        total_cold_bytes = 0
+        try:
+            for rp in _paginate_items(
+                backup,
+                "list_recovery_points_by_backup_vault",
+                "RecoveryPoints",
+                params={"BackupVaultName": vault_name},
+            ):
+                storage_class = str(rp.get("StorageClass") or "WARM").upper()
+                size_bytes = rp.get("BackupSizeInBytes")
+                try:
+                    b = int(size_bytes or 0)
+                except Exception:
+                    b = 0
+                if b <= 0:
+                    continue
+                if storage_class == "COLD":
+                    total_cold_bytes += b
+                else:
+                    total_warm_bytes += b
+        except ClientError:
+            return None, "Unable to enumerate recovery points", 0
+        except Exception:  # pragma: no cover
+            return None, "Unable to enumerate recovery points", 0
+
+        gb_warm = float(total_warm_bytes) / (1024.0 ** 3)
+        gb_cold = float(total_cold_bytes) / (1024.0 ** 3)
+        if gb_warm <= 0.0 and gb_cold <= 0.0:
+            return 0.0, "No recovery point storage observed", 20
+
+        warm_unit, warm_notes, warm_conf = _pricing_backup_gb_month_price(
+            ctx,
+            region=region,
+            storage_class="WARM",
+            fallback_usd=warm_fallback_usd,
+        )
+        cold_unit, cold_notes, cold_conf = _pricing_backup_gb_month_price(
+            ctx,
+            region=region,
+            storage_class="COLD",
+            fallback_usd=cold_fallback_usd,
+        )
+
+        cost = gb_warm * warm_unit + gb_cold * cold_unit
+        notes = f"{warm_notes}; {cold_notes}; warm_gb={gb_warm:.3f} cold_gb={gb_cold:.3f}"
+        confidence = min(100, max(warm_conf, cold_conf))
+        return cost, notes, confidence
 
     # ------------------------------ Helpers ------------------------------ #
 
