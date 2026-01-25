@@ -88,6 +88,61 @@ def _safe_region_from_client(client: Any) -> str:
         return ""
 
 
+def _pricing_backup_gb_month_price(
+    ctx: Any,
+    *,
+    region: str,
+    storage_class: str,
+    fallback_usd: float,
+) -> tuple[float, str, int]:
+    """
+    Best-effort unit price lookup via ctx.services.pricing.
+
+    This checker historically used fixed warm/cold $/GB-month defaults. We keep that as a fallback
+    to avoid regressions in environments/tests where PricingService is not wired.
+
+    Returns: (unit_price_usd_per_gb_month, notes, confidence)
+    """
+    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
+    if pricing is None:
+        return float(fallback_usd), "PricingService unavailable; using configured fallback $/GB-month.", 10
+
+    # Normalize storage class signals from AWS Backup list responses
+    normalized = str(storage_class or "").strip().lower()
+    if normalized in {"cold", "cold_storage", "coldstorage"}:
+        tier = "cold"
+    else:
+        tier = "warm"
+
+    candidates = (
+        "backup_storage_gb_month_price",
+        "backup_gb_month_price",
+        "aws_backup_storage_gb_month_price",
+        "aws_backup_gb_month_price",
+    )
+
+    for method_name in candidates:
+        fn = getattr(pricing, method_name, None)
+        if fn is None:
+            continue
+        try:
+            # Try a couple call signatures (keyword-only preferred)
+            try:
+                price = fn(region=region, tier=tier)
+            except TypeError:
+                try:
+                    price = fn(region=region, storage_class=tier)
+                except TypeError:
+                    price = fn(region, tier)
+            price_f = float(price)
+            if price_f > 0.0:
+                return price_f, f"Unit price from PricingService ({method_name}, tier={tier}).", 60
+        except Exception:
+            # Best-effort only, fall through to fallback
+            continue
+
+    return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
+
 def _fmt_money_usd(amount: float) -> str:
     return f"{amount:.2f}"
 
@@ -369,7 +424,14 @@ class AwsBackupPlansAuditChecker:
                     continue
 
                 size_gb = _gb_from_bytes(rp.get("BackupSizeInBytes"))
-                unit = self._cold_price if storage_class == "COLD" else self._warm_price
+
+                fallback_unit = self._cold_price if storage_class == "COLD" else self._warm_price
+                unit, unit_notes, unit_conf = _pricing_backup_gb_month_price(
+                    ctx,
+                    region=region,
+                    storage_class=storage_class,
+                    fallback_usd=fallback_unit,
+                )
                 est_cost = (size_gb * unit) if (size_gb > 0.0 and unit > 0.0) else 0.0
 
                 # Heuristic: if stale and not auto-expiring soon, potential savings ~= monthly cost (deletion).
@@ -409,11 +471,11 @@ class AwsBackupPlansAuditChecker:
                     },
                     estimated_monthly_cost=_fmt_money_usd(est_cost) if est_cost > 0.0 else None,
                     estimated_monthly_savings=_fmt_money_usd(potential) if potential > 0.0 else None,
-                    estimate_confidence=50 if est_cost > 0.0 else 10,
-                    estimate_notes=(
-                        "Estimated from BackupSizeInBytes and configurable $/GB-month unit price. "
-                        "Actual AWS Backup storage pricing varies by region and protected resource type."
-                    ),
+                    estimate_confidence=(min(90, max(20, unit_conf + 10)) if est_cost > 0.0 else 10),
+estimate_notes=(
+    f"Estimated from BackupSizeInBytes and $/GB-month unit price. {unit_notes} "
+    "Actual AWS Backup storage pricing varies by region and protected resource type."
+),
                 )
 
     # ------------------------------ findings helpers ------------------------------ #
