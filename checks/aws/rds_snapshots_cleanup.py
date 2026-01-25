@@ -62,6 +62,7 @@ from typing import Any, Iterable, Optional, Set, Tuple
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    build_scope,
     AwsAccountContext,
     arn_region,
     is_suppressed,
@@ -421,16 +422,15 @@ class RDSSnapshotsCleanupChecker:
     def _base_scope(self, ctx, *, region: str, resource_type: str, resource_id: str, resource_arn: str) -> Scope:
         account_id = self._account.account_id
         billing_account_id = self._account.billing_account_id or account_id
-        return Scope(
-            cloud=ctx.cloud,
-            provider_partition=self._account.partition,
-            billing_account_id=billing_account_id,
-            account_id=account_id,
+        return build_scope(
+            ctx,
+            account=self._account,
             region=region,
             service="AmazonRDS",
             resource_type=resource_type,
             resource_id=resource_id,
             resource_arn=resource_arn,
+            billing_account_id=billing_account_id,
         )
 
     def _snapshot_arn(self, snap: dict, kind: str) -> str:

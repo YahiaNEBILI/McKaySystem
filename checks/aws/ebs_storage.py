@@ -306,10 +306,9 @@ def _collect_ami_snapshot_ids(ec2: Any) -> Set[str]:
 
 
 def _scope(ctx: RunContext, account_id: str, region: str, service: str, resource_type: str, resource_id: str) -> Scope:
-    return Scope(
-        cloud=ctx.cloud,
-        billing_account_id=str(account_id),
-        account_id=str(account_id),
+    return build_scope(
+        ctx,
+        account=AwsAccountContext(account_id=str(account_id), billing_account_id=str(account_id)),
         region=str(region),
         service=str(service),
         resource_type=str(resource_type),

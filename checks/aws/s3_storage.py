@@ -23,7 +23,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
-from checks.aws._common import AwsAccountContext, now_utc
+from checks.aws._common import AwsAccountContext, build_scope, now_utc
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
@@ -56,14 +56,13 @@ def _scope(
     region: str,
     bucket: str,
 ) -> Scope:
-    return Scope(
-        cloud=ctx.cloud,
-        billing_account_id=billing_account_id,
-        account_id=account_id,
-        region=region,
+    return build_scope(
+        ctx,
+        account=AwsAccountContext(account_id=str(account_id), billing_account_id=str(billing_account_id)),
+        region=str(region),
         service="AmazonS3",
         resource_type="s3_bucket",
-        resource_id=bucket,
+        resource_id=str(bucket),
         resource_arn=f"arn:aws:s3:::{bucket}",
     )
 

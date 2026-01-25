@@ -790,16 +790,15 @@ class AwsBackupVaultsAuditChecker:
     ) -> Scope:
         account_id = self._account.account_id
         billing_account_id = self._account.billing_account_id or account_id
-        return Scope(
-            cloud=ctx.cloud,
-            provider_partition=self._account.partition,
-            billing_account_id=billing_account_id,
-            account_id=account_id,
+        return build_scope(
+            ctx,
+            account=self._account,
             region=region,
             service="AWSBackup",
             resource_type=resource_type,
             resource_id=resource_id,
             resource_arn=resource_arn,
+            billing_account_id=billing_account_id,
         )
 
     def _vault_lock_out_of_standard(

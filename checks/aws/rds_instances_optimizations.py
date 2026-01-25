@@ -503,12 +503,13 @@ class RDSInstancesOptimizationsChecker:
         instance_id = str(inst.get("DBInstanceIdentifier") or "")
         arn = str(inst.get("DBInstanceArn") or "")
         partition = _arn_partition(arn) or self._account.partition
-
-        scope = Scope(
-            cloud="aws",
-            provider_partition=partition,
-            account_id=self._account.account_id,
-            billing_account_id=str(self._account.billing_account_id or self._account.account_id),
+        scope = build_scope(
+            ctx,
+            account=AwsAccountContext(
+                account_id=self._account.account_id,
+                billing_account_id=str(self._account.billing_account_id or self._account.account_id),
+                partition=partition,
+            ),
             region=region,
             service="rds",
             resource_type="db_instance",
@@ -815,14 +816,18 @@ class RDSInstancesOptimizationsChecker:
             code = str(exc.response.get("Error", {}).get("Code", ""))
         except Exception:  # pragma: no cover
             code = ""
-
-        scope = Scope(
-            cloud="aws",
-            provider_partition=self._account.partition,
-            account_id=self._account.account_id,
-            billing_account_id=str(self._account.billing_account_id or self._account.account_id),
+        scope = build_scope(
+            ctx,
+            account=AwsAccountContext(
+                account_id=self._account.account_id,
+                billing_account_id=str(self._account.billing_account_id or self._account.account_id),
+                partition=partition,
+            ),
             region=region,
             service="rds",
+            resource_type="db_instance",
+            resource_id=instance_id,
+            resource_arn=arn,
         )
         return FindingDraft(
             check_id="aws.rds.instances.access_error",

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Optional
 
+from contracts.finops_checker_pattern import Scope
+
 
 @dataclass(frozen=True)
 class AwsAccountContext:
@@ -28,6 +30,42 @@ class AwsAccountContext:
     account_id: str
     billing_account_id: Optional[str] = None
     partition: str = "aws"
+
+
+def build_scope(
+    ctx: Any,
+    *,
+    account: AwsAccountContext,
+    region: str,
+    service: str,
+    resource_type: str = "",
+    resource_id: str = "",
+    resource_arn: str = "",
+    billing_account_id: Optional[str] = None,
+    availability_zone: str = "",
+    organization_id: str = "",
+) -> Scope:
+    """Build a consistent :class:`~contracts.finops_checker_pattern.Scope`.
+
+    Checkers should avoid hand-building Scope objects to keep identity stable
+    across the codebase and to ensure CUR enrichment has consistent keys.
+    """
+
+    cloud = str(getattr(ctx, "cloud", "") or "aws")
+    billing = str(billing_account_id or account.billing_account_id or account.account_id or "")
+    return Scope(
+        cloud=cloud,
+        provider_partition=str(account.partition or ""),
+        organization_id=str(organization_id or ""),
+        billing_account_id=billing,
+        account_id=str(account.account_id or ""),
+        region=str(region or ""),
+        availability_zone=str(availability_zone or ""),
+        service=str(service or ""),
+        resource_type=str(resource_type or ""),
+        resource_id=str(resource_id or ""),
+        resource_arn=str(resource_arn or ""),
+    )
 
 
 def utc(dt: Optional[datetime]) -> Optional[datetime]:
