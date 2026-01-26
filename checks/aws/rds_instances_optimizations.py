@@ -36,6 +36,7 @@ from checks.aws._common import (
     AwsAccountContext,
     gb_from_bytes,
     is_suppressed,
+    normalize_tags,
     money,
     now_utc,
     safe_float,
