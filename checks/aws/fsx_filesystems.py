@@ -69,8 +69,8 @@ class FSxFileSystemsConfig:
     # Windows backup governance
     windows_backup_low_retention_days: int = 7
 
-    # Governance tags (lowercased by normalize_tags)
-    required_tag_keys: Tuple[str, ...] = ("Application", "ApplicationId", "Environment")
+    # Governance tags (tags are lowercased by normalize_tags)
+    required_tag_keys: Tuple[str, ...] = ("application", "applicationId", "environment")
 
     # Safety valve
     max_findings_per_type: int = 50_000
@@ -520,15 +520,32 @@ class FSxFileSystemsChecker(Checker):
 
         account = AwsAccountContext(account_id=self._account_id)
 
-        try:
-            resp = fsx.describe_file_systems()
-        except ClientError:
-            return
-        except Exception:
-            return
+        file_systems: List[Dict[str, Any]] = []
 
-        file_systems = resp.get("FileSystems", []) or []
-        if not isinstance(file_systems, list):
+        # Prefer paginator for correctness (API is paginated).
+        try:
+            paginator = fsx.get_paginator("describe_file_systems")
+            for page in paginator.paginate():
+                page_fs = page.get("FileSystems", []) or []
+                if isinstance(page_fs, list):
+                    for fs_any in page_fs:
+                        if isinstance(fs_any, dict):
+                            file_systems.append(fs_any)
+        except Exception:
+            # Fallback: single call (older mocks / unusual clients / edge cases).
+            try:
+                resp = fsx.describe_file_systems()
+                page_fs = resp.get("FileSystems", []) or []
+                if isinstance(page_fs, list):
+                    for fs_any in page_fs:
+                        if isinstance(fs_any, dict):
+                            file_systems.append(fs_any)
+            except ClientError:
+                return
+            except Exception:
+                return
+
+        if not file_systems:
             return
 
         # Counters per check_id to enforce max_findings_per_type
@@ -699,10 +716,10 @@ class FSxFileSystemsChecker(Checker):
                     _ = util_dbg
 
             # -----------------------------
-            # 2b) Over-provisioned storage (heuristic)
+            # 2b) large and inactive storage (heuristic)
             # -----------------------------
             if storage_gib is not None and storage_gib >= cfg.large_storage_gib_threshold and not active:
-                check_id = "aws.fsx.filesystems.overprovisioned_storage"
+                check_id = "aws.fsx.filesystems.large_and_inactive"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
