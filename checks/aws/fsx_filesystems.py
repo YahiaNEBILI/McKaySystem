@@ -70,7 +70,7 @@ class FSxFileSystemsConfig:
     windows_backup_low_retention_days: int = 7
 
     # Governance tags (lowercased by normalize_tags)
-    required_tag_keys: Tuple[str, ...] = ("env", "owner")
+    required_tag_keys: Tuple[str, ...] = ("Application", "ApplicationId", "Environment")
 
     # Safety valve
     max_findings_per_type: int = 50_000
@@ -104,6 +104,8 @@ _FALLBACK_FSX_THROUGHPUT_USD_PER_MBPS_MONTH: Dict[str, float] = {
     "ONTAP": 0.3,
     "LUSTRE": 0.0,  # often bundled/varies; keep 0 by default unless you confirm a stable quote
 }
+
+_NONPROD_HINTS = ("dev", "test", "staging", "sbx", "nprod", "qa", "nonprod")
 
 
 def _pricing_service(ctx: RunContext) -> Any:
@@ -292,9 +294,6 @@ def _age_days(created: Any, *, now_ts: datetime) -> Optional[int]:
     else:
         dt = dt.astimezone(timezone.utc)
     return int((now_ts - dt).total_seconds() // 86400)
-
-
-_NONPROD_HINTS = ("dev", "test", "staging", "sandbox", "nonprod", "qa", "demo")
 
 
 def _is_nonprod(tags: Dict[str, str]) -> bool:
