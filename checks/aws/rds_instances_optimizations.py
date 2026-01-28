@@ -25,7 +25,6 @@ and a coarse period (default 1 day) to keep the pipeline fast and scalable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -34,17 +33,14 @@ from botocore.exceptions import ClientError
 from checks.aws._common import (
     build_scope,
     AwsAccountContext,
-    gb_from_bytes,
-    is_suppressed,
     normalize_tags,
     money,
     now_utc,
-    safe_float,
     safe_region_from_client,
-    utc,
 )
+
 from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from contracts.finops_checker_pattern import FindingDraft, Severity
 
 _NONPROD_VALUES = {
     "dev", "test", "nprd", "staging", "nonprod", "non-prod", "sandbox", "qa", "uat"
@@ -67,20 +63,6 @@ _GENERIC_SUPPRESS_KEYS = {"retain", "do_not_delete", "donotdelete", "keep"}
 _GENERIC_SUPPRESS_VALUES = {"1", "true", "yes", "y"}
 
 
-@dataclass(frozen=True)
-class AwsAccountContext:
-    account_id: str
-    billing_account_id: Optional[str] = None
-    partition: str = "aws"
-
-
-def _safe_region_from_client(client: Any) -> str:
-    try:
-        return str(getattr(getattr(client, "meta", None), "region_name", "") or "")
-    except Exception:  # pragma: no cover
-        return ""
-
-
 def _arn_partition(arn: str) -> str:
     try:
         parts = arn.split(":")
@@ -89,15 +71,6 @@ def _arn_partition(arn: str) -> str:
     except Exception:  # pragma: no cover
         return ""
     return ""
-
-
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _money(amount: float) -> float:
-    """Return numeric money for storage. Formatting is presentation-only."""
-    return round(float(amount), 2)
 
 
 def _bytes_to_gb(b: float) -> float:
@@ -379,12 +352,12 @@ class RDSInstancesOptimizationsChecker:
 
         rds = ctx.services.rds
         cw = getattr(ctx.services, "cloudwatch", None)
-        region = _safe_region_from_client(rds)
+        region = safe_region_from_client(rds)
 
         try:
             instances = list(self._list_db_instances(rds))
         except ClientError as exc:
-            yield self._access_error(region, "describe_db_instances", exc)
+            yield self._access_error(ctx, region, "describe_db_instances", exc)
             return
 
         # Pre-fetch metrics in batches for performance.
@@ -422,7 +395,7 @@ class RDSInstancesOptimizationsChecker:
                         # Avoid very new replicas (creation time may be absent in some fakes)
                         created = inst.get("InstanceCreateTime")
                         if isinstance(created, datetime):
-                            if created.replace(tzinfo=created.tzinfo or timezone.utc) > (_now_utc() - timedelta(days=7)):
+                            if created.replace(tzinfo=created.tzinfo or timezone.utc) > (now_utc() - timedelta(days=7)):
                                 continue
                         ids_for_replicas.append(instance_id)
 
@@ -431,7 +404,7 @@ class RDSInstancesOptimizationsChecker:
         replica_connections: Dict[str, List[float]] = {}
 
         if metric_fetcher is not None and ids_for_storage:
-            end = _now_utc()
+            end = now_utc()
             start = end - timedelta(days=self._storage_window_days)
             storage_metrics = metric_fetcher.fetch_values_by_instance(
                 namespace="AWS/RDS",
@@ -444,7 +417,7 @@ class RDSInstancesOptimizationsChecker:
             )
 
         if metric_fetcher is not None and ids_for_replicas:
-            end = _now_utc()
+            end = now_utc()
             start = end - timedelta(days=self._replica_unused_window_days)
             replica_read_iops = metric_fetcher.fetch_values_by_instance(
                 namespace="AWS/RDS",
@@ -555,8 +528,8 @@ class RDSInstancesOptimizationsChecker:
                     "If the instance is no longer needed, delete it (after snapshot/backup as required). "
                     "If it must remain stopped, review storage footprint and snapshot retention."
                 ),
-                estimated_monthly_cost=_money(monthly_cost),
-                estimated_monthly_savings=_money(monthly_cost),
+                estimated_monthly_cost=money(monthly_cost),
+                estimated_monthly_savings=money(monthly_cost),
                 estimate_confidence=60,
                 estimate_notes="AllocatedStorage GB * default USD/GB-month. Excludes I/O and backup charges.",
                 tags=tags,
@@ -588,7 +561,7 @@ class RDSInstancesOptimizationsChecker:
                         "RDS storage typically cannot be reduced in-place. Consider snapshot+restore to a smaller size, "
                         "or rebuild with lower allocation. If enabled, use storage autoscaling with sensible limits."
                     ),
-                    estimated_monthly_savings=_money(monthly_savings),
+                    estimated_monthly_savings=money(monthly_savings),
                     estimated_monthly_cost=0.0,
                     estimate_confidence=70,
                     estimate_notes=(
@@ -654,8 +627,8 @@ class RDSInstancesOptimizationsChecker:
                 scope=scope,
                 message="Multi-AZ is enabled and the instance appears to be non-production based on env tags.",
                 recommendation="If HA is not required in non-prod, consider Single-AZ after validating compliance/DR needs.",
-                estimated_monthly_savings=_money(monthly_savings),
-                estimated_monthly_cost=_money(monthly_cost),
+                estimated_monthly_savings=money(monthly_savings),
+                estimated_monthly_cost=money(monthly_cost),
                 estimate_confidence=confidence,
                 estimate_notes=estimate_notes,
                 tags=tags,
@@ -756,8 +729,8 @@ class RDSInstancesOptimizationsChecker:
                             "Confirm the replica is not required for DR/reporting/migration. "
                             "If unused, consider deleting it, or keeping it only during reporting windows."
                         ),
-                        estimated_monthly_savings=_money(est_savings),
-                        estimated_monthly_cost=_money(est_cost),
+                        estimated_monthly_savings=money(est_savings),
+                        estimated_monthly_cost=money(est_cost),
                         estimate_confidence=est_conf,
                         estimate_notes=est_notes,
                         tags=tags,
@@ -821,25 +794,27 @@ class RDSInstancesOptimizationsChecker:
 
         return (float(p95_read), len(reads), p95_conns)
 
-    def _access_error(self, region: str, action: str, exc: ClientError) -> FindingDraft:
+    def _access_error(self, ctx: Any, region: str, action: str, exc: ClientError) -> FindingDraft:
         code = ""
         try:
             code = str(exc.response.get("Error", {}).get("Code", ""))
         except Exception:  # pragma: no cover
             code = ""
+            try:
+                code = str(exc.response.get("Error", {}).get("Code", ""))
+            except Exception:  # pragma: no cover
+                code = ""
+
         scope = build_scope(
             ctx,
-            account=AwsAccountContext(
-                account_id=self._account.account_id,
-                billing_account_id=str(self._account.billing_account_id or self._account.account_id),
-                partition=partition,
-            ),
+            account=self._account,
             region=region,
             service="rds",
-            resource_type="db_instance",
-            resource_id=instance_id,
-            resource_arn=arn,
+            resource_type="account",
+            resource_id=self._account.account_id,
+            resource_arn="",
         )
+        
         return FindingDraft(
             check_id="aws.rds.instances.access_error",
             check_name="RDS access error",
