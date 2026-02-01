@@ -56,8 +56,6 @@ _REPLICA_PURPOSE_VALUES = {
     "failover",
     "disaster-recovery",
     "disasterrecovery",
-    "reporting",
-    "analytics",
     "migration",
 }
 _GENERIC_SUPPRESS_KEYS = {"retain", "do_not_delete", "donotdelete", "keep"}
@@ -167,39 +165,71 @@ def _family_from_instance_class(db_instance_class: str) -> str:
     return parts[1] if len(parts) >= 3 else ""
 
 
+def _norm_engine(engine: str) -> str:
+    return (engine or "").strip().lower()
+
+
+def _parse_major_minor(version: str) -> Optional[Tuple[int, int]]:
+    s = (version or "").strip()
+    if not s:
+        return None
+
+    parts = s.split(".", 2)
+    try:
+        major_txt = parts[0]
+        minor_txt = parts[1] if len(parts) > 1 else "0"
+
+        # keep leading digits only (handles '13beta1', '8a', etc.)
+        def _lead_int(x: str) -> int:
+            x = x.strip()
+            i = 0
+            while i < len(x) and x[i].isdigit():
+                i += 1
+            if i == 0:
+                raise ValueError("no digits")
+            return int(x[:i])
+
+        return (_lead_int(major_txt), _lead_int(minor_txt))
+    except ValueError:
+        return None
+
+
 def _engine_needs_upgrade(
     *,
     engine: str,
     engine_version: str,
     mysql_blocked_prefixes: Sequence[str],
-    postgres_min_major: Optional[int],
-    mariadb_min_major: Optional[int],
+    postgres_min_version: Optional[Tuple[int, int]],
+    mariadb_min_version: Optional[Tuple[int, int]],
 ) -> bool:
-    """Return True when engine/version is flagged as outdated by local policy.
-
-    Policy is intentionally simple and configurable via checker init.
     """
-    eng = (engine or "").lower().strip()
-    ver = str(engine_version or "").strip()
+    Return True when engine/version is flagged as outdated by local policy.
 
-    if "mysql" in eng and mysql_blocked_prefixes:
-        return any(ver.startswith(pfx) for pfx in mysql_blocked_prefixes)
+    Rules:
+    - MySQL: needs upgrade if version starts with any blocked prefix (e.g. '5.6', '5.7')
+    - Postgres / MariaDB: needs upgrade if parsed (major, minor) < configured minimum
+    """
+    eng = _norm_engine(engine)
+    ver = (engine_version or "").strip()
 
-    if "postgres" in eng and postgres_min_major is not None:
-        major_txt = ver.split(".", 1)[0] if ver else ""
-        try:
-            major = int(major_txt)
-        except ValueError:
+    # --- MySQL (and Aurora MySQL variants if you want) ---
+    if "mysql" in eng:
+        # Keep it prefix-based: supports '5.7.44', '5.6.51', etc.
+        if mysql_blocked_prefixes and ver:
+            return any(ver.startswith(pfx) for pfx in mysql_blocked_prefixes)
+        return False
+
+    if "postgres" in eng and postgres_min_version is not None:
+        parsed = _parse_major_minor(ver)
+        if parsed is None:
             return False
-        return major < int(postgres_min_major)
+        return parsed < postgres_min_version
 
-    if "mariadb" in eng and mariadb_min_major is not None:
-        major_txt = ver.split(".", 1)[0] if ver else ""
-        try:
-            major = int(major_txt)
-        except ValueError:
+    if "mariadb" in eng and mariadb_min_version is not None:
+        parsed = _parse_major_minor(ver)
+        if parsed is None:
             return False
-        return major < int(mariadb_min_major)
+        return parsed < mariadb_min_version
 
     return False
 
@@ -356,8 +386,8 @@ class RDSInstancesOptimizationsChecker:
         storage_min_coverage_ratio: float = 0.60,
         replica_min_coverage_ratio: float = 0.60,
         mysql_blocked_prefixes: Sequence[str] = ("5.6", "5.7"),
-        postgres_min_major: Optional[int] = 12,
-        mariadb_min_major: Optional[int] = None,
+        postgres_min_version: Optional[tuple[int, int]] = (12, 0),
+        mariadb_min_version: Optional[tuple[int, int]]= (10, 6),
     ) -> None:
         self._account = account
         self._storage_gb_month_price_usd = float(storage_gb_month_price_usd)
@@ -374,8 +404,17 @@ class RDSInstancesOptimizationsChecker:
         self._storage_min_coverage_ratio = float(storage_min_coverage_ratio)
         self._replica_min_coverage_ratio = float(replica_min_coverage_ratio)
         self._mysql_blocked_prefixes = tuple(str(x) for x in mysql_blocked_prefixes)
-        self._postgres_min_major = int(postgres_min_major) if postgres_min_major is not None else None
-        self._mariadb_min_major = int(mariadb_min_major) if mariadb_min_major is not None else None
+        self._postgres_min_version = (
+            (int(postgres_min_version[0]), int(postgres_min_version[1]))
+            if postgres_min_version is not None
+            else None
+        )
+
+        self._mariadb_min_version = (
+            (int(mariadb_min_version[0]), int(mariadb_min_version[1]))
+            if mariadb_min_version is not None
+            else None
+        )
 
     def run(self, ctx) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
@@ -749,7 +788,8 @@ class RDSInstancesOptimizationsChecker:
             ).with_issue(check="old_generation_family", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, family=fam)
 
         # 5) needs_engine_upgrade (policy)
-        if _engine_needs_upgrade(engine=engine, engine_version=engine_version, mysql_blocked_prefixes=self._mysql_blocked_prefixes, postgres_min_major=self._postgres_min_major, mariadb_min_major=self._mariadb_min_major):
+        if _engine_needs_upgrade(engine=engine, engine_version=engine_version, mysql_blocked_prefixes=self._mysql_blocked_prefixes, 
+                                 postgres_min_version=self._postgres_min_version, mariadb_min_version=self._mariadb_min_version):
             yield FindingDraft(
                 check_id="aws.rds.engine.needs_upgrade",
                 check_name="RDS engine version needs upgrade",
