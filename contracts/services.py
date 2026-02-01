@@ -34,6 +34,7 @@ class Services:
     backup: Any
     ec2: Any
     fsx: Any = None
+    efs: Any = None
     cloudwatch: Any = None
     region: str = ""
     pricing: Any = None
@@ -100,6 +101,7 @@ class ServicesFactory:
             backup=self._client("backup", region=reg),
             ec2=self._client("ec2", region=reg),
             fsx=self._client("fsx", region=reg),
+            efs=self._client("efs", region=reg),
             cloudwatch=self._client("cloudwatch", region=reg),
             pricing=self._pricing_service,
             region=reg,
