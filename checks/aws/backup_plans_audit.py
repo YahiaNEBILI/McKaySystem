@@ -39,8 +39,7 @@ Minimum permissions (read-only):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Dict, Iterable, Iterator, Optional
 
 from botocore.client import BaseClient
