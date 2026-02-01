@@ -16,7 +16,12 @@ This module adds two governance-oriented checks for AWS Backup vaults:
    Detects:
      - Vaults with no Vault Lock fields present (no retention guardrail).
      - Vaults with MaxRetentionDays missing/zero (allows "never delete").
-     - (Optional) Vault Lock values inconsistent with org standards.
+     - Vault Lock values inconsistent with org standards (optional thresholds).
+
+   FinOps enhancement:
+     - For the "no max retention" case, attaches a best-effort estimate of the
+       *current* recovery point storage cost in the vault (warm/cold), using
+       PricingService when available.
 
 2) aws.backup.vaults.access_policy_misconfig
    Detects common misconfigurations in backup vault access policies:
@@ -24,6 +29,10 @@ This module adds two governance-oriented checks for AWS Backup vaults:
      - Wildcard principals in Allow statements ("*" or {"AWS":"*"})
      - Cross-account principals not in an allowlist (bootstrap-configurable)
      - Broad destructive permissions granted to non-allowlisted principals
+
+   Security nuance:
+     - If a wildcard principal is constrained by aws:PrincipalOrgID, severity is
+       downgraded (still risky, but materially less than public "*").
 
 Design notes
 ------------
@@ -40,29 +49,23 @@ Permissions required (minimum):
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
-    build_scope,
     AwsAccountContext,
-    gb_from_bytes,
-    is_suppressed,
+    build_scope,
     money,
-    now_utc,
-    safe_float,
     safe_region_from_client,
-    utc,
 )
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
 
 
 # Actions that are generally high-impact if granted broadly.
-_SENSITIVE_ACTIONS = {
+_SENSITIVE_ACTIONS: Set[str] = {
     "backup:deletebackupvault",
     "backup:deletebackupvaultaccesspolicy",
     "backup:putbackupvaultaccesspolicy",
@@ -77,9 +80,6 @@ _SENSITIVE_ACTIONS = {
     "backup:*",
     "*",
 }
-
-
- 
 
 
 def _paginate_items(
@@ -100,6 +100,7 @@ def _paginate_items(
                         yield item
             return
         except Exception:
+            # Fall back to NextToken pagination
             pass
 
     next_token: Optional[str] = None
@@ -124,7 +125,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
-
 
 
 def _pricing_backup_gb_month_price(
@@ -159,6 +159,7 @@ def _pricing_backup_gb_month_price(
     except Exception as exc:  # pragma: no cover
         return fallback_usd, f"Fallback pricing (PricingService error: {exc})", 0
 
+
 def _parse_account_id_from_principal(principal: str) -> Optional[str]:
     """
     Supports:
@@ -190,9 +191,7 @@ def _as_list(value: Any) -> List[Any]:
 
 
 def _normalize_action(action: Any) -> Set[str]:
-    """
-    Action can be a string or list; normalize to lowercase set.
-    """
+    """Action can be a string or list; normalize to lowercase set."""
     actions: Set[str] = set()
     for a in _as_list(action):
         if a is None:
@@ -215,9 +214,7 @@ def _principal_is_wildcard(principal: Any) -> bool:
 
 
 def _extract_principals(principal: Any) -> List[str]:
-    """
-    Return a list of principal strings (best-effort).
-    """
+    """Return a list of principal strings (best-effort)."""
     principals: List[str] = []
     if principal is None:
         return principals
@@ -244,6 +241,40 @@ def _extract_principals(principal: Any) -> List[str]:
     return principals
 
 
+def _extract_org_ids_from_condition(condition: Any) -> List[str]:
+    """Best-effort extraction of aws:PrincipalOrgID values from a policy Condition."""
+    if not isinstance(condition, dict):
+        return []
+
+    org_ids: List[str] = []
+    for op in (
+        "StringEquals",
+        "StringLike",
+        "ForAnyValue:StringEquals",
+        "ForAnyValue:StringLike",
+    ):
+        block = condition.get(op)
+        if not isinstance(block, dict):
+            continue
+        val = block.get("aws:PrincipalOrgID")
+        if val is None:
+            continue
+        for x in _as_list(val):
+            s = str(x or "").strip()
+            if s:
+                org_ids.append(s)
+
+    # de-dupe, keep order
+    seen: Set[str] = set()
+    out: List[str] = []
+    for x in org_ids:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
 class AwsBackupVaultsAuditChecker:
     """
     One checker module, two check_id outputs:
@@ -266,7 +297,6 @@ class AwsBackupVaultsAuditChecker:
         self._expected_lock_max_days = expected_lock_max_days
         self._allowed_cross_account_ids = allowed_cross_account_ids or set()
 
-
     def run(self, ctx) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupVaultsAuditChecker requires ctx.services.backup")
@@ -287,14 +317,14 @@ class AwsBackupVaultsAuditChecker:
             try:
                 lock_findings = list(self._check_vault_lock(ctx, backup, region, v))
             except ClientError as exc:
-                # Tests expect: single access_error and stop on describe_backup_vault failure
+                # Single access_error and stop on describe_backup_vault failure
                 yield self._access_error_finding(ctx, region, "describe_backup_vault", exc)
                 return
 
             if lock_findings:
                 for f in lock_findings:
                     yield f
-                # Important: if lifecycle guardrail is failing, do not emit policy findings too
+                # If retention guardrail is failing, do not emit policy findings too
                 continue
 
             try:
@@ -304,17 +334,6 @@ class AwsBackupVaultsAuditChecker:
                 return
 
     # ------------------------------ Check 1: Vault Lock ------------------------------ #
-
-    def _estimate_vault_monthly_cost(
-        self,
-        ctx: Any,
-        backup: BaseClient,
-        region: str,
-        vault: Dict[str, Any],
-    ) -> Tuple[Optional[float], str, Optional[str]]:
-        """Best-effort monthly cost estimate for a vault. Override/extend as needed."""
-        return None, "", None
-
 
     def _check_vault_lock(
         self,
@@ -332,7 +351,7 @@ class AwsBackupVaultsAuditChecker:
         vault_name = str(vault.get("BackupVaultName") or "unknown")
         vault_arn = str(vault.get("BackupVaultArn") or "")
 
-        # Let ClientError bubble to run() so tests expecting "single access_error and stop" keep passing.
+        # Let ClientError bubble to run() so "single access_error and stop" keeps passing.
         desc = backup.describe_backup_vault(BackupVaultName=vault_name)
         vlc = desc.get("VaultLockConfiguration") or {}
 
@@ -344,23 +363,15 @@ class AwsBackupVaultsAuditChecker:
         max_days = _safe_int(max_days_raw) or 0
 
         # Case 1: no Vault Lock configured at all
-        no_lock_fields = (
-            locked_flag is None
-            and min_days_raw is None
-            and max_days_raw is None
-        )
+        no_lock_fields = locked_flag is None and min_days_raw is None and max_days_raw is None
 
-        # New: configured but ineffective (no guardrail)
-        disabled_guardrail = (
-            locked_flag is False
-            and min_days == 0
-            and max_days == 0
-        )
+        # Configured but ineffective (no guardrail)
+        disabled_guardrail = locked_flag is False and min_days == 0 and max_days == 0
 
-        # Case 2 (existing tests): no max retention => indefinite retention risk
-        no_max = (max_days <= 0)
+        # Case 2: no max retention => indefinite retention risk
+        no_max = max_days <= 0
 
-        # "Standard" expectations can be unset/None; enforce only when provided.
+        # "Standard" expectations: enforce only when provided.
         expected_min = _safe_int(getattr(self, "_expected_lock_min_days", None)) or 0
         expected_max = _safe_int(getattr(self, "_expected_lock_max_days", None)) or 0
 
@@ -370,11 +381,10 @@ class AwsBackupVaultsAuditChecker:
         if expected_max > 0 and max_days > expected_max:
             out_of_standard = True
 
-        # Decide whether to emit + which rule label to use (to satisfy tests)
         if not (no_lock_fields or disabled_guardrail or no_max or out_of_standard):
             return
 
-        # Rule mapping (tests assert these exact strings)
+        # Rule mapping (tests may assert these exact strings)
         if no_lock_fields or disabled_guardrail:
             rule = "vault_lock_missing"
         elif no_max:
@@ -382,8 +392,32 @@ class AwsBackupVaultsAuditChecker:
         else:
             rule = "vault_lock_out_of_standard"
 
+        # (2) Attach best-effort monthly storage cost estimate for "no max retention"
+        est_cost: Optional[float] = None
+        est_notes: str = ""
+        est_conf: int = 0
+        if rule == "vault_lock_no_max":
+            est_cost, est_notes, est_conf = self._estimate_vault_monthly_storage_cost(
+                ctx,
+                backup,
+                region=region,
+                vault_name=vault_name,
+            )
+
+        est_cost_str = ""
+        if est_cost is not None:
+            try:
+                est_cost_rounded = money(float(est_cost))
+                est_cost_str = f"${est_cost_rounded:,.2f}"
+            except Exception:
+                est_cost_str = ""
+
         # Severity mapping: out_of_standard is low, everything else medium
-        severity = Severity(level="low", score=40) if rule == "vault_lock_out_of_standard" else Severity(level="medium", score=70)
+        severity = (
+            Severity(level="low", score=40)
+            if rule == "vault_lock_out_of_standard"
+            else Severity(level="medium", score=70)
+        )
 
         if rule == "vault_lock_missing":
             if no_lock_fields:
@@ -398,6 +432,10 @@ class AwsBackupVaultsAuditChecker:
                 f"(min={min_days}, max={max_days}, expected_min={expected_min or 'n/a'}, expected_max={expected_max or 'n/a'})."
             )
 
+        cost_suffix = ""
+        if rule == "vault_lock_no_max" and est_cost_str:
+            cost_suffix = f" Observed recovery point storage estimate: {est_cost_str}/month."
+
         yield FindingDraft(
             check_id="aws.backup.vaults.no_lifecycle",
             check_name="AWS Backup vault retention guardrails",
@@ -408,6 +446,7 @@ class AwsBackupVaultsAuditChecker:
             message=(
                 f"Backup vault '{vault_name}' has no effective retention guardrail. {reason} "
                 "Retention may drift to indefinite accumulation."
+                f"{cost_suffix}"
             ),
             recommendation=(
                 "Configure Vault Lock with explicit minimum and maximum retention aligned with policy "
@@ -430,13 +469,21 @@ class AwsBackupVaultsAuditChecker:
                 "min_retention_days": str(min_days),
                 "max_retention_days": str(max_days),
             },
+            estimated_monthly_cost=est_cost,
+            estimated_monthly_savings=None,
+            estimate_confidence=int(est_conf or 0),
+            estimate_notes=str(est_notes or ""),
         )
-
-
 
     # ------------------------------ Check 2: Access Policy ------------------------------ #
 
-    def _check_access_policy(self, ctx, backup: BaseClient, region: str, vault: Dict[str, Any]) -> Iterable[FindingDraft]:
+    def _check_access_policy(
+        self,
+        ctx,
+        backup: BaseClient,
+        region: str,
+        vault: Dict[str, Any],
+    ) -> Iterable[FindingDraft]:
         vault_name = str(vault.get("BackupVaultName") or "")
         vault_arn = str(vault.get("BackupVaultArn") or "")
         if not vault_name:
@@ -558,21 +605,32 @@ class AwsBackupVaultsAuditChecker:
             principal = st.get("Principal")
             actions = _normalize_action(st.get("Action"))
             sid = str(st.get("Sid") or "")
+            condition = st.get("Condition")
 
-            # 1) Wildcard principal is always bad in an Allow statement.
+            # 1) Wildcard principal in Allow statement
             if _principal_is_wildcard(principal):
+                # (3) Condition awareness: wildcard constrained by aws:PrincipalOrgID is less severe
+                org_ids = _extract_org_ids_from_condition(condition)
+                has_org = bool(org_ids)
+
+                sev = Severity(level="high", score=90)
+                if has_org:
+                    sev = Severity(level="medium", score=75)
+
                 candidate = FindingDraft(
                     check_id="aws.backup.vaults.access_policy_misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
-                    severity=Severity(level="high", score=90),
+                    severity=sev,
                     title="Backup vault access policy allows wildcard principal",
                     message=(
                         f"Backup vault '{vault_name}' access policy contains an Allow statement with wildcard "
-                        f"principal ('*'). This is overly permissive."
+                        "principal ('*'). This is overly permissive."
                     ),
-                    recommendation="Restrict principals to specific AWS accounts/roles and limit actions to required operations.",
+                    recommendation=(
+                        "Restrict principals to specific AWS accounts/roles and limit actions to required operations."
+                    ),
                     scope=self._base_scope(
                         ctx,
                         region=region,
@@ -585,6 +643,8 @@ class AwsBackupVaultsAuditChecker:
                         "vault_arn": vault_arn,
                         "sid": sid,
                         "actions": ",".join(sorted(actions)),
+                        "has_org_condition": "true" if has_org else "false",
+                        "org_ids": ",".join(org_ids),
                     },
                     estimated_monthly_cost=None,
                     estimated_monthly_savings=None,
@@ -602,7 +662,7 @@ class AwsBackupVaultsAuditChecker:
                 if acct and acct != self._account.account_id and acct not in self._allowed_cross_account_ids:
                     cross_accounts.add(acct)
 
-            # 3) Broad sensitive actions to cross-account or unknown principals is higher severity
+            # 3) Broad sensitive actions escalation
             has_sensitive = any(a in _SENSITIVE_ACTIONS for a in actions)
 
             if cross_accounts:
@@ -649,7 +709,7 @@ class AwsBackupVaultsAuditChecker:
                 worst = self._pick_worst(worst, candidate)
                 continue
 
-            # 4) If not cross-account, still flag overly broad sensitive actions to non-wildcard principals (lower severity)
+            # 4) Overly broad sensitive actions (even without cross-account)
             if has_sensitive and principals:
                 candidate = FindingDraft(
                     check_id="aws.backup.vaults.access_policy_misconfig",
@@ -662,7 +722,9 @@ class AwsBackupVaultsAuditChecker:
                         f"Backup vault '{vault_name}' access policy includes sensitive actions "
                         f"({', '.join(sorted(actions & _SENSITIVE_ACTIONS))})."
                     ),
-                    recommendation="Scope sensitive actions to tightly controlled admin roles and consider adding explicit conditions.",
+                    recommendation=(
+                        "Scope sensitive actions to tightly controlled admin roles and consider adding explicit conditions."
+                    ),
                     scope=self._base_scope(
                         ctx,
                         region=region,
@@ -739,8 +801,8 @@ class AwsBackupVaultsAuditChecker:
         except Exception:  # pragma: no cover
             return None, "Unable to enumerate recovery points", 0
 
-        gb_warm = float(total_warm_bytes) / (1024.0 ** 3)
-        gb_cold = float(total_cold_bytes) / (1024.0 ** 3)
+        gb_warm = float(total_warm_bytes) / (1024.0**3)
+        gb_cold = float(total_cold_bytes) / (1024.0**3)
         if gb_warm <= 0.0 and gb_cold <= 0.0:
             return 0.0, "No recovery point storage observed", 20
 
