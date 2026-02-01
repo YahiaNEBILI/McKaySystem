@@ -16,6 +16,7 @@ A checker MUST:
 - be deterministic for identical observed input
 - emit findings with stable identifiers (issue_key / fingerprint inputs)
 - separate **signals** from **interpretation** (interpretation belongs in correlation)
+- use _common helpers, any redundant code must be avoided
 
 A checker MUST NOT:
 - mutate storage directly (no writing Parquet/JSON)
