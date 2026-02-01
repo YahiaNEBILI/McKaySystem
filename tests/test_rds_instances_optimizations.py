@@ -601,4 +601,3 @@ def test_cloudwatch_access_error_emits_and_checker_continues() -> None:
 
     assert any(f.check_id == "aws.rds.instances.access_error" for f in findings)
     assert any(f.check_id == "aws.rds.multi_az.non_prod" for f in findings)
-

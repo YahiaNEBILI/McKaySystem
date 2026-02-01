@@ -566,12 +566,6 @@ class RDSInstancesOptimizationsChecker:
                 if isinstance(inst, dict):
                     yield inst
 
-    def _list_tags(self, rds: Any, arn: str) -> Dict[str, str]:
-        if not arn:
-            return {}
-        resp = rds.list_tags_for_resource(ResourceName=arn)
-        return _extract_tags(resp.get("TagList", []) or [])
-
     def _is_read_replica(self, inst: Dict[str, Any]) -> bool:
         # On replicas, this key is typically present.
         src = inst.get("ReadReplicaSourceDBInstanceIdentifier")
