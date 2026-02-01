@@ -1,4 +1,7 @@
-# CUR pipeline (Cost & Usage Report)
+# CUR ingestion
+
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 This document explains **how CUR data is integrated** into the FinOps engine:
 
@@ -240,4 +243,3 @@ Low coverage is **not a failure**; it is a signal for where attribution can be i
 - Coverage is a diagnostic signal, not an error
 
 This design keeps the FinOps engine **accurate, resilient, and SaaS-ready**.
-

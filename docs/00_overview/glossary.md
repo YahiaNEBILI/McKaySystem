@@ -1,4 +1,7 @@
-# FinOps SaaS – Documentation & Glossary
+# Glossary
+
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 This document provides the **shared vocabulary and conceptual model** for the FinOps SaaS engine.
 It is intended for:

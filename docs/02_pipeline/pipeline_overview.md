@@ -1,5 +1,7 @@
+# Pipeline overview
 
-# FinOps SaaS – Pipeline Overview
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 ## 1. Purpose
 

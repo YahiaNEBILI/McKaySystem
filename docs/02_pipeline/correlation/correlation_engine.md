@@ -1,4 +1,7 @@
-# Correlation Engine
+# Correlation engine
+
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 ## Purpose
 

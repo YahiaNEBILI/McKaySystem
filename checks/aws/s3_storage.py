@@ -230,10 +230,6 @@ class S3StorageChecker:
                 )
 
             # ------------------------------
-            # Cost: storage estimate (Standard storage only, best-effort)
-            # ------------------------------
-
-            # ------------------------------
             # Cost: storage estimate (multi-class, best-effort)
             # ------------------------------
             if cloudwatch is not None:

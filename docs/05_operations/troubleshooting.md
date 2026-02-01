@@ -1,5 +1,8 @@
 # Troubleshooting
 
+Status: Derived  
+Last reviewed: 2026-02-01
+
 This document lists **common operational issues**, how to diagnose them, and how to fix them.
 
 It is written from a **production / on-call perspective**: most problems are *expected states*, not bugs.
@@ -240,4 +243,3 @@ CUR often lacks resource-level identifiers.
 Most “issues” are signals about data quality, not system failures.
 
 If the runner exits successfully and writes Parquet, the system is working as intended.
-

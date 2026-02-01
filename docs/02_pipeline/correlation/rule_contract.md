@@ -1,4 +1,7 @@
-# Correlation Rule Output Contract
+# Correlation rule contract
+
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 The correlation engine is easiest to operate when **every SQL rule returns the same schema**.
 
