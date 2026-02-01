@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import json
 from botocore.exceptions import ClientError
@@ -185,6 +185,68 @@ def test_vault_lock_missing_fields_emits_no_lifecycle():
     assert f.scope.resource_id == "vault-a"
 
 
+def test_vault_lock_no_max_cost_estimate_enumeration_denied_sets_none():
+    """If recovery points cannot be listed, estimated_monthly_cost should be None (unknown)."""
+    checker = _mk_checker()
+
+    vaults = [
+        {"BackupVaultName": "vault-deny", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-deny"}
+    ]
+    describe = {
+        "vault-deny": {"BackupVaultName": "vault-deny", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
+    }
+
+    backup = _FakeBackupClient(
+        region="eu-west-1",
+        vaults=vaults,
+        describe_by_name=describe,
+        policy_by_name={"vault-deny": {}},
+        recovery_points_by_vault={"vault-deny": [{"StorageClass": "WARM", "BackupSizeInBytes": 123}]},
+        raise_on="list_recovery_points_by_backup_vault",
+    )
+    ctx = _FakeCtx(services=_FakeServices(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01)))
+
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.issue_key["rule"] == "vault_lock_no_max"
+    assert f.estimated_monthly_cost is None
+    assert isinstance(f.estimate_confidence, int)
+    assert f.estimate_confidence == 0
+    assert "Unable to enumerate" in (f.estimate_notes or "")
+
+
+def test_vault_lock_no_max_cost_estimate_empty_vault_is_zero():
+    """If the vault has no recovery points, estimated_monthly_cost should be 0.0 (known empty)."""
+    checker = _mk_checker()
+
+    vaults = [
+        {"BackupVaultName": "vault-empty", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-empty"}
+    ]
+    describe = {
+        "vault-empty": {"BackupVaultName": "vault-empty", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
+    }
+
+    backup = _FakeBackupClient(
+        region="eu-west-1",
+        vaults=vaults,
+        describe_by_name=describe,
+        policy_by_name={"vault-empty": {}},
+        recovery_points_by_vault={"vault-empty": []},
+    )
+    ctx = _FakeCtx(services=_FakeServices(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01)))
+
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.issue_key["rule"] == "vault_lock_no_max"
+    assert f.estimated_monthly_cost is not None
+    assert float(f.estimated_monthly_cost) == 0.0
+    assert isinstance(f.estimate_confidence, int)
+    assert f.estimate_confidence == 20
+    assert "No recovery point storage observed" in (f.estimate_notes or "")
+
+
 def test_vault_lock_disabled_zero_zero_emits_missing():
     """Vault Lock present but ineffective (Locked=False, min/max=0) -> treat as missing guardrail."""
     checker = _mk_checker()
@@ -296,10 +358,34 @@ def test_vault_lock_out_of_standard_emits_low():
     assert f.issue_key["rule"] == "vault_lock_out_of_standard"
     assert f.severity.level == "low"
 
-
 # -------------------------
 # Tests: Access Policy (access_policy_misconfig)
 # -------------------------
+
+
+def test_access_policy_notprincipal_emits_info():
+    checker = _mk_checker()
+
+    vaults = [{"BackupVaultName": "vault-np", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-np"}]
+    describe = {"vault-np": {"BackupVaultName": "vault-np", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 30}}
+
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Sid": "NP", "Effect": "Allow", "NotPrincipal": {"AWS": "arn:aws:iam::333333333333:root"}, "Action": "backup:*", "Resource": "*"},
+        ],
+    }
+
+    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-np": policy})
+    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.status == "info"
+    assert f.issue_key["rule"] == "uses_notprincipal"
+
 
 def test_access_policy_missing_emits_low_misconfig():
     """When lifecycle is OK but access policy is missing -> emit low access_policy_misconfig."""
