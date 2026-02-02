@@ -1,5 +1,7 @@
+# IDs and fingerprint
 
-# FinOps IDs & Fingerprint Specification
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 ## 1. Purpose
 

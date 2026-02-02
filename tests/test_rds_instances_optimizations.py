@@ -5,13 +5,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-
+from datetime import datetime, timezone
 import pytest
 
 from checks.aws.rds_instances_optimizations import (
     AwsAccountContext,
     RDSInstancesOptimizationsChecker,
 )
+
+from botocore.exceptions import ClientError
 
 
 # -------------------------
@@ -413,21 +415,29 @@ def test_multi_az_missing_env_tag_no_finding() -> None:
 
 
 @pytest.mark.parametrize(
-    "engine,version",
+    "engine,version,should_emit",
     [
-        ("postgres", ""),          # empty version
-        ("postgres", "abc"),       # non-numeric
-        ("postgres", "11beta"),    # weird format
-        ("mysql", ""),             # empty
-        ("mysql", "v5.7"),         # doesn't start with 5.7 exactly
-        ("mysql", "unknown"),      # nonsense
-        ("", "11.0"),              # empty engine
-        ("not-a-db", "1.2.3"),     # unknown engine
+        # Realistic: empty/None-like should not emit
+        ("postgres", "", False), # empty version (should not crash, not emit)
+        ("mysql", "", False), # empty
+        ("", "11.0", False), # empty
+        ("not-a-db", "1.2.3", False), # unkown
+
+        # Realistic numeric versions
+        ("postgres", "11.22", True),   # < (12,0) triggers policy
+        ("postgres", "12.0", False),   # meets policy
+        ("postgres", "15.4", False),   # meets policy
+
+        ("mariadb", "10.5.18", True),  # < (10,6) triggers policy
+        ("mariadb", "10.6.12", False), # meets policy
+        ("mariadb", "10.10.2", False), # meets policy (important: 10.10 > 10.6)
     ],
 )
 
 
-def test_weird_engine_versions_do_not_crash(engine: str, version: str) -> None:
+def test_engine_versions_do_not_crash_and_follow_policy(
+    engine: str, version: str, should_emit: bool
+) -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db_weird"
     rds = _FakeRdsClient(
         region="eu-west-3",
@@ -449,7 +459,145 @@ def test_weird_engine_versions_do_not_crash(engine: str, version: str) -> None:
     ctx = _FakeCtx()
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
-    # Must not raise
     findings = list(_mk_checker().run(ctx))
-    # And should not incorrectly emit the engine upgrade finding for weird inputs
-    assert all(x.check_id != "aws.rds.engine.needs_upgrade" for x in findings)
+
+    emitted = any(f.check_id == "aws.rds.engine.needs_upgrade" for f in findings)
+    assert emitted is should_emit
+
+
+def test_unused_read_replica_emits_when_p95_read_iops_zero() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:replica1"
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            # 14 days of daily datapoints => enough for coverage checks
+            "ReadIOPS": {"replica1": [0.0] * 14},
+            "DatabaseConnections": {"replica1": [0.0] * 14},
+        }
+    )
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "replica1",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+                "ReadReplicaSourceDBInstanceIdentifier": "primary1",
+                # Old enough to not be filtered out (<7d)
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    assert any(f.check_id == "aws.rds.read_replica.unused" for f in findings)
+
+
+def test_unused_read_replica_suppressed_by_purpose_tag() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:replica_suppressed"
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "ReadIOPS": {"replica_suppressed": [0.0] * 14},
+            "DatabaseConnections": {"replica_suppressed": [0.0] * 14},
+        }
+    )
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "replica_suppressed",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+                "ReadReplicaSourceDBInstanceIdentifier": "primary1",
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            }
+        ],
+        # Suppression: purpose/failover/migration etc
+        tags_by_arn={arn: {"env": "dev", "purpose": "migration"}},
+    )
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    assert all(f.check_id != "aws.rds.read_replica.unused" for f in findings)
+
+
+def test_unused_read_replica_skipped_for_aurora() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:aurora_replica"
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "ReadIOPS": {"aurora_replica": [0.0] * 14},
+            "DatabaseConnections": {"aurora_replica": [0.0] * 14},
+        }
+    )
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "aurora_replica",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "aurora-postgresql",
+                "EngineVersion": "15.4",
+                "ReadReplicaSourceDBInstanceIdentifier": "aurora_primary",
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    assert all(f.check_id != "aws.rds.read_replica.unused" for f in findings)
+
+
+class _FakeCloudWatchClientDeny:
+    def get_metric_data(self, **kwargs: Any) -> Dict[str, Any]:
+        raise ClientError(
+            error_response={"Error": {"Code": "AccessDenied", "Message": "Denied"}},
+            operation_name="GetMetricData",
+        )
+
+
+def test_cloudwatch_access_error_emits_and_checker_continues() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:db_cw_denied"
+    cw = _FakeCloudWatchClientDeny()
+    rds = _FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db_cw_denied",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,  # triggers storage metrics fetch
+                "MultiAZ": True,         # triggers multi-az non-prod (tag based)
+                "DBInstanceClass": "db.t3.small",
+                "Engine": "mysql",
+                "EngineVersion": "8.0.35",
+            }
+        ],
+        tags_by_arn={arn: {"env": "staging"}},
+    )
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+
+    assert any(f.check_id == "aws.rds.instances.access_error" for f in findings)
+    assert any(f.check_id == "aws.rds.multi_az.non_prod" for f in findings)

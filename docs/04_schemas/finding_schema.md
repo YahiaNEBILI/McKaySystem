@@ -1,5 +1,7 @@
+# Finding schema
 
-# FinOps SaaS – Canonical Data Model (PyArrow / Parquet)
+Status: Canonical  
+Last reviewed: 2026-02-01
 
 ## 1. Overview
 
@@ -256,3 +258,9 @@ The architecture follows a **lakehouse-inspired 3-layer model**:
 
 ---
 
+
+## Notes
+
+This document is the source of truth for:
+- Parquet storage schema
+- JSON wire representation (where applicable)

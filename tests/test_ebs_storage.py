@@ -12,6 +12,7 @@ import pytest
 
 from checks.aws.ebs_storage import EBSStorageChecker, EBSStorageConfig
 from contracts.finops_checker_pattern import RunContext
+from checks.aws import _common
 
 class FakePaginator:
     def __init__(self, pages: List[Mapping[str, Any]]) -> None:
@@ -61,10 +62,9 @@ def _run(
     ec2: FakeEC2,
     cfg: Optional[EBSStorageConfig] = None,
 ) -> List[Any]:
-    import checks.aws.ebs_storage as mod
 
     now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(mod, "_utc_now", lambda: now)
+    monkeypatch.setattr(_common, "now_utc", lambda: now)
 
     # Duck-typed context; cast keeps Pylance happy.
     ctx = cast(

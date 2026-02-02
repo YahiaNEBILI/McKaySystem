@@ -30,12 +30,13 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 from botocore.exceptions import ClientError
 
+import checks.aws._common as common
+
 from checks.aws._common import (
     build_scope,
     AwsAccountContext,
     normalize_tags,
     money,
-    now_utc,
     safe_region_from_client,
 )
 
@@ -45,7 +46,7 @@ from contracts.finops_checker_pattern import FindingDraft, Severity
 _NONPROD_VALUES = {
     "dev", "test", "nprd", "staging", "nonprod", "non-prod", "sandbox", "qa", "uat"
 }
-_ENV_TAG_KEYS = {"env", "environment", "Environment"}
+_ENV_TAG_KEYS = {"env", "environment"}
 
 _OLD_FAMILIES = {"m1", "m2", "m3", "m4", "r3", "r4", "t1", "t2", "x1"}
 
@@ -55,8 +56,6 @@ _REPLICA_PURPOSE_VALUES = {
     "failover",
     "disaster-recovery",
     "disasterrecovery",
-    "reporting",
-    "analytics",
     "migration",
 }
 _GENERIC_SUPPRESS_KEYS = {"retain", "do_not_delete", "donotdelete", "keep"}
@@ -147,12 +146,12 @@ def _extract_tags(tag_list: Sequence[Dict[str, Any]]) -> Dict[str, str]:
 
 
 def _is_non_prod(tags: Dict[str, str]) -> bool:
-    # explicit prod wins
+    # tags are already normalized by normalize_tags (lower-cased keys and values)
     for k, v in tags.items():
-        if str(k).strip().lower() in _ENV_TAG_KEYS and str(v).strip().lower() in {"prod", "production"}:
+        if k in _ENV_TAG_KEYS and v in {"prod", "production"}:
             return False
     for k, v in tags.items():
-        if str(k).strip().lower() in _ENV_TAG_KEYS and str(v).strip().lower() in _NONPROD_VALUES:
+        if k in _ENV_TAG_KEYS and v in _NONPROD_VALUES:
             return True
     return False
 
@@ -166,23 +165,73 @@ def _family_from_instance_class(db_instance_class: str) -> str:
     return parts[1] if len(parts) >= 3 else ""
 
 
-def _mysql_needs_upgrade(engine: str, engine_version: str) -> bool:
-    if "mysql" not in (engine or "").lower():
-        return False
-    v = str(engine_version or "").strip()
-    return v.startswith("5.6") or v.startswith("5.7")
+def _norm_engine(engine: str) -> str:
+    return (engine or "").strip().lower()
 
 
-def _postgres_needs_upgrade(engine: str, engine_version: str) -> bool:
-    if "postgres" not in (engine or "").lower():
-        return False
-    v = str(engine_version or "").strip()
-    major_txt = v.split(".", 1)[0] if v else ""
+def _parse_major_minor(version: str) -> Optional[Tuple[int, int]]:
+    s = (version or "").strip()
+    if not s:
+        return None
+
+    parts = s.split(".", 2)
     try:
-        major = int(major_txt)
+        major_txt = parts[0]
+        minor_txt = parts[1] if len(parts) > 1 else "0"
+
+        # keep leading digits only (handles '13beta1', '8a', etc.)
+        def _lead_int(x: str) -> int:
+            x = x.strip()
+            i = 0
+            while i < len(x) and x[i].isdigit():
+                i += 1
+            if i == 0:
+                raise ValueError("no digits")
+            return int(x[:i])
+
+        return (_lead_int(major_txt), _lead_int(minor_txt))
     except ValueError:
+        return None
+
+
+def _engine_needs_upgrade(
+    *,
+    engine: str,
+    engine_version: str,
+    mysql_blocked_prefixes: Sequence[str],
+    postgres_min_version: Optional[Tuple[int, int]],
+    mariadb_min_version: Optional[Tuple[int, int]],
+) -> bool:
+    """
+    Return True when engine/version is flagged as outdated by local policy.
+
+    Rules:
+    - MySQL: needs upgrade if version starts with any blocked prefix (e.g. '5.6', '5.7')
+    - Postgres / MariaDB: needs upgrade if parsed (major, minor) < configured minimum
+    """
+    eng = _norm_engine(engine)
+    ver = (engine_version or "").strip()
+
+    # --- MySQL (and Aurora MySQL variants if you want) ---
+    if "mysql" in eng:
+        # Keep it prefix-based: supports '5.7.44', '5.6.51', etc.
+        if mysql_blocked_prefixes and ver:
+            return any(ver.startswith(pfx) for pfx in mysql_blocked_prefixes)
         return False
-    return major in {9, 10, 11}
+
+    if "postgres" in eng and postgres_min_version is not None:
+        parsed = _parse_major_minor(ver)
+        if parsed is None:
+            return False
+        return parsed < postgres_min_version
+
+    if "mariadb" in eng and mariadb_min_version is not None:
+        parsed = _parse_major_minor(ver)
+        if parsed is None:
+            return False
+        return parsed < mariadb_min_version
+
+    return False
 
 
 def _is_aurora_engine(engine: str) -> bool:
@@ -333,6 +382,12 @@ class RDSInstancesOptimizationsChecker:
         replica_period_seconds: int = 86400,
         replica_read_iops_p95_threshold: float = 0.1,
         replica_min_datapoints: int = 7,  # at least ~1 week with daily period
+        storage_min_datapoints: Optional[int] = None,
+        storage_min_coverage_ratio: float = 0.60,
+        replica_min_coverage_ratio: float = 0.60,
+        mysql_blocked_prefixes: Sequence[str] = ("5.6", "5.7"),
+        postgres_min_version: Optional[tuple[int, int]] = (12, 0),
+        mariadb_min_version: Optional[tuple[int, int]]= (10, 6),
     ) -> None:
         self._account = account
         self._storage_gb_month_price_usd = float(storage_gb_month_price_usd)
@@ -345,6 +400,21 @@ class RDSInstancesOptimizationsChecker:
         self._replica_period_seconds = int(replica_period_seconds)
         self._replica_read_iops_p95_threshold = float(replica_read_iops_p95_threshold)
         self._replica_min_datapoints = int(replica_min_datapoints)
+        self._storage_min_datapoints = int(storage_min_datapoints) if storage_min_datapoints is not None else None
+        self._storage_min_coverage_ratio = float(storage_min_coverage_ratio)
+        self._replica_min_coverage_ratio = float(replica_min_coverage_ratio)
+        self._mysql_blocked_prefixes = tuple(str(x) for x in mysql_blocked_prefixes)
+        self._postgres_min_version = (
+            (int(postgres_min_version[0]), int(postgres_min_version[1]))
+            if postgres_min_version is not None
+            else None
+        )
+
+        self._mariadb_min_version = (
+            (int(mariadb_min_version[0]), int(mariadb_min_version[1]))
+            if mariadb_min_version is not None
+            else None
+        )
 
     def run(self, ctx) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
@@ -363,12 +433,30 @@ class RDSInstancesOptimizationsChecker:
         # Pre-fetch metrics in batches for performance.
         metric_fetcher: Optional[_CloudWatchBatchMetrics] = _CloudWatchBatchMetrics(cw) if cw is not None else None
 
-        # Build lists for metric queries
+        # Build lists for metric queries.
         ids_for_storage: List[str] = []
         ids_for_replicas: List[str] = []
-
         inst_by_id: Dict[str, Dict[str, Any]] = {}
-        tags_by_id: Dict[str, Dict[str, str]] = {}
+
+        # Cache tags by ARN (list_tags_for_resource can be throttled).
+        tags_by_arn: Dict[str, Dict[str, str]] = {}
+
+        def get_tags(arn: str) -> Dict[str, str]:
+            if not arn:
+                return {}
+            if arn in tags_by_arn:
+                return tags_by_arn[arn]
+            try:
+                resp = rds.list_tags_for_resource(ResourceName=arn)
+                tags = _extract_tags(resp.get("TagList", []) or [])
+            except ClientError:
+                tags = {}
+            tags_by_arn[arn] = tags
+            return tags
+
+        # First pass: collect instances and identify metric candidates.
+        replica_candidates: List[str] = []
+        now_ts = common.now_utc()
 
         for inst in instances:
             instance_id = str(inst.get("DBInstanceIdentifier") or "")
@@ -376,72 +464,91 @@ class RDSInstancesOptimizationsChecker:
                 continue
             inst_by_id[instance_id] = inst
 
-            arn = str(inst.get("DBInstanceArn") or "")
-            try:
-                tags = self._list_tags(rds, arn)
-            except ClientError:
-                tags = {}
-            tags_by_id[instance_id] = tags
-
             allocated_gb = float(inst.get("AllocatedStorage") or 0.0)
             if metric_fetcher is not None and allocated_gb > 0:
                 ids_for_storage.append(instance_id)
 
-            # Candidate for replica unused check
             if metric_fetcher is not None and self._is_read_replica(inst) and not _is_aurora_engine(str(inst.get("Engine") or "")):
-                if not _tag_suppresses_replica_check(tags):
-                    status = str(inst.get("DBInstanceStatus") or "").lower()
-                    if status == "available":
-                        # Avoid very new replicas (creation time may be absent in some fakes)
-                        created = inst.get("InstanceCreateTime")
-                        if isinstance(created, datetime):
-                            if created.replace(tzinfo=created.tzinfo or timezone.utc) > (now_utc() - timedelta(days=7)):
-                                continue
-                        ids_for_replicas.append(instance_id)
+                status = str(inst.get("DBInstanceStatus") or "").lower()
+                if status != "available":
+                    continue
+                created = inst.get("InstanceCreateTime")
+                if isinstance(created, datetime):
+                    created_ts = created.replace(tzinfo=created.tzinfo or timezone.utc)
+                    if created_ts > (now_ts - timedelta(days=7)):
+                        continue
+                replica_candidates.append(instance_id)
+
+        # Resolve replica suppression tags *before* querying CloudWatch to reduce noise and cost.
+        for instance_id in replica_candidates:
+            inst = inst_by_id.get(instance_id, {})
+            arn = str(inst.get("DBInstanceArn") or "")
+            tags = get_tags(arn)
+            if _tag_suppresses_replica_check(tags):
+                continue
+            ids_for_replicas.append(instance_id)
+
+        # Tags are only needed for checks that use them (Multi-AZ non-prod, replica suppression),
+        # so we avoid fetching tags for every instance.
+        tags_by_id: Dict[str, Dict[str, str]] = {}
 
         storage_metrics: Dict[str, List[float]] = {}
         replica_read_iops: Dict[str, List[float]] = {}
         replica_connections: Dict[str, List[float]] = {}
 
         if metric_fetcher is not None and ids_for_storage:
-            end = now_utc()
+            end = common.now_utc()
             start = end - timedelta(days=self._storage_window_days)
-            storage_metrics = metric_fetcher.fetch_values_by_instance(
-                namespace="AWS/RDS",
-                metric_name="FreeStorageSpace",
-                stat="Average",
-                period=self._storage_period_seconds,
-                start=start,
-                end=end,
-                instance_ids=ids_for_storage,
-            )
+            try:
+                storage_metrics = metric_fetcher.fetch_values_by_instance(
+                    namespace="AWS/RDS",
+                    metric_name="FreeStorageSpace",
+                    stat="Average",
+                    period=self._storage_period_seconds,
+                    start=start,
+                    end=end,
+                    instance_ids=ids_for_storage,
+                )
+            except ClientError as exc:
+                yield self._access_error(ctx, region, "cloudwatch:GetMetricData FreeStorageSpace", exc)
+                storage_metrics = {iid: [] for iid in ids_for_storage}
 
         if metric_fetcher is not None and ids_for_replicas:
-            end = now_utc()
+            end = common.now_utc()
             start = end - timedelta(days=self._replica_unused_window_days)
-            replica_read_iops = metric_fetcher.fetch_values_by_instance(
-                namespace="AWS/RDS",
-                metric_name="ReadIOPS",
-                stat="Average",
-                period=self._replica_period_seconds,
-                start=start,
-                end=end,
-                instance_ids=ids_for_replicas,
-            )
-            # Connections is optional evidence; never required to trigger.
-            replica_connections = metric_fetcher.fetch_values_by_instance(
-                namespace="AWS/RDS",
-                metric_name="DatabaseConnections",
-                stat="Average",
-                period=self._replica_period_seconds,
-                start=start,
-                end=end,
-                instance_ids=ids_for_replicas,
-            )
+            try:
+                replica_read_iops = metric_fetcher.fetch_values_by_instance(
+                    namespace="AWS/RDS",
+                    metric_name="ReadIOPS",
+                    stat="Average",
+                    period=self._replica_period_seconds,
+                    start=start,
+                    end=end,
+                    instance_ids=ids_for_replicas,
+                )
+                # Connections is optional evidence; never required to trigger.
+                replica_connections = metric_fetcher.fetch_values_by_instance(
+                    namespace="AWS/RDS",
+                    metric_name="DatabaseConnections",
+                    stat="Average",
+                    period=self._replica_period_seconds,
+                    start=start,
+                    end=end,
+                    instance_ids=ids_for_replicas,
+                )
+            except ClientError as exc:
+                yield self._access_error(ctx, region, "cloudwatch:GetMetricData replica metrics", exc)
+                replica_read_iops = {iid: [] for iid in ids_for_replicas}
+                replica_connections = {iid: [] for iid in ids_for_replicas}
 
         # Evaluate instance-level checks
         for instance_id, inst in inst_by_id.items():
-            tags = tags_by_id.get(instance_id, {})
+            tags = tags_by_id.get(instance_id)
+            if tags is None:
+                arn = str(inst.get("DBInstanceArn") or "")
+                needs_tags = bool(inst.get("MultiAZ", False)) or instance_id in ids_for_replicas
+                tags = get_tags(arn) if needs_tags else {}
+                tags_by_id[instance_id] = tags
             yield from self._evaluate_instance(
                 ctx=ctx,
                 inst=inst,
@@ -458,12 +565,6 @@ class RDSInstancesOptimizationsChecker:
             for inst in page.get("DBInstances", []) or []:
                 if isinstance(inst, dict):
                     yield inst
-
-    def _list_tags(self, rds: Any, arn: str) -> Dict[str, str]:
-        if not arn:
-            return {}
-        resp = rds.list_tags_for_resource(ResourceName=arn)
-        return _extract_tags(resp.get("TagList", []) or [])
 
     def _is_read_replica(self, inst: Dict[str, Any]) -> bool:
         # On replicas, this key is typically present.
@@ -512,6 +613,17 @@ class RDSInstancesOptimizationsChecker:
         # 1) stopped_instances_with_storage
         if status == "stopped" and allocated_gb > 0:
             monthly_cost = allocated_gb * self._storage_gb_month_price_usd
+            # Optional context: what it would cost if running (does not change savings for a stopped instance).
+            dep = "Multi-AZ" if multi_az else "Single-AZ"
+            hourly_run, hourly_notes, hourly_conf = _resolve_rds_instance_hour_price(
+                ctx,
+                region=region,
+                db_instance_class=instance_class,
+                deployment_option=dep,
+                engine=engine,
+                license_model=license_model,
+            )
+            running_monthly = (float(hourly_run) * _hours_per_month()) if hourly_run is not None else None
             yield FindingDraft(
                 check_id="aws.rds.instances.stopped_storage",
                 check_name="RDS stopped instances still incur storage cost",
@@ -533,7 +645,15 @@ class RDSInstancesOptimizationsChecker:
                 estimate_confidence=60,
                 estimate_notes="AllocatedStorage GB * default USD/GB-month. Excludes I/O and backup charges.",
                 tags=tags,
-            ).with_issue(check="stopped_storage", db_instance=instance_id)
+                dimensions={
+                    "allocated_gb": f"{allocated_gb:.0f}",
+                    "status": status,
+                    "deployment": ("multi_az" if multi_az else "single_az"),
+                    "if_running_monthly_cost_usd": (f"{running_monthly:.2f}" if running_monthly is not None else ""),
+                    "pricing_notes": (hourly_notes if hourly_run is not None else ""),
+                    "pricing_confidence": (str(hourly_conf) if hourly_run is not None else ""),
+                },
+            ).with_issue(check="stopped_storage", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
         # 2) storage_overprovisioned (uses pre-fetched FreeStorageSpace values)
         if allocated_gb > 0:
@@ -542,7 +662,7 @@ class RDSInstancesOptimizationsChecker:
                 free_storage_avg_bytes=free_storage_values,
             )
             if overprov is not None:
-                used_gb, p95_free_gb, excess_gb, dp_count = overprov
+                used_gb, p95_free_gb, excess_gb, dp_count, p50_free_gb, min_free_gb = overprov
                 monthly_savings = excess_gb * self._storage_gb_month_price_usd
                 yield FindingDraft(
                     check_id="aws.rds.storage.overprovisioned",
@@ -573,11 +693,13 @@ class RDSInstancesOptimizationsChecker:
                         "allocated_gb": f"{allocated_gb:.0f}",
                         "estimated_used_gb": f"{used_gb:.1f}",
                         "p95_free_gb": f"{p95_free_gb:.1f}",
+                        "p50_free_gb": f"{p50_free_gb:.1f}",
+                        "min_free_gb": f"{min_free_gb:.1f}",
                         "window_days": str(self._storage_window_days),
                         "period_seconds": str(self._storage_period_seconds),
                         "datapoints": str(dp_count),
                     },
-                ).with_issue(check="storage_overprovisioned", db_instance=instance_id)
+                ).with_issue(check="storage_overprovisioned", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
         # 3) multi_az_non_prod
         if multi_az and _is_non_prod(tags):
@@ -632,7 +754,7 @@ class RDSInstancesOptimizationsChecker:
                 estimate_confidence=confidence,
                 estimate_notes=estimate_notes,
                 tags=tags,
-            ).with_issue(check="multi_az_non_prod", db_instance=instance_id)
+            ).with_issue(check="multi_az_non_prod", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
         # 4) instance_family_old_generation
         fam = _family_from_instance_class(instance_class)
@@ -657,10 +779,11 @@ class RDSInstancesOptimizationsChecker:
                 estimate_notes="Modernization opportunity; savings not estimated without pricing enrichment.",
                 tags=tags,
                 dimensions={"instance_class": instance_class, "family": fam},
-            ).with_issue(check="old_generation_family", db_instance=instance_id, family=fam)
+            ).with_issue(check="old_generation_family", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, family=fam)
 
         # 5) needs_engine_upgrade (policy)
-        if _mysql_needs_upgrade(engine, engine_version) or _postgres_needs_upgrade(engine, engine_version):
+        if _engine_needs_upgrade(engine=engine, engine_version=engine_version, mysql_blocked_prefixes=self._mysql_blocked_prefixes, 
+                                 postgres_min_version=self._postgres_min_version, mariadb_min_version=self._mariadb_min_version):
             yield FindingDraft(
                 check_id="aws.rds.engine.needs_upgrade",
                 check_name="RDS engine version needs upgrade",
@@ -678,7 +801,7 @@ class RDSInstancesOptimizationsChecker:
                 estimate_notes="Policy-based governance signal. Extended support cost not computed without a maintained dataset.",
                 tags=tags,
                 dimensions={"engine": engine, "engine_version": engine_version},
-            ).with_issue(check="engine_upgrade", db_instance=instance_id, engine=engine, engine_version=engine_version)
+            ).with_issue(check="engine_upgrade", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, engine=engine, engine_version=engine_version)
 
         # 6) unused read replica (batched ReadIOPS values)
         if self._is_read_replica(inst) and not _is_aurora_engine(engine) and not _tag_suppresses_replica_check(tags):
@@ -742,25 +865,46 @@ class RDSInstancesOptimizationsChecker:
                             "p95_connections": (f"{p95_conns:.3f}" if p95_conns is not None else ""),
                             "replica_source": str(inst.get("ReadReplicaSourceDBInstanceIdentifier") or ""),
                         },
-                    ).with_issue(check="unused_read_replica", db_instance=instance_id)
+                    ).with_issue(check="unused_read_replica", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
+
+    def _expected_datapoints(self, *, window_days: int, period_seconds: int) -> int:
+        if window_days <= 0 or period_seconds <= 0:
+            return 0
+        return int(round((float(window_days) * 86400.0) / float(period_seconds)))
+
+    def _min_required_datapoints(self, *, expected: int, absolute_min: int, coverage_ratio: float) -> int:
+        if expected <= 0:
+            return absolute_min
+        # Allow some gaps; require a fraction of expected points.
+        return max(absolute_min, int(expected * float(coverage_ratio)))
 
     def _storage_overprovisioned_from_values(
         self,
         *,
         allocated_gb: float,
         free_storage_avg_bytes: Sequence[float],
-    ) -> Optional[Tuple[float, float, float, int]]:
+    ) -> Optional[Tuple[float, float, float, int, float, float]]:
         values = [float(v) for v in free_storage_avg_bytes if isinstance(v, (int, float))]
-        if len(values) < 3:
+        expected = self._expected_datapoints(window_days=self._storage_window_days, period_seconds=self._storage_period_seconds)
+        req = self._storage_min_datapoints if self._storage_min_datapoints is not None else self._min_required_datapoints(
+            expected=expected,
+            absolute_min=7,
+            coverage_ratio=self._storage_min_coverage_ratio,
+        )
+        if len(values) < req:
             return None
 
         p95_free_bytes = _percentile(values, 95.0)
-        if p95_free_bytes is None:
+        p50_free_bytes = _percentile(values, 50.0)
+        min_free_bytes = min(values) if values else None
+        if p95_free_bytes is None or p50_free_bytes is None or min_free_bytes is None:
             return None
 
         p95_free_gb = max(0.0, _bytes_to_gb(float(p95_free_bytes)))
-        used_gb = max(0.0, float(allocated_gb) - p95_free_gb)
+        p50_free_gb = max(0.0, _bytes_to_gb(float(p50_free_bytes)))
+        min_free_gb = max(0.0, _bytes_to_gb(float(min_free_bytes)))
 
+        used_gb = max(0.0, float(allocated_gb) - p95_free_gb)
         used_ratio = used_gb / float(allocated_gb) if allocated_gb > 0 else 1.0
         if used_ratio >= self._overprov_used_ratio_threshold:
             return None
@@ -770,7 +914,7 @@ class RDSInstancesOptimizationsChecker:
         if excess_gb < self._overprov_min_excess_gb:
             return None
 
-        return (used_gb, p95_free_gb, excess_gb, len(values))
+        return (used_gb, p95_free_gb, excess_gb, len(values), p50_free_gb, min_free_gb)
 
     def _unused_read_replica_from_values(
         self,
@@ -779,7 +923,9 @@ class RDSInstancesOptimizationsChecker:
         conn_values: Sequence[float],
     ) -> Optional[Tuple[float, int, Optional[float]]]:
         reads = [float(v) for v in read_iops_values if isinstance(v, (int, float))]
-        if len(reads) < self._replica_min_datapoints:
+        expected = self._expected_datapoints(window_days=self._replica_unused_window_days, period_seconds=self._replica_period_seconds)
+        req = self._min_required_datapoints(expected=expected, absolute_min=self._replica_min_datapoints, coverage_ratio=self._replica_min_coverage_ratio)
+        if len(reads) < req:
             return None
 
         p95_read = _percentile(reads, 95.0)
@@ -832,7 +978,7 @@ class RDSInstancesOptimizationsChecker:
             estimated_monthly_savings=0.0,
             estimate_confidence=0,
             estimate_notes="Informational finding emitted when permissions are missing.",
-        ).with_issue(check="access_error", action=action, region=region)
+        ).with_issue(check="access_error", account_id=self._account.account_id, region=region, resource_type="account", resource_id=self._account.account_id, action=action)
 
 
 SPEC = "checks.aws.rds_instances_optimizations:RDSInstancesOptimizationsChecker"

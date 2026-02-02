@@ -1,19 +1,17 @@
-# FinOps SaaS – Architecture & Pipeline Overview
+# FinOps Engine – Deterministic Cloud Cost & Governance Analysis
 
-This repository contains a **SaaS-grade FinOps engine** designed to be:
+This repository contains a **FinOps-grade analysis engine** designed to detect,
+correlate, and attribute cloud cost and governance inefficiencies across AWS
+environments.
 
-- infra-native (resource-level first, not CUR-only)
-- deterministic and testable
-- scalable from local DuckDB to Iceberg/Trino
-- production-ready, while remaining hackable
+The system is intentionally:
+- **infra-native first** (resource-level signals before billing data)
+- **deterministic and testable by design**
+- **scalable** from local DuckDB to Iceberg / Trino backends
+- **production-ready**, while remaining hackable and inspectable
 
-This README reflects the **current state of the system**, including:
-
-- multi-region execution
-- correlation engine
-- CUR normalization & cost enrichment
-- stress-testing and determinism guarantees
-- smart export for a Flask UI
+This README provides a **system-level orientation**.
+Authoritative design contracts and deep dives live under `docs/`.
 
 ## Getting started
 
@@ -31,6 +29,26 @@ python export_findings.py
 ```
 
 ---
+
+## Documentation map
+
+Start here depending on your goal:
+
+- **Architecture & mental model**
+  - `docs/01_architecture/architecture.md`
+  - `docs/01_architecture/pipeline_overview.md`
+
+- **Checker philosophy & contracts**
+  - `docs/03_checkers/checker_contract.md`
+
+- **Data contracts & schemas**
+  - `docs/04_schemas/finding_schema.md`
+
+- **Running & operations**
+  - `docs/05_operations/running.md`
+  - `docs/05_operations/permissions.md`
+
+Canonical definitions live in `docs/00_overview/glossary.md`.
 
 ## High-level architecture
 

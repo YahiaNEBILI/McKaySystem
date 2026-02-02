@@ -1,3 +1,8 @@
+# Architecture decisions
+
+Status: Derived  
+Last reviewed: 2026-02-01
+
 # Architecture Decisions
 
 - Findings are immutable

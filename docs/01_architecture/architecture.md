@@ -1,17 +1,27 @@
-# Architecture
+# Architecture Overview
 
-This document describes the **SaaS-grade FinOps engine architecture** implemented in this repository.
-It focuses on:
-- boundaries and responsibilities
-- data flow and representations
-- extensibility points (new checkers, CUR attribution, KPIs)
-- operational considerations (multi-tenant, reprocessing, testing)
+## System Intent
 
-> Design principle: **be liberal at the edges, strict at the core.**
+This platform is a FinOps-oriented cloud analysis engine designed to detect
+cost, usage, and governance inefficiencies across AWS environments.
+
+Its core objective is to transform **low-level infrastructure signals** into
+**actionable, explainable, and cost-aware insights**, while remaining:
+
+- deterministic
+- auditable
+- best-effort under partial permissions
+- suitable for automation and SaaS-scale operation
+
+The system is intentionally split into distinct layers to separate:
+- signal detection
+- interpretation
+- attribution
+- consumption
 
 ---
 
-## 1. System overview
+## High-Level Architecture
 
 At a high level, the system runs **checkers** that emit **wire-format findings**, validates them against a strict contract, then persists them as a **typed Parquet dataset**. DuckDB reads Parquet to export JSON payloads for the web app.
 
@@ -244,6 +254,28 @@ Properties:
 
 ## 6. Analytics and export
 
+### 6.3 Correlation engine (higher-order signals)
+
+In addition to direct analytics, the platform includes a **correlation engine**
+designed to derive higher-order insights by combining multiple low-level findings.
+
+The correlation engine operates purely on persisted Parquet datasets and never
+interacts with cloud APIs directly.
+
+Responsibilities:
+- read raw findings from `finops_findings`
+- execute declarative correlation rules (DuckDB SQL)
+- emit new correlated findings as a separate dataset
+
+Design principles:
+- deterministic execution (order-independent)
+- rule isolation (one rule cannot affect others)
+- no mutation of source findings
+
+Output datasets:
+- `data/finops_findings_correlated/`
+- optional downstream joins during export
+
 ### 6.1 DuckDB as query engine
 
 DuckDB reads Parquet directly:
@@ -286,7 +318,22 @@ To add a checker:
 
 ---
 
+
 ### 7.2 CUR attribution (actual costs)
+
+CUR enrichment is treated as a **post-detection, post-correlation** pipeline
+stage. Its purpose is to replace checker-side estimates with authoritative,
+billing-grade cost data.
+
+Key properties:
+- joins findings to CUR line items using stable resource identifiers
+- preserves historical accuracy (time-aligned attribution)
+- extends the finding schema without breaking compatibility
+
+Status:
+- CUR ingestion and normalization modules are implemented
+- enrichment joins are partially wired
+- full production integration is planned
 
 Goal:
 - enrich findings with real costs from CUR
@@ -417,4 +464,3 @@ run_export(ExportConfig(
 ))
 EOF
 ```
-

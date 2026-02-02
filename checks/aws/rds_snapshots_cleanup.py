@@ -55,8 +55,7 @@ registered via ``@register_checker`` for automatic discovery.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional, Set, Tuple
 
 from botocore.exceptions import ClientError
