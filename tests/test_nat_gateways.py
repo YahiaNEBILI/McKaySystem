@@ -336,7 +336,15 @@ def test_cloudwatch_access_denied_emits_missing_permission_and_inventory_finding
     assert perm[0].issue_key.get("operation") == "cloudwatch:GetMetricData"
 
 
-def test_suppression_tag_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "tag_key,tag_value",
+    [
+        ("finops:ignore", "true"),
+        ("keep", "true"),
+        ("do-not-delete", "1"),
+    ],
+)
+def test_suppression_tags_skip(monkeypatch: pytest.MonkeyPatch, tag_key: str, tag_value: str) -> None:
     import checks.aws.nat_gateways as mod
 
     now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
@@ -348,7 +356,7 @@ def test_suppression_tag_skips(monkeypatch: pytest.MonkeyPatch) -> None:
         "VpcId": "vpc-1",
         "SubnetId": "subnet-nat",
         "CreateTime": now - timedelta(days=10),
-        "Tags": [{"Key": "finops:ignore", "Value": "true"}],
+        "Tags": [{"Key": tag_key, "Value": tag_value}],
     }
 
     ec2 = FakeEC2(
@@ -365,6 +373,7 @@ def test_suppression_tag_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     findings = list(checker.run(ctx))
 
     assert findings == []
+
 
 
 def test_pagination_multiple_pages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -458,3 +467,201 @@ def test_determinism_shuffled_inventory(monkeypatch: pytest.MonkeyPatch) -> None
         )
 
     assert _sig(f1) == _sig(f2)
+
+def test_public_route_table_skips_cross_az(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Public/shared route tables (default route to IGW) should not drive cross-AZ inference."""
+
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat",
+        "CreateTime": now - timedelta(days=10),
+        "Tags": [],
+    }
+
+    # Route table associated to a subnet in a different AZ, but it's public (default route to IGW),
+    # so the checker should not emit cross-AZ based on it.
+    rt_public = {
+        "RouteTableId": "rtb-public",
+        "Associations": [{"SubnetId": "subnet-public-ish"}],
+        "Routes": [
+            {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-123"},
+            {"DestinationCidrBlock": "10.0.0.0/8", "NatGatewayId": "nat-1"},
+        ],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat]}],
+            "describe_route_tables": [{"RouteTables": [rt_public]}],
+        },
+        subnets={
+            "subnet-nat": {"SubnetId": "subnet-nat", "AvailabilityZone": "eu-west-3a"},
+            "subnet-public-ish": {"SubnetId": "subnet-public-ish", "AvailabilityZone": "eu-west-3b"},
+        },
+    )
+
+    # Provide metrics but prevent idle triggering
+    cw = FakeCloudWatch(out_by_id={"m0": [1_000_000.0] * 10}, in_by_id={"m0": [1_000_000.0] * 10})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=FakePricing())
+
+    cfg = NatGatewaysConfig(idle_p95_daily_bytes_threshold=0.0)
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
+    findings = list(checker.run(ctx))
+
+    assert not any(f.check_id == "aws.ec2.nat_gateways.cross_az" for f in findings)
+
+
+def test_nat_states_deleted_skipped_deleting_no_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """deleted NATs are skipped; deleting NATs should not emit orphaned findings; pending is evaluated."""
+
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat_pending = {
+        "NatGatewayId": "nat-pending",
+        "State": "pending",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-a",
+        "CreateTime": now - timedelta(days=5),
+        "Tags": [],
+    }
+    nat_deleting = {
+        "NatGatewayId": "nat-deleting",
+        "State": "deleting",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-b",
+        "CreateTime": now - timedelta(days=5),
+        "Tags": [],
+    }
+    nat_deleted = {
+        "NatGatewayId": "nat-deleted",
+        "State": "deleted",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-c",
+        "CreateTime": now - timedelta(days=5),
+        "Tags": [],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat_pending, nat_deleting, nat_deleted]}],
+            "describe_route_tables": [{"RouteTables": []}],
+        },
+        subnets={
+            "subnet-nat-a": {"SubnetId": "subnet-nat-a", "AvailabilityZone": "eu-west-3a"},
+            "subnet-nat-b": {"SubnetId": "subnet-nat-b", "AvailabilityZone": "eu-west-3b"},
+            "subnet-nat-c": {"SubnetId": "subnet-nat-c", "AvailabilityZone": "eu-west-3c"},
+        },
+    )
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=FakePricing())
+
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
+    findings = list(checker.run(ctx))
+
+    orphaned = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.orphaned"]
+    assert {f.scope.resource_id for f in orphaned} == {"nat-pending"}
+    assert not any(f.scope.resource_id == "nat-deleting" for f in orphaned)
+    assert not any(f.scope.resource_id == "nat-deleted" for f in orphaned)
+
+
+def test_low_datapoint_count_blocks_metric_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If metrics exist but there are too few datapoints, idle/high_data should not trigger."""
+
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat",
+        "CreateTime": now - timedelta(days=10),
+        "Tags": [],
+    }
+
+    rt = {
+        "RouteTableId": "rtb-1",
+        "Associations": [{"SubnetId": "subnet-private"}],
+        "Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": "nat-1"}],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat]}],
+            "describe_route_tables": [{"RouteTables": [rt]}],
+        },
+        subnets={
+            "subnet-nat": {"SubnetId": "subnet-nat", "AvailabilityZone": "eu-west-3a"},
+            "subnet-private": {"SubnetId": "subnet-private", "AvailabilityZone": "eu-west-3a"},
+        },
+    )
+
+    # Only 3 datapoints => below min_daily_datapoints=7
+    cw = FakeCloudWatch(out_by_id={"m0": [0.0, 0.0, 0.0]}, in_by_id={"m0": [0.0, 0.0, 0.0]})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=FakePricing())
+
+    cfg = NatGatewaysConfig(lookback_days=14, min_daily_datapoints=7, idle_p95_daily_bytes_threshold=1_000.0, high_data_processing_gib_month_threshold=1.0)
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
+    findings = list(checker.run(ctx))
+
+    assert not any(f.check_id == "aws.ec2.nat_gateways.idle" for f in findings)
+    assert not any(f.check_id == "aws.ec2.nat_gateways.high_data_processing" for f in findings)
+
+
+def test_p95_computation_floor_index_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: p95 should use floor index, not round() (which would bias to the max for small n)."""
+
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat",
+        "CreateTime": now - timedelta(days=10),
+        "Tags": [],
+    }
+
+    rt = {
+        "RouteTableId": "rtb-1",
+        "Associations": [{"SubnetId": "subnet-private"}],
+        "Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": "nat-1"}],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat]}],
+            "describe_route_tables": [{"RouteTables": [rt]}],
+        },
+        subnets={"subnet-nat": {"SubnetId": "subnet-nat", "AvailabilityZone": "eu-west-3a"}},
+    )
+
+    # 5 datapoints: if p95 used round(), idx would be 4 (max) => large bytes => not idle.
+    # With floor, idx=int(0.95*(5-1))=3 => value=0 => idle.
+    vals = [0.0, 0.0, 0.0, 0.0, 10_000_000.0]
+    cw = FakeCloudWatch(out_by_id={"m0": vals}, in_by_id={"m0": [0.0] * 5})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=FakePricing())
+
+    cfg = NatGatewaysConfig(min_daily_datapoints=1, idle_p95_daily_bytes_threshold=1.0)
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
+    findings = list(checker.run(ctx))
+
+    assert any(f.check_id == "aws.ec2.nat_gateways.idle" for f in findings)

@@ -438,6 +438,9 @@ class NatGatewaysChecker:
         nats: List[Dict[str, Any]] = []
         for nat in nat_gateways:
             state = str(nat.get("State") or "").lower()
+            if state == "deleting":
+                # Resource is already being removed; avoid producing delete-oriented findings.
+                continue
             if state and state not in {"available", "pending", "failed", "deleting", "deleted"}:
                 # Unknown state: still include.
                 pass
@@ -549,6 +552,9 @@ class NatGatewaysChecker:
                 continue
 
             state = str(nat.get("State") or "").lower()
+            if state == "deleting":
+                # Resource is already being removed; avoid producing delete-oriented findings.
+                continue
             vpc_id = str(nat.get("VpcId") or "")
             subnet_id = str(nat.get("SubnetId") or "")
             az = nat_az.get(nid, "")
@@ -1016,7 +1022,7 @@ def _p95(values: Sequence[float]) -> float:
     if not vals:
         return 0.0
     vals_sorted = sorted(vals)
-    # p95 index (floor)
+    # p95 index (floor) to avoid rounding bias; matches common statistical convention.
     idx = int(0.95 * (len(vals_sorted) - 1))
     idx = max(0, min(idx, len(vals_sorted) - 1))
     return float(vals_sorted[idx])
