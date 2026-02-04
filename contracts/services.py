@@ -37,6 +37,7 @@ class Services:
     efs: Any = None
     elbv2: Any = None
     cloudwatch: Any = None
+    logs: Any = None
     region: str = ""
     pricing: Any = None
 
@@ -105,6 +106,7 @@ class ServicesFactory:
             efs=self._client("efs", region=reg),
             elbv2=self._client("elbv2", region=reg),
             cloudwatch=self._client("cloudwatch", region=reg),
+            logs=self._client("logs", region=reg),
             pricing=self._pricing_service,
             region=reg,
         )

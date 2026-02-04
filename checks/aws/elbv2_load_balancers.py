@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 from botocore.client import BaseClient
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from checks.aws._common import (
     AwsAccountContext,
@@ -102,7 +102,7 @@ def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) ->
     location = ""
     try:
         location = str(pricing.location_for_region(region) or "")
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         location = ""
     if not location:
         return fallback, "Pricing region mapping missing; using fallback pricing.", 30
@@ -139,18 +139,39 @@ def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) ->
     for filters in attempts:
         try:
             quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except Exception:
+        except (ClientError, BotoCoreError, AttributeError, TypeError, ValueError):
             quote = None
         if quote is None:
             continue
         try:
             hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             hourly = None
         if hourly and hourly > 0.0:
             return float(hourly), "on-demand hourly price resolved via PricingService", 60
 
     return float(fallback), "using fallback pricing", 30
+
+
+# -----------------------------
+# Error helpers
+# -----------------------------
+
+
+def _client_error_code(exc: ClientError) -> str:
+    try:
+        return str(exc.response.get("Error", {}).get("Code") or "")
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def _is_access_denied(exc: ClientError) -> bool:
+    return _client_error_code(exc) in {
+        "AccessDenied",
+        "AccessDeniedException",
+        "UnauthorizedOperation",
+        "UnrecognizedClientException",
+    }
 
 
 # -----------------------------
@@ -175,7 +196,9 @@ def _paginate_items(
                     if isinstance(item, dict):
                         yield item
             return
-        except Exception:
+        except (ClientError, BotoCoreError):
+            raise
+        except (AttributeError, KeyError, TypeError, ValueError):
             pass
 
     next_marker: Optional[str] = None
@@ -278,8 +301,8 @@ class _ElbCloudWatch:
                     EndTime=end,
                     ScanBy="TimestampAscending",
                 )
-            except Exception:
-                continue
+            except (ClientError, BotoCoreError):
+                raise
 
             for r in resp.get("MetricDataResults", []) or []:
                 rid = str(r.get("Id") or "")
@@ -356,15 +379,36 @@ class ElbV2LoadBalancersChecker:
 
         if not lbs:
             return
-
         # Tags (DescribeTags: max 20 ARNs per call)
         lb_arns = [str(lb.get("LoadBalancerArn") or "") for lb in lbs if lb.get("LoadBalancerArn")]
+
+        # Track IAM gaps once per operation (do not spam per resource).
+        iam_denied: Set[str] = set()
+
         tags_by_arn: Dict[str, Dict[str, str]] = {}
         for batch in _chunk(lb_arns, 20):
             try:
                 resp = elbv2.describe_tags(ResourceArns=batch)
-            except Exception:
-                continue
+            except ClientError as exc:
+                if _is_access_denied(exc) and "elbv2:DescribeTags" not in iam_denied:
+                    iam_denied.add("elbv2:DescribeTags")
+                    yield FindingDraft(
+                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_name=self._CHECK_NAME,
+                        category="governance",
+                        status="info",
+                        severity=Severity(level="low", score=20),
+                        title="Missing ELB permission for tags",
+                        scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
+                        message="Access denied on elbv2:DescribeTags. Suppression tags may not be applied.",
+                        recommendation="Grant elasticloadbalancing:DescribeTags to the scanner role.",
+                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "DescribeTags", "region": region},
+                    )
+                    continue
+                raise
+            except BotoCoreError:
+                raise
+
             for td in resp.get("TagDescriptions", []) or []:
                 arn = str(td.get("ResourceArn") or "")
                 tags_by_arn[arn] = normalize_tags(td.get("Tags", []) or [])
@@ -396,20 +440,57 @@ class ElbV2LoadBalancersChecker:
         alb_series: Dict[str, List[float]] = {}
         nlb_series: Dict[str, List[float]] = {}
         if cw_fetcher is not None and cfg.lookback_days > 0:
-            alb_series = cw_fetcher.daily_metric(
-                namespace="AWS/ApplicationELB",
-                metric_name="RequestCount",
-                lb_dimension_values=alb_dims,
-                start=start,
-                end=end,
-            )
-            nlb_series = cw_fetcher.daily_metric(
-                namespace="AWS/NetworkELB",
-                metric_name="NewFlowCount",
-                lb_dimension_values=nlb_dims,
-                start=start,
-                end=end,
-            )
+            try:
+                alb_series = cw_fetcher.daily_metric(
+                    namespace="AWS/ApplicationELB",
+                    metric_name="RequestCount",
+                    lb_dimension_values=alb_dims,
+                    start=start,
+                    end=end,
+                )
+            except ClientError as exc:
+                if _is_access_denied(exc) and "cloudwatch:GetMetricData" not in iam_denied:
+                    iam_denied.add("cloudwatch:GetMetricData")
+                    yield FindingDraft(
+                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_name=self._CHECK_NAME,
+                        category="governance",
+                        status="info",
+                        severity=Severity(level="low", score=20),
+                        title="Missing CloudWatch permission for ELB metrics",
+                        scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
+                        message="Access denied on cloudwatch:GetMetricData. Idle detection will be skipped.",
+                        recommendation="Grant cloudwatch:GetMetricData to the scanner role.",
+                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "GetMetricData", "region": region},
+                    )
+                else:
+                    raise
+
+            try:
+                nlb_series = cw_fetcher.daily_metric(
+                    namespace="AWS/NetworkELB",
+                    metric_name="NewFlowCount",
+                    lb_dimension_values=nlb_dims,
+                    start=start,
+                    end=end,
+                )
+            except ClientError as exc:
+                if _is_access_denied(exc) and "cloudwatch:GetMetricData" not in iam_denied:
+                    iam_denied.add("cloudwatch:GetMetricData")
+                    yield FindingDraft(
+                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_name=self._CHECK_NAME,
+                        category="governance",
+                        status="info",
+                        severity=Severity(level="low", score=20),
+                        title="Missing CloudWatch permission for ELB metrics",
+                        scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
+                        message="Access denied on cloudwatch:GetMetricData. Idle detection will be skipped.",
+                        recommendation="Grant cloudwatch:GetMetricData to the scanner role.",
+                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "GetMetricData", "region": region},
+                    )
+                else:
+                    raise
 
         emitted: Dict[str, int] = {
             "idle": 0,
@@ -430,8 +511,26 @@ class ElbV2LoadBalancersChecker:
                         params={"LoadBalancerArn": lb_arn},
                     )
                 )
-            except Exception:
-                listeners = []
+            except ClientError as exc:
+                if _is_access_denied(exc) and "elbv2:DescribeListeners" not in iam_denied:
+                    iam_denied.add("elbv2:DescribeListeners")
+                    yield FindingDraft(
+                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_name=self._CHECK_NAME,
+                        category="governance",
+                        status="info",
+                        severity=Severity(level="low", score=20),
+                        title="Missing ELB permission for listeners",
+                        scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
+                        message="Access denied on elbv2:DescribeListeners. Listener-based checks may be incomplete.",
+                        recommendation="Grant elasticloadbalancing:DescribeListeners to the scanner role.",
+                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "DescribeListeners", "region": region},
+                    )
+                    listeners = []
+                else:
+                    raise
+            except BotoCoreError:
+                raise
             listeners_by_lb[lb_arn] = listeners
 
         tgs_by_lb: Dict[str, List[Dict[str, Any]]] = {}
@@ -445,8 +544,26 @@ class ElbV2LoadBalancersChecker:
                         params={"LoadBalancerArn": lb_arn},
                     )
                 )
-            except Exception:
-                tgs = []
+            except ClientError as exc:
+                if _is_access_denied(exc) and "elbv2:DescribeTargetGroups" not in iam_denied:
+                    iam_denied.add("elbv2:DescribeTargetGroups")
+                    yield FindingDraft(
+                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_name=self._CHECK_NAME,
+                        category="governance",
+                        status="info",
+                        severity=Severity(level="low", score=20),
+                        title="Missing ELB permission for target groups",
+                        scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
+                        message="Access denied on elbv2:DescribeTargetGroups. Target-group checks may be incomplete.",
+                        recommendation="Grant elasticloadbalancing:DescribeTargetGroups to the scanner role.",
+                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "DescribeTargetGroups", "region": region},
+                    )
+                    tgs = []
+                else:
+                    raise
+            except BotoCoreError:
+                raise
             tgs_by_lb[lb_arn] = tgs
 
         # Helper: resolve referenced TG ARNs from listener actions
@@ -581,8 +698,36 @@ class ElbV2LoadBalancersChecker:
 
                 try:
                     th = elbv2.describe_target_health(TargetGroupArn=tg_arn)
-                except Exception:
-                    continue
+                except ClientError as exc:
+                    code = _client_error_code(exc)
+                    if code == "TargetGroupNotFound":
+                        # Resource changed during scan.
+                        continue
+                    if _is_access_denied(exc) and "elbv2:DescribeTargetHealth" not in iam_denied:
+                        iam_denied.add("elbv2:DescribeTargetHealth")
+                        yield FindingDraft(
+                            check_id="aws.elbv2.load_balancers.missing_permission",
+                            check_name=self._CHECK_NAME,
+                            category="governance",
+                            status="info",
+                            severity=Severity(level="low", score=20),
+                            title="Missing ELB permission for target health",
+                            scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
+                            message=(
+                                "Access denied on elbv2:DescribeTargetHealth. "
+                                "Target health checks may be incomplete."
+                            ),
+                            recommendation="Grant elasticloadbalancing:DescribeTargetHealth to the scanner role.",
+                            issue_key={
+                                "check_id": "aws.elbv2.load_balancers.missing_permission",
+                                "op": "DescribeTargetHealth",
+                                "region": region,
+                            },
+                        )
+                        continue
+                    raise
+                except BotoCoreError:
+                    raise
 
                 desc = th.get("TargetHealthDescriptions", []) or []
                 if desc:

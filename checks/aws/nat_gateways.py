@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 from botocore.client import BaseClient
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, OperationNotPageableError
 
 from checks.aws._common import (
     AwsAccountContext,
@@ -103,7 +103,7 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     location = ""
     try:
         location = str(pricing.location_for_region(region) or "")
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         location = ""
     if not location:
         return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "Pricing region mapping missing; using fallback pricing.", 30
@@ -133,13 +133,13 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     for filters in hourly_attempts:
         try:
             quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except Exception:
+        except (AttributeError, TypeError, ValueError, ClientError):
             quote = None
         if quote is None:
             continue
         try:
             hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             hourly = None
         if hourly and hourly > 0.0:
             notes.append("on-demand hourly price resolved via PricingService")
@@ -166,13 +166,13 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     for filters in data_attempts:
         try:
             quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="GB")
-        except Exception:
+        except (AttributeError, TypeError, ValueError, ClientError):
             quote = None
         if quote is None:
             continue
         try:
             per_gb = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             per_gb = None
         if per_gb and per_gb > 0.0:
             notes.append("on-demand data processing price resolved via PricingService")
@@ -209,7 +209,11 @@ def _paginate_items(
                     if isinstance(item, dict):
                         yield item
             return
-        except Exception:
+        except OperationNotPageableError:
+            # Fall back to token-based pagination.
+            pass
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Best-effort: some fakes/mocks or unusual clients may not behave like boto3.
             pass
 
     next_token: Optional[str] = None
@@ -411,7 +415,6 @@ class NatGatewaysChecker:
         )
         self._cfg = cfg or NatGatewaysConfig()
 
-
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         services = getattr(ctx, "services", None)
         if services is None:
@@ -419,9 +422,7 @@ class NatGatewaysChecker:
 
         ec2 = services.ec2
         cw = getattr(ctx.services, "cloudwatch", None)
-        region = safe_region_from_client(ec2) or str(getattr(getattr(ctx.services, "region", None), "__str__", lambda: "")())
-        if not region:
-            region = str(getattr(ctx.services, "region", "") or "")
+        region = safe_region_from_client(ec2) or str(getattr(ctx.services, "region", "") or "")
 
         # Inventory NAT gateways
         try:
@@ -437,6 +438,9 @@ class NatGatewaysChecker:
         nats: List[Dict[str, Any]] = []
         for nat in nat_gateways:
             state = str(nat.get("State") or "").lower()
+            if state == "deleting":
+                # Resource is already being removed; avoid producing delete-oriented findings.
+                continue
             if state and state not in {"available", "pending", "failed", "deleting", "deleted"}:
                 # Unknown state: still include.
                 pass
@@ -505,8 +509,10 @@ class NatGatewaysChecker:
 
         for rt in route_tables:
             self._process_route_table_page(rt, referenced_by_routes, nat_ids, cross_az_pairs, subnet_az, nat_az)
-# Metrics (best-effort)
+
+        # Metrics (best-effort)
         daily_bytes: Dict[str, List[float]] = {}
+        emitted_perm: Set[str] = set()
         if cw is not None:
             lookback = int(self._cfg.lookback_days)
             end = now_utc()
@@ -514,7 +520,21 @@ class NatGatewaysChecker:
             try:
                 fetcher = _NatCloudWatchMetrics(cw)
                 daily_bytes = fetcher.daily_bytes(nat_gateway_ids=nat_ids, start=start, end=end)
-            except Exception:
+            except ClientError as exc:
+                if self._is_access_denied(exc) and "cloudwatch:GetMetricData" not in emitted_perm:
+                    emitted_perm.add("cloudwatch:GetMetricData")
+                    yield self._missing_permission(
+                        ctx,
+                        region,
+                        operation="cloudwatch:GetMetricData",
+                        service="cloudwatch",
+                        message="CloudWatch GetMetricData is required to evaluate NAT Gateway traffic (idle/high data).",
+                    )
+                else:
+                    yield self._cloudwatch_error(ctx, region, "get_metric_data", exc)
+                daily_bytes = {}
+            except BotoCoreError as exc:
+                yield self._cloudwatch_error(ctx, region, "get_metric_data", exc)
                 daily_bytes = {}
 
         # Pricing
@@ -532,6 +552,9 @@ class NatGatewaysChecker:
                 continue
 
             state = str(nat.get("State") or "").lower()
+            if state == "deleting":
+                # Resource is already being removed; avoid producing delete-oriented findings.
+                continue
             vpc_id = str(nat.get("VpcId") or "")
             subnet_id = str(nat.get("SubnetId") or "")
             az = nat_az.get(nid, "")
@@ -602,9 +625,12 @@ class NatGatewaysChecker:
                         )
 
                 # High data processing
-                # Compute a rough monthly traffic from the mean daily bytes.
-                avg_daily = float(sum(series) / max(1, len(series)))
-                monthly_gib = gb_from_bytes(avg_daily * 30.0)
+                # Prefer using the sum over the datapoints we have, then normalize to a 30-day month.
+                # This is more robust than scaling a mean when traffic is spiky and/or the period is short.
+                total_bytes = float(sum(series))
+                days_observed = int(max(1, len(series)))
+                monthly_bytes = total_bytes * (30.0 / float(days_observed))
+                monthly_gib = gb_from_bytes(monthly_bytes)
                 if monthly_gib >= float(self._cfg.high_data_processing_gib_month_threshold):
                     if emitted["high_data"] < self._cfg.max_findings_per_type:
                         emitted["high_data"] += 1
@@ -689,6 +715,22 @@ class NatGatewaysChecker:
                 continue
             assoc_subnets.append((subnet_id, str(subnet_az.get(subnet_id, "") or "")))
 
+        # Heuristic: treat route tables with a default route to an Internet Gateway as "public".
+        # When a route table is shared across subnets (or includes public subnets), cross-AZ inference becomes noisy.
+        is_public_rt = False
+        for r0 in route_table.get("Routes", []) or []:
+            if not isinstance(r0, Mapping):
+                continue
+            dst4 = str(r0.get("DestinationCidrBlock") or "")
+            dst6 = str(r0.get("DestinationIpv6CidrBlock") or "")
+            if dst4 not in {"0.0.0.0/0"} and dst6 not in {"::/0"}:
+                continue
+            gw = str(r0.get("GatewayId") or "")
+            eigw = str(r0.get("EgressOnlyInternetGatewayId") or "")
+            if gw.startswith(("igw-", "eigw-")) or eigw.startswith("eigw-"):
+                is_public_rt = True
+                break
+
         for r in route_table.get("Routes", []) or []:
             if not isinstance(r, Mapping):
                 continue
@@ -697,7 +739,11 @@ class NatGatewaysChecker:
                 continue
             referenced_by_routes.add(nid)
 
-            # Cross-AZ: any associated subnet AZ differs from NAT AZ
+            # Cross-AZ: any associated subnet AZ differs from NAT AZ.
+            # Skip public route tables (default route to IGW), as they are often shared with non-private subnets,
+            # which can create noisy cross-AZ inferences.
+            if is_public_rt:
+                continue
             nat_zone = str(nat_az.get(nid, "") or "")
             if not nat_zone:
                 continue
@@ -727,6 +773,59 @@ class NatGatewaysChecker:
             ),
             recommendation="Ensure the scanning role has required EC2 permissions (DescribeNatGateways, DescribeRouteTables, DescribeSubnets) and CloudWatch GetMetricData.",
         ).with_issue(operation=operation)
+
+    def _cloudwatch_error(self, ctx: RunContext, region: str, operation: str, exc: Exception) -> FindingDraft:
+        return FindingDraft(
+            check_id="aws.ec2.nat_gateways.cloudwatch_error",
+            check_name="NAT Gateways CloudWatch error",
+            category="governance",
+            status="unknown",
+            severity=Severity(level="info", score=120),
+            title=f"Unable to evaluate NAT Gateway metrics ({operation})",
+            message=str(exc),
+            scope=build_scope(
+                ctx,
+                account=self._account,
+                region=region,
+                service="cloudwatch",
+                resource_type="metric",
+            ),
+            recommendation="Ensure the scanning role has cloudwatch:GetMetricData (and related permissions) and retry.",
+        ).with_issue(operation=operation)
+
+    def _missing_permission(
+        self,
+        ctx: RunContext,
+        region: str,
+        *,
+        operation: str,
+        service: str,
+        message: str,
+    ) -> FindingDraft:
+        return FindingDraft(
+            check_id="aws.ec2.nat_gateways.missing_permission",
+            check_name="NAT Gateways missing permission",
+            category="governance",
+            status="info",
+            severity=Severity(level="info", score=110),
+            title=f"Missing permission to evaluate NAT Gateways ({operation})",
+            message=message,
+            scope=build_scope(
+                ctx,
+                account=self._account,
+                region=region,
+                service=service,
+                resource_type="permission",
+            ),
+            recommendation="Grant the scanning role the missing permission(s) and re-run the scan.",
+        ).with_issue(operation=operation)
+
+    def _is_access_denied(self, exc: ClientError) -> bool:
+        try:
+            code = str(exc.response.get("Error", {}).get("Code") or "")
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return code in {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
 
     def _finding_orphaned(
         self,
@@ -885,9 +984,9 @@ class NatGatewaysChecker:
             severity=Severity(level="medium", score=550),
             title=f"Cross-AZ NAT usage detected for {nat_id}",
             message=(
-                "Some subnets appear to route through a NAT Gateway in a different Availability Zone "
-                "(best-effort from route table associations). This can increase cross-AZ data charges and "
-                "reduce resilience during AZ impairments."
+                "Some private subnets appear to route through a NAT Gateway in a different Availability Zone "
+                "(best-effort from route table associations; route tables with IGW default routes are ignored). "
+                "This can increase cross-AZ data charges and reduce resilience during AZ impairments."
             ),
             recommendation="Ensure each private subnet routes to a NAT Gateway in the same AZ (one NAT per AZ for HA).",
             remediation="Create a NAT Gateway per AZ and update route tables to use the same-AZ NAT.",
@@ -914,7 +1013,7 @@ class NatGatewaysChecker:
         try:
             age = now_utc() - created
             return age >= timedelta(days=int(min_age_days))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return True
 
 
@@ -923,8 +1022,8 @@ def _p95(values: Sequence[float]) -> float:
     if not vals:
         return 0.0
     vals_sorted = sorted(vals)
-    # p95 index
-    idx = int(round(0.95 * (len(vals_sorted) - 1)))
+    # p95 index (floor) to avoid rounding bias; matches common statistical convention.
+    idx = int(0.95 * (len(vals_sorted) - 1))
     idx = max(0, min(idx, len(vals_sorted) - 1))
     return float(vals_sorted[idx])
 
@@ -933,6 +1032,5 @@ def _p95(values: Sequence[float]) -> float:
 def _factory(ctx: RunContext, bootstrap: Bootstrap) -> Checker:
     account_id = str(bootstrap.get("account_id") or "")
     billing_id = str(bootstrap.get("billing_account_id") or "") or None
-    account = AwsAccountContext(account_id=account_id, billing_account_id=billing_id)
     cfg = NatGatewaysConfig()
     return NatGatewaysChecker(account_id=account_id, billing_account_id=billing_id, cfg=cfg)
