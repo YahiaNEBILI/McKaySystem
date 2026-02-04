@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 from botocore.client import BaseClient
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, OperationNotPageableError
 
 from checks.aws._common import (
     AwsAccountContext,
@@ -103,7 +103,7 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     location = ""
     try:
         location = str(pricing.location_for_region(region) or "")
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         location = ""
     if not location:
         return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "Pricing region mapping missing; using fallback pricing.", 30
@@ -133,13 +133,13 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     for filters in hourly_attempts:
         try:
             quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except Exception:
+        except (AttributeError, TypeError, ValueError, ClientError):
             quote = None
         if quote is None:
             continue
         try:
             hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             hourly = None
         if hourly and hourly > 0.0:
             notes.append("on-demand hourly price resolved via PricingService")
@@ -166,13 +166,13 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     for filters in data_attempts:
         try:
             quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="GB")
-        except Exception:
+        except (AttributeError, TypeError, ValueError, ClientError):
             quote = None
         if quote is None:
             continue
         try:
             per_gb = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             per_gb = None
         if per_gb and per_gb > 0.0:
             notes.append("on-demand data processing price resolved via PricingService")
@@ -209,7 +209,11 @@ def _paginate_items(
                     if isinstance(item, dict):
                         yield item
             return
-        except Exception:
+        except OperationNotPageableError:
+            # Fall back to token-based pagination.
+            pass
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Best-effort: some fakes/mocks or unusual clients may not behave like boto3.
             pass
 
     next_token: Optional[str] = None
@@ -411,7 +415,6 @@ class NatGatewaysChecker:
         )
         self._cfg = cfg or NatGatewaysConfig()
 
-
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         services = getattr(ctx, "services", None)
         if services is None:
@@ -419,9 +422,7 @@ class NatGatewaysChecker:
 
         ec2 = services.ec2
         cw = getattr(ctx.services, "cloudwatch", None)
-        region = safe_region_from_client(ec2) or str(getattr(getattr(ctx.services, "region", None), "__str__", lambda: "")())
-        if not region:
-            region = str(getattr(ctx.services, "region", "") or "")
+        region = safe_region_from_client(ec2) or str(getattr(ctx.services, "region", "") or "")
 
         # Inventory NAT gateways
         try:
@@ -505,8 +506,10 @@ class NatGatewaysChecker:
 
         for rt in route_tables:
             self._process_route_table_page(rt, referenced_by_routes, nat_ids, cross_az_pairs, subnet_az, nat_az)
-# Metrics (best-effort)
+
+        # Metrics (best-effort)
         daily_bytes: Dict[str, List[float]] = {}
+        emitted_perm: Set[str] = set()
         if cw is not None:
             lookback = int(self._cfg.lookback_days)
             end = now_utc()
@@ -514,7 +517,21 @@ class NatGatewaysChecker:
             try:
                 fetcher = _NatCloudWatchMetrics(cw)
                 daily_bytes = fetcher.daily_bytes(nat_gateway_ids=nat_ids, start=start, end=end)
-            except Exception:
+            except ClientError as exc:
+                if self._is_access_denied(exc) and "cloudwatch:GetMetricData" not in emitted_perm:
+                    emitted_perm.add("cloudwatch:GetMetricData")
+                    yield self._missing_permission(
+                        ctx,
+                        region,
+                        operation="cloudwatch:GetMetricData",
+                        service="cloudwatch",
+                        message="CloudWatch GetMetricData is required to evaluate NAT Gateway traffic (idle/high data).",
+                    )
+                else:
+                    yield self._cloudwatch_error(ctx, region, "get_metric_data", exc)
+                daily_bytes = {}
+            except BotoCoreError as exc:
+                yield self._cloudwatch_error(ctx, region, "get_metric_data", exc)
                 daily_bytes = {}
 
         # Pricing
@@ -728,6 +745,59 @@ class NatGatewaysChecker:
             recommendation="Ensure the scanning role has required EC2 permissions (DescribeNatGateways, DescribeRouteTables, DescribeSubnets) and CloudWatch GetMetricData.",
         ).with_issue(operation=operation)
 
+    def _cloudwatch_error(self, ctx: RunContext, region: str, operation: str, exc: Exception) -> FindingDraft:
+        return FindingDraft(
+            check_id="aws.ec2.nat_gateways.cloudwatch_error",
+            check_name="NAT Gateways CloudWatch error",
+            category="governance",
+            status="unknown",
+            severity=Severity(level="info", score=120),
+            title=f"Unable to evaluate NAT Gateway metrics ({operation})",
+            message=str(exc),
+            scope=build_scope(
+                ctx,
+                account=self._account,
+                region=region,
+                service="cloudwatch",
+                resource_type="metric",
+            ),
+            recommendation="Ensure the scanning role has cloudwatch:GetMetricData (and related permissions) and retry.",
+        ).with_issue(operation=operation)
+
+    def _missing_permission(
+        self,
+        ctx: RunContext,
+        region: str,
+        *,
+        operation: str,
+        service: str,
+        message: str,
+    ) -> FindingDraft:
+        return FindingDraft(
+            check_id="aws.ec2.nat_gateways.missing_permission",
+            check_name="NAT Gateways missing permission",
+            category="governance",
+            status="info",
+            severity=Severity(level="info", score=110),
+            title=f"Missing permission to evaluate NAT Gateways ({operation})",
+            message=message,
+            scope=build_scope(
+                ctx,
+                account=self._account,
+                region=region,
+                service=service,
+                resource_type="permission",
+            ),
+            recommendation="Grant the scanning role the missing permission(s) and re-run the scan.",
+        ).with_issue(operation=operation)
+
+    def _is_access_denied(self, exc: ClientError) -> bool:
+        try:
+            code = str(exc.response.get("Error", {}).get("Code") or "")
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return code in {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
+
     def _finding_orphaned(
         self,
         ctx: RunContext,
@@ -914,7 +984,7 @@ class NatGatewaysChecker:
         try:
             age = now_utc() - created
             return age >= timedelta(days=int(min_age_days))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return True
 
 
@@ -933,6 +1003,5 @@ def _p95(values: Sequence[float]) -> float:
 def _factory(ctx: RunContext, bootstrap: Bootstrap) -> Checker:
     account_id = str(bootstrap.get("account_id") or "")
     billing_id = str(bootstrap.get("billing_account_id") or "") or None
-    account = AwsAccountContext(account_id=account_id, billing_account_id=billing_id)
     cfg = NatGatewaysConfig()
     return NatGatewaysChecker(account_id=account_id, billing_account_id=billing_id, cfg=cfg)
