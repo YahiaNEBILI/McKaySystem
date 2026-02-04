@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from db import execute, execute_many, fetch_one
 
 
-DEFAULT_EXPORT_DIR = Path("/webapp_data/")
+DEFAULT_EXPORT_DIR = Path("webapp_data/")
 
 
 def _utc_now() -> datetime:
