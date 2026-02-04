@@ -81,6 +81,14 @@ class FakeCloudWatch:
         return {"MetricDataResults": results}
 
 
+class FakeCloudWatchAccessDenied(FakeCloudWatch):
+    def get_metric_data(self, *, MetricDataQueries: List[Mapping[str, Any]], **_kwargs: Any) -> Mapping[str, Any]:  # pylint: disable=unused-argument
+        raise ClientError(
+            error_response={"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            operation_name="GetMetricData",
+        )
+
+
 class FakePriceQuote:
     def __init__(self, unit_price: float) -> None:
         self.unit_price = unit_price
@@ -288,3 +296,165 @@ def test_access_denied_emits_access_error(monkeypatch: pytest.MonkeyPatch) -> No
     findings = list(checker.run(ctx))
 
     assert any(f.check_id == "aws.ec2.nat_gateways.access_error" for f in findings)
+
+
+def test_cloudwatch_access_denied_emits_missing_permission_and_inventory_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CloudWatch metrics may be denied; inventory-only signals should still work."""
+
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat",
+        "CreateTime": now - timedelta(days=2),
+        "Tags": [],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat]}],
+            "describe_route_tables": [{"RouteTables": []}],
+        },
+        subnets={"subnet-nat": {"SubnetId": "subnet-nat", "AvailabilityZone": "eu-west-3a"}},
+    )
+
+    cw = FakeCloudWatchAccessDenied(out_by_id={}, in_by_id={})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=FakePricing())
+
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
+    findings = list(checker.run(ctx))
+
+    assert any(f.check_id == "aws.ec2.nat_gateways.orphaned" for f in findings)
+    perm = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.missing_permission"]
+    assert len(perm) == 1
+    assert perm[0].issue_key.get("operation") == "cloudwatch:GetMetricData"
+
+
+def test_suppression_tag_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat",
+        "CreateTime": now - timedelta(days=10),
+        "Tags": [{"Key": "finops:ignore", "Value": "true"}],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat]}],
+            "describe_route_tables": [{"RouteTables": []}],
+        },
+        subnets={"subnet-nat": {"SubnetId": "subnet-nat", "AvailabilityZone": "eu-west-3a"}},
+    )
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=FakePricing())
+
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
+    findings = list(checker.run(ctx))
+
+    assert findings == []
+
+
+def test_pagination_multiple_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat1 = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-1",
+        "CreateTime": now - timedelta(days=5),
+        "Tags": [],
+    }
+    nat2 = {
+        "NatGatewayId": "nat-2",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-2",
+        "CreateTime": now - timedelta(days=5),
+        "Tags": [],
+    }
+
+    # Route tables empty => both orphaned
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat1]}, {"NatGateways": [nat2]}],
+            "describe_route_tables": [{"RouteTables": []}, {"RouteTables": []}],
+        },
+        subnets={
+            "subnet-nat-1": {"SubnetId": "subnet-nat-1", "AvailabilityZone": "eu-west-3a"},
+            "subnet-nat-2": {"SubnetId": "subnet-nat-2", "AvailabilityZone": "eu-west-3b"},
+        },
+    )
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=FakePricing())
+
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
+    findings = list(checker.run(ctx))
+
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.orphaned"]
+    assert {f.scope.resource_id for f in hits} == {"nat-1", "nat-2"}
+
+
+def test_determinism_shuffled_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same resources in different input order must yield identical outputs."""
+
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat_a = {
+        "NatGatewayId": "nat-a",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-a",
+        "CreateTime": now - timedelta(days=3),
+        "Tags": [],
+    }
+    nat_b = {
+        "NatGatewayId": "nat-b",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat-b",
+        "CreateTime": now - timedelta(days=3),
+        "Tags": [],
+    }
+
+    pages1 = {"describe_nat_gateways": [{"NatGateways": [nat_a, nat_b]}], "describe_route_tables": [{"RouteTables": []}]}
+    pages2 = {"describe_nat_gateways": [{"NatGateways": [nat_b, nat_a]}], "describe_route_tables": [{"RouteTables": []}]}
+
+    subnets = {
+        "subnet-nat-a": {"SubnetId": "subnet-nat-a", "AvailabilityZone": "eu-west-3a"},
+        "subnet-nat-b": {"SubnetId": "subnet-nat-b", "AvailabilityZone": "eu-west-3b"},
+    }
+
+    ctx1 = _mk_ctx(ec2=FakeEC2(region="eu-west-3", pages_by_op=pages1, subnets=subnets), cloudwatch=None, pricing=FakePricing())
+    ctx2 = _mk_ctx(ec2=FakeEC2(region="eu-west-3", pages_by_op=pages2, subnets=subnets), cloudwatch=None, pricing=FakePricing())
+
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
+    f1 = list(checker.run(ctx1))
+    f2 = list(checker.run(ctx2))
+
+    def _sig(fs: List[Any]) -> List[Any]:
+        return sorted(
+            [(x.check_id, x.scope.resource_id, tuple(sorted((x.issue_key or {}).items()))) for x in fs],
+            key=lambda t: (t[0], t[1], t[2]),
+        )
+
+    assert _sig(f1) == _sig(f2)
