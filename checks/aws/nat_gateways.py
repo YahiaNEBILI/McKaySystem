@@ -619,9 +619,12 @@ class NatGatewaysChecker:
                         )
 
                 # High data processing
-                # Compute a rough monthly traffic from the mean daily bytes.
-                avg_daily = float(sum(series) / max(1, len(series)))
-                monthly_gib = gb_from_bytes(avg_daily * 30.0)
+                # Prefer using the sum over the datapoints we have, then normalize to a 30-day month.
+                # This is more robust than scaling a mean when traffic is spiky and/or the period is short.
+                total_bytes = float(sum(series))
+                days_observed = int(max(1, len(series)))
+                monthly_bytes = total_bytes * (30.0 / float(days_observed))
+                monthly_gib = gb_from_bytes(monthly_bytes)
                 if monthly_gib >= float(self._cfg.high_data_processing_gib_month_threshold):
                     if emitted["high_data"] < self._cfg.max_findings_per_type:
                         emitted["high_data"] += 1
@@ -706,6 +709,22 @@ class NatGatewaysChecker:
                 continue
             assoc_subnets.append((subnet_id, str(subnet_az.get(subnet_id, "") or "")))
 
+        # Heuristic: treat route tables with a default route to an Internet Gateway as "public".
+        # When a route table is shared across subnets (or includes public subnets), cross-AZ inference becomes noisy.
+        is_public_rt = False
+        for r0 in route_table.get("Routes", []) or []:
+            if not isinstance(r0, Mapping):
+                continue
+            dst4 = str(r0.get("DestinationCidrBlock") or "")
+            dst6 = str(r0.get("DestinationIpv6CidrBlock") or "")
+            if dst4 not in {"0.0.0.0/0"} and dst6 not in {"::/0"}:
+                continue
+            gw = str(r0.get("GatewayId") or "")
+            eigw = str(r0.get("EgressOnlyInternetGatewayId") or "")
+            if gw.startswith(("igw-", "eigw-")) or eigw.startswith("eigw-"):
+                is_public_rt = True
+                break
+
         for r in route_table.get("Routes", []) or []:
             if not isinstance(r, Mapping):
                 continue
@@ -714,7 +733,11 @@ class NatGatewaysChecker:
                 continue
             referenced_by_routes.add(nid)
 
-            # Cross-AZ: any associated subnet AZ differs from NAT AZ
+            # Cross-AZ: any associated subnet AZ differs from NAT AZ.
+            # Skip public route tables (default route to IGW), as they are often shared with non-private subnets,
+            # which can create noisy cross-AZ inferences.
+            if is_public_rt:
+                continue
             nat_zone = str(nat_az.get(nid, "") or "")
             if not nat_zone:
                 continue
@@ -955,9 +978,9 @@ class NatGatewaysChecker:
             severity=Severity(level="medium", score=550),
             title=f"Cross-AZ NAT usage detected for {nat_id}",
             message=(
-                "Some subnets appear to route through a NAT Gateway in a different Availability Zone "
-                "(best-effort from route table associations). This can increase cross-AZ data charges and "
-                "reduce resilience during AZ impairments."
+                "Some private subnets appear to route through a NAT Gateway in a different Availability Zone "
+                "(best-effort from route table associations; route tables with IGW default routes are ignored). "
+                "This can increase cross-AZ data charges and reduce resilience during AZ impairments."
             ),
             recommendation="Ensure each private subnet routes to a NAT Gateway in the same AZ (one NAT per AZ for HA).",
             remediation="Create a NAT Gateway per AZ and update route tables to use the same-AZ NAT.",
@@ -993,8 +1016,8 @@ def _p95(values: Sequence[float]) -> float:
     if not vals:
         return 0.0
     vals_sorted = sorted(vals)
-    # p95 index
-    idx = int(round(0.95 * (len(vals_sorted) - 1)))
+    # p95 index (floor)
+    idx = int(0.95 * (len(vals_sorted) - 1))
     idx = max(0, min(idx, len(vals_sorted) - 1))
     return float(vals_sorted[idx])
 
