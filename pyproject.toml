@@ -35,6 +35,24 @@ dev = [
   "types-requests",
 ]
 
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "mckaysystem*",
+  "infra*",
+  "checks*",
+  "services*",
+  "pipeline*",
+  "contracts*",
+]
+exclude = ["tests*", "docs*", "data*", "webapp_data*", "build*", "dist*"]
+
+
 [project.scripts]
 mckay = "mckaysystem.cli:main"
 
