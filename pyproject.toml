@@ -54,7 +54,7 @@ exclude = ["tests*", "docs*", "data*", "webapp_data*", "build*", "dist*"]
 
 
 [project.scripts]
-mckay = "mckaysystem.cli:main"
+mckay = "cli:main"
 
 
 [tool.pytest.ini_options]
