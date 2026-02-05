@@ -1,23 +1,9 @@
 """
-mckaysystem/cli.py
-
-Single-entry CLI to run McKaySystem end-to-end (CloudShell-friendly).
-
-Replaces the manual sequence:
-- python runner.py --tenant ... --workspace ... --out ...
-- python export_findings.py
-- zip -r webapp_data.zip webapp_data/
-- export DB_URL=...
-- export TENANT_ID=...
-- export WORKSPACE=...
-- python ingest_exported_json.py
+McKaySystem CLI (flat-layout friendly).
 
 Usage
 -----
-# After: pip install -e .[dev]  (or pip install .)
 mckay run-all --tenant engie --workspace noprod --out data/finops_findings --db-url "postgresql://..."
-
-# Or step-by-step
 mckay run --tenant engie --workspace noprod --out data/finops_findings
 mckay export
 mckay zip
@@ -27,6 +13,7 @@ mckay ingest --db-url "postgresql://..."
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -34,22 +21,41 @@ from pathlib import Path
 from typing import List, Optional
 
 
-def _repo_root() -> Path:
-    """
-    Best-effort repo root resolver.
+def _walk_up_for_root(start: Path) -> Optional[Path]:
+    """Walk up from *start* to find a project root marker."""
+    cur = start.resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for _ in range(10):
+        if (cur / "pyproject.toml").exists() or (cur / "runner.py").exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return None
 
-    We keep it simple: assume CLI lives at <repo>/mckaysystem/cli.py.
+
+def _repo_root() -> Path:
+    """Resolve the working project root.
+
+    When installed via pip, ``__file__`` points into site-packages, not the repo.
+    In that scenario, we prefer the current working directory (CloudShell usage:
+    you typically run the command from the repo).
     """
-    return Path(__file__).resolve().parents[1]
+    return _walk_up_for_root(Path.cwd()) or _walk_up_for_root(Path(__file__)) or Path.cwd().resolve()
+
+
+def _module_exists(mod_name: str) -> bool:
+    return importlib.util.find_spec(mod_name) is not None
 
 
 def _python() -> str:
     return sys.executable
 
 
-def _run_cmd(cmd: List[str], *, cwd: Optional[Path] = None) -> None:
+def _run_cmd(cmd: List[str], *, cwd: Optional[Path] = None, env: Optional[dict] = None) -> None:
     try:
-        subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+        subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc
 
@@ -72,21 +78,23 @@ def cmd_run(args: argparse.Namespace) -> None:
     if not workspace:
         raise SystemExit("Missing --workspace (or WORKSPACE env var).")
 
-    runner = root / "runner.py"
-    if not runner.exists():
-        raise SystemExit(f"runner.py not found at {runner}")
+    # Run as module so it works whether we're in-repo or installed as py-modules
+    if not _module_exists("runner") and not (root / "runner.py").exists():
+        raise SystemExit(
+            "runner module not found. Run from the project directory or ensure runner.py is installed as a module."
+        )
 
-    cmd = [_python(), str(runner), "--tenant", tenant, "--workspace", workspace, "--out", out_dir]
+    cmd = [_python(), "-m", "runner", "--tenant", tenant, "--workspace", workspace, "--out", out_dir]
     _run_cmd(cmd, cwd=root)
 
 
 def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argument
     root = _repo_root()
-    exporter = root / "export_findings.py"
-    if not exporter.exists():
-        raise SystemExit(f"export_findings.py not found at {exporter}")
-
-    _run_cmd([_python(), str(exporter)], cwd=root)
+    if not _module_exists("export_findings") and not (root / "export_findings.py").exists():
+        raise SystemExit(
+            "export_findings module not found. Run from the project directory or ensure export_findings.py is installed."
+        )
+    _run_cmd([_python(), "-m", "export_findings"], cwd=root)
 
 
 def cmd_zip(args: argparse.Namespace) -> None:
@@ -97,10 +105,8 @@ def cmd_zip(args: argparse.Namespace) -> None:
     if not webapp_dir.exists() or not webapp_dir.is_dir():
         raise SystemExit(f"webapp_data directory not found: {webapp_dir}")
 
-    # Prefer Python stdlib zipfile to avoid relying on zip binary in every environment.
     import zipfile  # local import on purpose
 
-    # Create zip (overwrite)
     if zip_path.exists():
         zip_path.unlink()
 
@@ -116,9 +122,10 @@ def cmd_zip(args: argparse.Namespace) -> None:
 
 def cmd_ingest(args: argparse.Namespace) -> None:
     root = _repo_root()
-    ingester = root / "ingest_exported_json.py"
-    if not ingester.exists():
-        raise SystemExit(f"ingest_exported_json.py not found at {ingester}")
+    if not _module_exists("ingest_exported_json") and not (root / "ingest_exported_json.py").exists():
+        raise SystemExit(
+            "ingest_exported_json module not found. Run from the project directory or ensure ingest_exported_json.py is installed."
+        )
 
     db_url = args.db_url or _env_default("DB_URL")
     tenant = args.tenant or _env_default("TENANT_ID")
@@ -131,35 +138,26 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     if not workspace:
         raise SystemExit("Missing --workspace (or WORKSPACE env var).")
 
-    # The ingester script expects env vars (per your current workflow).
     env = dict(os.environ)
     env["DB_URL"] = db_url
     env["TENANT_ID"] = tenant
     env["WORKSPACE"] = workspace
 
-    try:
-        subprocess.run([_python(), str(ingester)], cwd=str(root), env=env, check=True)
-    except subprocess.CalledProcessError as exc:
-        raise SystemExit(exc.returncode) from exc
+    _run_cmd([_python(), "-m", "ingest_exported_json"], cwd=root, env=env)
 
 
 def cmd_run_all(args: argparse.Namespace) -> None:
-    # 1) run
     cmd_run(args)
 
-    # 2) export
     if not args.skip_export:
         cmd_export(args)
 
-    # 3) zip
     if not args.skip_zip:
         cmd_zip(args)
 
-    # 4) ingest (optional)
     if args.skip_ingest:
         return
 
-    # Ingest only if db_url present (arg or env), else be explicit.
     db_url = args.db_url or _env_default("DB_URL")
     if not db_url:
         print("DB_URL not set and --db-url not provided → skipping ingest.")
@@ -172,34 +170,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mckay", description="McKaySystem CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Shared arguments helpers
     def add_tenant_workspace(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--tenant", default=None, help="Tenant id (or TENANT_ID env var).")
         sp.add_argument("--workspace", default=None, help="Workspace (or WORKSPACE env var).")
 
-    # run
     sp = sub.add_parser("run", help="Run checkers and produce parquet output.")
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var). Default: data/finops_findings")
     sp.set_defaults(func=cmd_run)
 
-    # export
-    sp = sub.add_parser("export", help="Export findings to webapp_data/ (calls export_findings.py).")
+    sp = sub.add_parser("export", help="Export findings to webapp_data/ (calls export_findings).")
     sp.set_defaults(func=cmd_export)
 
-    # zip
     sp = sub.add_parser("zip", help="Zip webapp_data/ into webapp_data.zip")
     sp.add_argument("--webapp-dir", default=None, help="Directory to zip. Default: webapp_data")
     sp.add_argument("--zip-path", default=None, help="Zip output path. Default: webapp_data.zip")
     sp.set_defaults(func=cmd_zip)
 
-    # ingest
-    sp = sub.add_parser("ingest", help="Ingest exported JSON into DB (calls ingest_exported_json.py).")
+    sp = sub.add_parser("ingest", help="Ingest exported JSON into DB (calls ingest_exported_json).")
     add_tenant_workspace(sp)
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.set_defaults(func=cmd_ingest)
 
-    # run-all
     sp = sub.add_parser("run-all", help="Run → export → zip → (optional) ingest.")
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var).")
