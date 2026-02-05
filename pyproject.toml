@@ -2,17 +2,100 @@
 name = "mckaysystem"
 version = "0.1.0"
 description = "Infra-native FinOps signal engine (checkers + contracts + Parquet + correlation + export)."
-requires-python = ">=3.11"
+readme = "README.md"
+requires-python = ">=3.9"
 dependencies = [
   "boto3>=1.28",
+  "botocore>=1.31",
   "duckdb>=0.9",
   "pyarrow>=14",
+
+  # DB ingestion
+  "psycopg2-binary>=2.9",
+
+  # Common utilities (remove if unused)
+  "python-dateutil>=2.8",
+  "pyyaml>=6.0",
+  "requests>=2.31",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=7.0",
+  "pytest-cov>=4.1",
+
+  # Lint/format/type
+  "ruff>=0.6",
+  "pylint>=3.0",
+  "mypy>=1.8",
+
+  # Stubs (optional but useful)
+  "types-python-dateutil",
+  "types-PyYAML",
+  "types-requests",
 ]
+
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "mckaysystem*",
+  "infra*",
+  "checks*",
+  "services*",
+  "pipeline*",
+  "contracts*",
+]
+exclude = ["tests*", "docs*", "data*", "webapp_data*", "build*", "dist*"]
+
+
+[tool.setuptools]
+py-modules = [
+  "cli",
+  "runner",
+  "db",
+  "export_findings",
+  "ingest_exported_json",
+  "version",
+]
+
+[project.scripts]
+mckay = "cli:main"
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+  "error::DeprecationWarning",
+  "error::PendingDeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+  ".venv",
+  "build",
+  "dist",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # keep if you prefer 120 + allow long lines sometimes
+
+[tool.pylint.main]
+py-version = "3.11"
+jobs = 0
+ignore-paths = [".venv", "build", "dist"]
+
+[tool.pylint.messages_control]
+disable = [
+  "missing-module-docstring",
+  "missing-function-docstring",
+  "missing-class-docstring",
+]

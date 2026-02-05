@@ -235,8 +235,30 @@ class CheckerRunner:
                 result.valid_findings.append(record)
             except ValidationError as exc:
                 result.invalid_findings += 1
+
+                # Add context to pinpoint the source checker + scope
                 if len(result.invalid_errors) < 50:
-                    result.invalid_errors.append(str(exc))
+                    check_id = ""
+                    try:
+                        check_id = getattr(checker, "check_id", "") or getattr(checker, "__class__").__name__
+                    except Exception:  # pragma: no cover
+                        check_id = "unknown-checker"
+
+                    scope = {}
+                    try:
+                        scope = (record.get("scope") or {}) if isinstance(record, dict) else {}
+                    except Exception:  # pragma: no cover
+                        scope = {}
+
+                    preview = {
+                        "check_id": record.get("check_id") if isinstance(record, dict) else "",
+                        "resource": (scope.get("resource_id") or scope.get("resource_arn") or "") if isinstance(scope, dict) else "",
+                        "region": scope.get("region") if isinstance(scope, dict) else "",
+                        "account_id": scope.get("account_id") if isinstance(scope, dict) else "",
+                    }
+
+                    result.invalid_errors.append(f"[{check_id}] {exc} | preview={preview!r}")
+
 
         return result
 

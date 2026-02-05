@@ -783,7 +783,7 @@ class ElbV2LoadBalancersChecker:
 
 @register_checker("checks.aws.elbv2_load_balancers:ElbV2LoadBalancersChecker")
 def _factory(ctx: RunContext, bootstrap: Bootstrap) -> Checker:
-    account_id = str(bootstrap.get("account_id") or "")
+    account_id = str(bootstrap.get("aws_account_id") or "")
     billing_id = str(bootstrap.get("billing_account_id") or "") or None
     partition = str(bootstrap.get("partition") or "aws")
 
