@@ -239,9 +239,14 @@ class S3StorageChecker:
                     region=bucket_region,
                     bucket=name,
                 )
-                if breakdown is not None and breakdown["total_size_gib"] > 0:
-                    total_cost = breakdown["total_monthly_cost_usd"]
+                if breakdown is not None:
+                    total_gib = float(breakdown.get("total_size_gib") or 0.0)
 
+                    if total_gib < 10.0:
+                        continue
+
+                    total_cost = breakdown["total_monthly_cost_usd"]
+                    
                     # Deterministic JSON breakdown (stable key ordering, stable rounding)
                     breakdown_items = breakdown["items"]
                     breakdown_json = json.dumps(
