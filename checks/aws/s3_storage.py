@@ -232,6 +232,7 @@ class S3StorageChecker:
             # ------------------------------
             # Cost: storage estimate (multi-class, best-effort)
             # ------------------------------
+
             if cloudwatch is not None:
                 breakdown = self._bucket_storage_breakdown_best_effort(
                     cloudwatch,
@@ -242,13 +243,24 @@ class S3StorageChecker:
                 if breakdown is not None:
                     total_gib = float(breakdown.get("total_size_gib") or 0.0)
 
+                    # Guard against "0.0 GiB" findings caused by rounding tiny non-zero values.
+                    # CloudWatch S3 metrics can be sparse and/or small buckets may round to 0.0 at 1 decimal.
+                    # If you want *any* storage estimate finding, it should at least be visibly > 0.0.
+                    if total_gib < 0.05:  # ~51 MiB
+                        continue
+
+                    # Your policy: don't emit small buckets (noise). Keep as-is.
                     if total_gib < 10.0:
                         continue
 
-                    total_cost = breakdown["total_monthly_cost_usd"]
-                    
+                    total_cost = float(breakdown.get("total_monthly_cost_usd") or 0.0)
+
                     # Deterministic JSON breakdown (stable key ordering, stable rounding)
-                    breakdown_items = breakdown["items"]
+                    breakdown_items = breakdown.get("items") or []
+                    classes = len(breakdown_items)
+                    class_word = "class" if classes == 1 else "classes"
+                    across_phrase = f"across {classes} {class_word}"
+
                     breakdown_json = json.dumps(
                         breakdown_items,
                         sort_keys=True,
@@ -265,11 +277,10 @@ class S3StorageChecker:
                         severity=Severity(level="low", score=20),
                         title=(
                             f"S3 bucket storage estimate: {name} "
-                            f"(~{breakdown['total_size_gib']:.1f} GiB across {len(breakdown_items)} classes)"
+                            f"(~{total_gib:.1f} GiB {across_phrase})"
                         ),
                         message=(
-                            f"Estimated storage size ≈ {breakdown['total_size_gib']:.1f} GiB "
-                            f"across multiple storage classes. "
+                            f"Estimated storage size ≈ {total_gib:.1f} GiB {across_phrase}. "
                             f"Estimated cost ≈ ${total_cost:.2f}/month (storage-only)."
                         ),
                         recommendation=(
@@ -280,11 +291,11 @@ class S3StorageChecker:
                         issue_key={"check_id": self._CID_COST, "bucket": name, "mode": "multi_class"},
                         estimated_monthly_cost=round(total_cost, 2),
                         estimated_monthly_savings=None,
-                        estimate_confidence=int(breakdown["estimate_confidence"]),
-                        estimate_notes=breakdown["estimate_notes"],
+                        estimate_confidence=int(breakdown.get("estimate_confidence") or 0),
+                        estimate_notes=str(breakdown.get("estimate_notes") or ""),
                         dimensions={
                             "currency": "USD",
-                            "total_size_gib": f"{breakdown['total_size_gib']:.4f}",
+                            "total_size_gib": f"{total_gib:.4f}",
                             "total_monthly_cost_usd": f"{total_cost:.4f}",
                             "breakdown_json": breakdown_json,
                         },
