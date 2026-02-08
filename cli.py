@@ -88,13 +88,19 @@ def cmd_run(args: argparse.Namespace) -> None:
     _run_cmd(cmd, cwd=root)
 
 
-def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argument
+def cmd_export(args: argparse.Namespace) -> None:
     root = _repo_root()
     if not _module_exists("export_findings") and not (root / "export_findings.py").exists():
         raise SystemExit(
             "export_findings module not found. Run from the project directory or ensure export_findings.py is installed."
         )
-    _run_cmd([_python(), "-m", "export_findings"], cwd=root)
+
+    tenant = args.tenant or _env_default("TENANT_ID")
+    if not tenant:
+        raise SystemExit("Missing --tenant for export (or TENANT_ID env var)")
+    env = dict(os.environ)
+    env["TENANT_ID"] = tenant
+    _run_cmd([_python(), "-m", "export_findings", "--tenant-id", tenant], cwd=root, env=env)
 
 
 def cmd_zip(args: argparse.Namespace) -> None:
