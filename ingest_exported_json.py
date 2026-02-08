@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Sequence
-from db import execute, execute_many, fetch_one
 
+from db import execute, execute_many, fetch_one
 from pipeline.run_manifest import load_manifest, manifest_path
 
 
 DEFAULT_EXPORT_DIR = Path("webapp_data/")
 
+
+# ---------------------------
+# Parsing helpers (existing)
+# ---------------------------
 
 def _parse_dt(value: str) -> Optional[datetime]:
     v = (value or "").strip()
@@ -38,7 +44,6 @@ def _lower(s: Any) -> str:
 
 
 def _to_float(v: Any) -> Optional[float]:
-    """Best-effort numeric parsing for savings/cost fields."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -68,7 +73,7 @@ def _pick_latest_json(export_dir: Path) -> Path:
     candidates = sorted(export_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not candidates:
         raise FileNotFoundError(f"no .json files in {export_dir}")
-    for name in ("results.json", "export.json", "findings.json"):
+    for name in ("findings_full.json", "results.json", "export.json", "findings.json"):
         for p in candidates:
             if p.name == name:
                 return p
@@ -126,13 +131,80 @@ def _fingerprint(item: Dict[str, Any]) -> str:
     return ""
 
 
+# ---------------------------
+# NEW: taxonomy + grouping
+# ---------------------------
+
+_CATEGORY_BY_PREFIX: list[tuple[str, str]] = [
+    ("aws.cloudwatch.", "cost"),
+    ("aws.ec2.", "cost"),
+    ("aws.ebs.", "cost"),
+    ("aws.elb", "cost"),
+    ("aws.rds.", "cost"),
+    ("aws.s3.", "cost"),
+    ("aws.vpc.", "cost"),
+    ("aws.fsx.", "cost"),
+    ("aws.backup.", "reliability"),
+    ("aws.iam.", "security"),
+]
+
+
+def _derive_category(check_id: Optional[str]) -> Optional[str]:
+    if not check_id:
+        return None
+    for prefix, cat in _CATEGORY_BY_PREFIX:
+        if check_id.startswith(prefix):
+            return cat
+    return "other"
+
+
+_ID_PATTERNS = [
+    r"\barn:[^\s]+",         # ARNs
+    r"\bi-[0-9a-f]{8,}\b",    # EC2 instance ids
+    r"\bvol-[0-9a-f]{8,}\b",  # EBS volume ids
+    r"\bsg-[0-9a-f]{8,}\b",   # SG ids
+    r"\bsubnet-[0-9a-f]{8,}\b",
+    r"\bvpc-[0-9a-f]{8,}\b",
+    r"\b[a-z0-9-]{1,63}\.amazonaws\.com\b",
+]
+
+
+def _normalize_title(title: Optional[str]) -> str:
+    t = (title or "").strip().lower()
+    if not t:
+        return ""
+    for pat in _ID_PATTERNS:
+        t = re.sub(pat, "<id>", t)
+    t = re.sub(r"\d+", "<n>", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def _derive_group_key(check_id: Optional[str], title: Optional[str], category: Optional[str]) -> Optional[str]:
+    # Prefer stability: same check + same normalized title (+ category as extra signal)
+    base = f"{(check_id or '').strip()}|{(category or '').strip()}|{_normalize_title(title)}"
+    base = base.strip("|")
+    if not base:
+        return None
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+
 def _guess_fields(
     item: Dict[str, Any],
-) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[float], Optional[str], Optional[str]]:
+) -> Tuple[
+    Optional[str], Optional[str], Optional[str], Optional[str],
+    Optional[float], Optional[str], Optional[str],
+    Optional[str], Optional[str],
+]:
     check_id = _norm(item.get("check_id") or item.get("checkId") or "") or None
     service = _norm(item.get("service") or item.get("provider_service") or "") or None
     severity = _norm(item.get("severity") or item.get("severity_level") or "") or None
     title = _norm(item.get("title") or item.get("message") or item.get("summary") or "") or None
+
+    # Category: prefer JSON if present (exporter includes it). :contentReference[oaicite:4]{index=4}
+    category = _norm(item.get("category") or item.get("finding_category") or "") or None
+    if not category:
+        category = _derive_category(check_id)
 
     savings = item.get("estimated_monthly_savings")
     if savings is None:
@@ -154,7 +226,11 @@ def _guess_fields(
     region = _norm(item.get("region") or item.get("aws_region") or "") or None
     account_id = _norm(item.get("account_id") or item.get("aws_account_id") or item.get("account") or "") or None
 
-    return check_id, service, severity, title, savings_f, region, account_id
+    group_key = _norm(item.get("group_key") or item.get("groupKey") or "") or None
+    if not group_key:
+        group_key = _derive_group_key(check_id, title, category)
+
+    return check_id, service, severity, title, savings_f, region, account_id, category, group_key
 
 
 def ingest_latest_export() -> None:
@@ -169,12 +245,11 @@ def ingest_latest_export() -> None:
         except Exception as exc:
             raise SystemExit(f"Invalid run manifest in export_dir: {mpath} ({exc})") from exc
 
-        # Fail fast on mismatch: prevents ingesting with the wrong tenant/workspace.
         env_tenant = (os.getenv("TENANT_ID") or "").strip()
         env_ws = (os.getenv("WORKSPACE") or "").strip()
-        if env_tenant and env_tenant != m.tenant_id:
+        if env_tenant and not hmac.compare_digest(env_tenant, m.tenant_id):
             raise SystemExit(f"TENANT_ID mismatch: env={env_tenant!r} manifest={m.tenant_id!r}")
-        if env_ws and env_ws != m.workspace:
+        if env_ws and not hmac.compare_digest(env_ws, m.workspace):
             raise SystemExit(f"WORKSPACE mismatch: env={env_ws!r} manifest={m.workspace!r}")
 
     file_path = _pick_latest_json(export_dir)
@@ -215,7 +290,6 @@ def ingest_latest_export() -> None:
 
     items = _extract_items(payload)
 
-    # Re-ingesting a run should be idempotent for finding_presence
     execute(
         "DELETE FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
         (tenant_id, workspace, run_id),
@@ -232,9 +306,8 @@ def ingest_latest_export() -> None:
         if not fp:
             continue
 
-        check_id, service, severity, title, savings_f, region, account_id = _guess_fields(it)
+        check_id, service, severity, title, savings_f, region, account_id, category, group_key = _guess_fields(it)
 
-        # 1) presence rows (run membership + fast KPI aggregation)
         presence_rows.append(
             (
                 tenant_id,
@@ -252,8 +325,6 @@ def ingest_latest_export() -> None:
             )
         )
 
-        # 2) latest snapshot rows (full payload for UI/detail drilldowns)
-        # Store the full finding object as JSONB.
         payload_json = json.dumps(it, ensure_ascii=False, separators=(",", ":"))
         latest_rows.append(
             (
@@ -268,6 +339,8 @@ def ingest_latest_export() -> None:
                 savings_f,
                 region,
                 account_id,
+                category,
+                group_key,
                 payload_json,
                 run_ts,
             )
@@ -284,9 +357,6 @@ def ingest_latest_export() -> None:
             presence_rows,
         )
 
-    # Upsert full payload into finding_latest (one row per fingerprint for latest snapshot)
-    # NOTE: This expects a table:
-    #   finding_latest(tenant_id, workspace, fingerprint PRIMARY KEY, ..., payload JSONB, detected_at, run_id, ...)
     if latest_rows:
         execute_many(
             """
@@ -294,9 +364,10 @@ def ingest_latest_export() -> None:
             (tenant_id, workspace, fingerprint, run_id,
             check_id, service, severity, title,
             estimated_monthly_savings, region, account_id,
+            category, group_key,
             payload, detected_at)
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
             ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
             run_id = EXCLUDED.run_id,
             check_id = EXCLUDED.check_id,
@@ -306,6 +377,8 @@ def ingest_latest_export() -> None:
             estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
             region = EXCLUDED.region,
             account_id = EXCLUDED.account_id,
+            category = EXCLUDED.category,
+            group_key = EXCLUDED.group_key,
             payload = EXCLUDED.payload,
             detected_at = EXCLUDED.detected_at
             """,
