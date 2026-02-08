@@ -15,7 +15,7 @@ Authoritative design contracts and deep dives live under `docs/`.
 
 ## Getting started
 
-- New here? Read `docs/onboarding.md`.
+- New here? Read `introduction.md`.
 - Want the detailed architecture? Start with `docs/architecture/architecture.md`
   and `docs/architecture/pipeline_overview.md`.
 
