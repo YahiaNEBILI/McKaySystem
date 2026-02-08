@@ -1,31 +1,27 @@
 from __future__ import annotations
 
-"""
-db.py
+"""db.py
 
 Tiny DB helper module for PostgreSQL (psycopg2) with connection pooling.
 
-Why pooling matters
--------------------
-Opening a new connection per query is extremely slow with remote Postgres
-(e.g. Neon) + hosted app runtimes (e.g. PythonAnywhere). We use a process-global
-SimpleConnectionPool and provide small helpers for common patterns.
+Goals
+-----
+- Fast on remote Postgres (Neon) + hosted runtimes (PythonAnywhere)
+- Simple, explicit helpers: fetch_one/fetch_all/execute + *_conn variants
+- Optional dict-row helpers for API payloads
 
-Additional helpers
-------------------
-This module also provides *_conn variants (e.g. fetch_all_conn) so request
-handlers can reuse a single connection for many queries (reducing round-trips
-and pool checkout overhead).
-
-JSON helpers are included because the app stores/reads JSONB blobs (e.g.
-dashboard_cache payload).
+Environment
+-----------
+- DB_URL: PostgreSQL DSN/URL
+- DB_POOL_MAXCONN: pool size (default 10)
+- DB_CONNECT_TIMEOUT: seconds (default 5)
 """
 
 import atexit
 import json
 import os
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple
 
 
 def _db_url() -> str:
@@ -35,7 +31,6 @@ def _db_url() -> str:
     return url
 
 
-# Keep a single global pool per process.
 _POOL = None
 _POOL_DSN: Optional[str] = None
 
@@ -80,9 +75,7 @@ atexit.register(_close_pool)
 def db_conn() -> Iterator[Any]:
     """Yield a pooled psycopg2 connection.
 
-    IMPORTANT:
-    - Reuses connections (pool) instead of reconnecting on every query.
-    - Callers should NOT close the connection; it is returned to the pool.
+    Callers must not close the connection; it is returned to the pool.
     """
     pool = _get_pool()
     conn = pool.getconn()
@@ -128,6 +121,30 @@ def execute_many_conn(conn: Any, sql: str, seq_of_params: list[Sequence[Any]]) -
         return
     with conn.cursor() as cur:
         cur.executemany(sql, seq_of_params)
+
+
+# ---------------------------
+# Dict row helpers (optional)
+# ---------------------------
+
+def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Dict[str, Any]]:
+    """Fetch one row as a dict (column -> value)."""
+    from psycopg2.extras import RealDictCursor  # type: ignore
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, params or ())
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[Dict[str, Any]]:
+    """Fetch all rows as dicts."""
+    from psycopg2.extras import RealDictCursor  # type: ignore
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, params or ())
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
 
 
 # ---------------------------
@@ -196,7 +213,7 @@ def execute_many(sql: str, seq_of_params: list[Sequence[Any]]) -> None:
 
 def to_jsonb(value: Any) -> str:
     """Serialize a Python object to a JSON string suitable for ::jsonb."""
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def fetch_jsonb_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Any:
