@@ -367,25 +367,29 @@ def ingest_latest_export() -> None:
             """
             INSERT INTO finding_latest
             (tenant_id, workspace, fingerprint, run_id,
-            check_id, service, severity, title,
-            estimated_monthly_savings, region, account_id,
-            category, group_key,
-            payload, detected_at)
+             check_id, service, severity, title,
+             estimated_monthly_savings, region, account_id,
+             category, group_key,
+             payload, detected_at)
             VALUES
-            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+            (%s,%s,%s,%s,
+             %s,%s,%s,%s,
+             %s,%s,%s,
+             %s,%s,
+             %s::jsonb,%s)
             ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
-            run_id = EXCLUDED.run_id,
-            check_id = EXCLUDED.check_id,
-            service = EXCLUDED.service,
-            severity = EXCLUDED.severity,
-            title = EXCLUDED.title,
-            estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
-            region = EXCLUDED.region,
-            account_id = EXCLUDED.account_id,
-            category = EXCLUDED.category,
-            group_key = EXCLUDED.group_key,
-            payload = EXCLUDED.payload,
-            detected_at = EXCLUDED.detected_at
+              run_id = EXCLUDED.run_id,
+              check_id = EXCLUDED.check_id,
+              service = EXCLUDED.service,
+              severity = EXCLUDED.severity,
+              title = EXCLUDED.title,
+              estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
+              region = EXCLUDED.region,
+              account_id = EXCLUDED.account_id,
+              category = EXCLUDED.category,
+              group_key = EXCLUDED.group_key,
+              payload = EXCLUDED.payload,
+              detected_at = EXCLUDED.detected_at
             """,
             latest_rows,
         )
