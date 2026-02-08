@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -19,14 +21,68 @@ class Cfg:
     workspace: str
     bearer_token: str
     timeout_s: float = 20.0
+    strict_json: bool = True
+    verbose: bool = False
 
 
 class SmokeFail(RuntimeError):
-    pass
+    """Raised when a smoke check fails."""
 
 
 def _utc_iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _trim(s: str, limit: int = 600) -> str:
+    s = (s or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "…"
+
+
+def _read_headers_content_type(headers: Any) -> str:
+    try:
+        return str(headers.get("Content-Type") or "")
+    except Exception:
+        return ""
+
+
+def _decode_body(raw_bytes: bytes) -> str:
+    return raw_bytes.decode("utf-8", errors="replace") if raw_bytes else ""
+
+
+def _parse_json_or_raise(
+    *,
+    method: str,
+    url: str,
+    status: int,
+    content_type: str,
+    raw_text: str,
+    strict_json: bool,
+) -> Dict[str, Any]:
+    if not raw_text:
+        return {}
+
+    if strict_json and "application/json" not in (content_type or "").lower():
+        raise SmokeFail(
+            f"{method} {url}: expected JSON Content-Type, got '{content_type or 'unknown'}'. "
+            f"Body: {_trim(raw_text)}"
+        )
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise SmokeFail(
+            f"{method} {url}: invalid JSON (status {status}, content-type '{content_type or 'unknown'}'): "
+            f"{exc}. Body: {_trim(raw_text)}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise SmokeFail(
+            f"{method} {url}: expected JSON object at top-level, got {type(payload).__name__}. "
+            f"Body: {_trim(raw_text)}"
+        )
+    return payload
 
 
 def _http_json(
@@ -37,18 +93,25 @@ def _http_json(
     query: Optional[Dict[str, str]] = None,
     body: Optional[Dict[str, Any]] = None,
     with_auth: bool = True,
+    bearer_override: Optional[str] = None,
     expected_status: Tuple[int, ...] = (200,),
+    expect_json: bool = True,
 ) -> Tuple[int, Dict[str, Any]]:
     url = cfg.base_url.rstrip("/") + path
     if query:
         url += "?" + urlencode(query)
 
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "mckay-api-smoke/1.0",
+    headers: Dict[str, str] = {
+        "Accept": "application/json" if expect_json else "*/*",
+        "User-Agent": "mckay-api-smoke/1.3",
     }
-    if with_auth and cfg.bearer_token:
-        headers["Authorization"] = f"Bearer {cfg.bearer_token}"
+
+    bearer = cfg.bearer_token
+    if bearer_override is not None:
+        bearer = bearer_override
+
+    if with_auth and bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
 
     data = None
     if body is not None:
@@ -57,26 +120,94 @@ def _http_json(
 
     req = Request(url=url, method=method, headers=headers, data=data)
 
+    if cfg.verbose:
+        print(f"> {method} {url}")
+
     try:
         with urlopen(req, timeout=cfg.timeout_s) as resp:
             status = int(getattr(resp, "status", 200))
-            raw = resp.read().decode("utf-8") if resp else ""
-            payload = json.loads(raw) if raw else {}
+            content_type = _read_headers_content_type(getattr(resp, "headers", None))
+            raw_text = _decode_body(resp.read() if resp else b"")
+
             if status not in expected_status:
-                raise SmokeFail(f"{method} {path}: expected {expected_status}, got {status}: {payload}")
+                if expect_json:
+                    try:
+                        payload = _parse_json_or_raise(
+                            method=method,
+                            url=url,
+                            status=status,
+                            content_type=content_type,
+                            raw_text=raw_text,
+                            strict_json=False,
+                        )
+                    except SmokeFail:
+                        payload = {"raw": _trim(raw_text), "content_type": content_type}
+                else:
+                    payload = {"raw": _trim(raw_text), "content_type": content_type}
+                raise SmokeFail(f"{method} {url}: expected {expected_status}, got {status}: {payload}")
+
+            if not expect_json:
+                return status, {}
+
+            payload = _parse_json_or_raise(
+                method=method,
+                url=url,
+                status=status,
+                content_type=content_type,
+                raw_text=raw_text,
+                strict_json=cfg.strict_json,
+            )
             return status, payload
-    except HTTPError as e:
-        status = int(getattr(e, "code", 0))
-        raw = e.read().decode("utf-8") if e.fp else ""
+
+    except HTTPError as exc:
+        status = int(getattr(exc, "code", 0))
+        raw_text = ""
         try:
-            payload = json.loads(raw) if raw else {}
+            raw_text = _decode_body(exc.read()) if getattr(exc, "fp", None) else ""
         except Exception:
-            payload = {"raw": raw}
+            raw_text = ""
+
+        content_type = ""
+        try:
+            content_type = _read_headers_content_type(getattr(exc, "headers", None))
+        except Exception:
+            content_type = ""
+
         if status in expected_status:
-            return status, payload
-        raise SmokeFail(f"{method} {path}: expected {expected_status}, got {status}: {payload}") from e
-    except URLError as e:
-        raise SmokeFail(f"{method} {path}: connection error: {e}") from e
+            if expect_json:
+                try:
+                    payload = _parse_json_or_raise(
+                        method=method,
+                        url=url,
+                        status=status,
+                        content_type=content_type,
+                        raw_text=raw_text,
+                        strict_json=False,
+                    )
+                    return status, payload
+                except SmokeFail:
+                    return status, {"raw": _trim(raw_text), "content_type": content_type}
+            return status, {"raw": _trim(raw_text), "content_type": content_type}
+
+        if expect_json:
+            try:
+                payload = _parse_json_or_raise(
+                    method=method,
+                    url=url,
+                    status=status,
+                    content_type=content_type,
+                    raw_text=raw_text,
+                    strict_json=False,
+                )
+            except SmokeFail:
+                payload = {"raw": _trim(raw_text), "content_type": content_type}
+        else:
+            payload = {"raw": _trim(raw_text), "content_type": content_type}
+
+        raise SmokeFail(f"{method} {url}: expected {expected_status}, got {status}: {payload}") from exc
+
+    except URLError as exc:
+        raise SmokeFail(f"{method} {url}: connection error: {exc}") from exc
 
 
 def _assert(cond: bool, msg: str) -> None:
@@ -84,29 +215,74 @@ def _assert(cond: bool, msg: str) -> None:
         raise SmokeFail(msg)
 
 
+def _collect_fps(payload: Dict[str, Any]) -> set[str]:
+    return {str(x.get("fingerprint") or "") for x in (payload.get("items") or [])}
+
+
+def _get_findings(cfg: Cfg, *, state: Optional[str], limit: int = 200) -> Dict[str, Any]:
+    q: Dict[str, str] = {"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "limit": str(limit)}
+    if state:
+        q["state"] = state
+    _, payload = _http_json(cfg, "GET", "/api/findings", query=q, with_auth=True, expected_status=(200,))
+    items = payload.get("items") or []
+    _assert(isinstance(items, list), "findings.items not a list")
+    return payload
+
+
+def _wait_until_fp_not_in_state(cfg: Cfg, fp: str, *, state: str, retries: int = 8, sleep_s: float = 0.25) -> None:
+    for _ in range(retries):
+        payload = _get_findings(cfg, state=state, limit=400)
+        if fp not in _collect_fps(payload):
+            return
+        time.sleep(sleep_s)
+    raise SmokeFail(f"fingerprint still present in state={state!r} after lifecycle update")
+
+
+def _wait_until_fp_in_state(cfg: Cfg, fp: str, *, state: str, retries: int = 8, sleep_s: float = 0.25) -> None:
+    for _ in range(retries):
+        payload = _get_findings(cfg, state=state, limit=400)
+        if fp in _collect_fps(payload):
+            return
+        time.sleep(sleep_s)
+    raise SmokeFail(f"fingerprint not found in state={state!r} after lifecycle update")
+
+
 def run_smoke(cfg: Cfg) -> None:
     ok: list[str] = []
 
-    # 1) Public health
-    _http_json(cfg, "GET", "/health", with_auth=False, expected_status=(200,))
+    # 1) Public health endpoints
+    _http_json(cfg, "GET", "/health", with_auth=False, expected_status=(200,), expect_json=True)
     ok.append("GET /health")
 
-    _http_json(cfg, "GET", "/api/health/db", with_auth=False, expected_status=(200,))
+    _http_json(cfg, "GET", "/api/health/db", with_auth=False, expected_status=(200,), expect_json=True)
     ok.append("GET /api/health/db (public)")
 
-    # 2) Auth enforced: /api/* (except /api/health/db) should be 401 when token missing
+    # 2) Auth behavior per flask_app:
+    # - missing "Bearer " -> 401
+    # - bad token -> 403
     _http_json(
         cfg,
         "GET",
         "/api/runs/latest",
         query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace},
         with_auth=False,
-        expected_status=(401, 403),  # 401 missing, 403 wrong (depends)
+        expected_status=(401,),
     )
-    ok.append("Auth enforced (no token -> 401/403)")
+    ok.append("Auth enforced (missing token -> 401)")
+
+    _http_json(
+        cfg,
+        "GET",
+        "/api/runs/latest",
+        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace},
+        with_auth=True,
+        bearer_override="definitely-invalid-token",
+        expected_status=(403,),
+    )
+    ok.append("Auth enforced (bad token -> 403)")
 
     # 3) Auth works with token
-    status, latest = _http_json(
+    _http_json(
         cfg,
         "GET",
         "/api/runs/latest",
@@ -114,52 +290,41 @@ def run_smoke(cfg: Cfg) -> None:
         with_auth=True,
         expected_status=(200,),
     )
-    _assert(status == 200, "runs/latest did not return 200")
     ok.append("GET /api/runs/latest (auth OK)")
 
-    # run_id might be None if no runs yet; tolerate that.
-    run = latest.get("run") or {}
-    run_id = str(run.get("run_id") or "").strip()
-
-    # 4) Findings
-    _, findings = _http_json(
+    # 4) Diff endpoint (does not require findings)
+    _http_json(
         cfg,
         "GET",
-        "/api/findings",
-        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "limit": "5"},
+        "/api/runs/diff/latest",
+        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace},
         with_auth=True,
+        expected_status=(200,),
     )
-    _assert("items" in findings, "findings response missing 'items'")
-    items: list[dict[str, Any]] = findings.get("items") or []
-    _assert(isinstance(items, list), "findings.items not a list")
-    ok.append("GET /api/findings")
+    ok.append("GET /api/runs/diff/latest")
 
-    # Need at least one finding to test lifecycle/group
-    if not items:
-        # still test diff endpoint and exit OK
-        _http_json(
-            cfg,
-            "GET",
-            "/api/runs/diff/latest",
-            query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace},
-            with_auth=True,
-            expected_status=(200,),
-        )
-        ok.append("GET /api/runs/diff/latest (no findings case)")
-        print("OK (no findings to test lifecycle). Checks passed:")
+    # 5) Pick an OPEN finding for lifecycle checks
+    open_payload = _get_findings(cfg, state="open", limit=200)
+    ok.append("GET /api/findings?state=open")
+
+    open_items = open_payload.get("items") or []
+    if not open_items:
+        # If no open findings, we can still pass basic checks (health/auth/runs/diff).
+        print("SMOKE OK ✅ (no open findings to test lifecycle). Checks passed:")
         for x in ok:
             print("  -", x)
         return
 
-    fp = str(items[0].get("fingerprint") or "").strip()
-    _assert(fp, "first finding has no fingerprint")
+    fp = str((open_items[0] or {}).get("fingerprint") or "").strip()
+    _assert(bool(fp), "open finding has no fingerprint")
+    ok.append("Select open finding fingerprint")
 
-    # 5) Groups list + detail (may not exist if group_key is null everywhere)
+    # 6) Groups list + detail (optional)
     _, groups_resp = _http_json(
         cfg,
         "GET",
         "/api/groups",
-        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "limit": "1"},
+        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "limit": "5"},
         with_auth=True,
         expected_status=(200,),
     )
@@ -167,23 +332,24 @@ def run_smoke(cfg: Cfg) -> None:
 
     groups = groups_resp.get("items") or []
     group_key = ""
-    if groups:
-        group_key = str(groups[0].get("group_key") or "").strip()
+    if isinstance(groups, list) and groups:
+        group_key = str((groups[0] or {}).get("group_key") or "").strip()
 
     if group_key:
+        group_key_escaped = quote(group_key, safe="")
         _http_json(
             cfg,
             "GET",
-            f"/api/groups/{group_key}",
+            f"/api/groups/{group_key_escaped}",
             query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "limit": "3"},
             with_auth=True,
             expected_status=(200,),
         )
         ok.append("GET /api/groups/<group_key>")
     else:
-        ok.append("Groups present but no group_key (skipping group detail/lifecycle)")
+        ok.append("No group_key (skipping group detail/lifecycle)")
 
-    # 6) Fingerprint lifecycle ignore
+    # 7) Fingerprint lifecycle ignore
     _http_json(
         cfg,
         "POST",
@@ -200,19 +366,15 @@ def run_smoke(cfg: Cfg) -> None:
     )
     ok.append("POST /api/lifecycle/ignore")
 
-    # Verify it shows under ignored
-    _, ignored = _http_json(
-        cfg,
-        "GET",
-        "/api/findings",
-        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "state": "ignored", "limit": "200"},
-        with_auth=True,
-    )
-    fps = {str(x.get("fingerprint") or "") for x in (ignored.get("items") or [])}
-    _assert(fp in fps, "fingerprint not found in ignored after ignore()")
-    ok.append("Verify fingerprint ignored")
+    # Verify state transition via the API filter semantics (effective_state)
+    _wait_until_fp_not_in_state(cfg, fp, state="open")
+    ok.append("Verify fp removed from state=open after ignore")
 
-    # 7) Fingerprint lifecycle snooze (overwrites per-fp state)
+    # Optional: verify it is visible under ignored (this should work given your filter is on effective_state)
+    _wait_until_fp_in_state(cfg, fp, state="ignored")
+    ok.append("Verify fp present in state=ignored after ignore")
+
+    # 8) Fingerprint lifecycle snooze
     snooze_until = _utc_iso_z(datetime.now(timezone.utc) + timedelta(days=7))
     _http_json(
         cfg,
@@ -231,18 +393,13 @@ def run_smoke(cfg: Cfg) -> None:
     )
     ok.append("POST /api/lifecycle/snooze")
 
-    _, snoozed = _http_json(
-        cfg,
-        "GET",
-        "/api/findings",
-        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "state": "snoozed", "limit": "200"},
-        with_auth=True,
-    )
-    fps = {str(x.get("fingerprint") or "") for x in (snoozed.get("items") or [])}
-    _assert(fp in fps, "fingerprint not found in snoozed after snooze()")
-    ok.append("Verify fingerprint snoozed")
+    _wait_until_fp_not_in_state(cfg, fp, state="open")
+    ok.append("Verify fp removed from state=open after snooze")
 
-    # 8) Group lifecycle (if group_key available)
+    _wait_until_fp_in_state(cfg, fp, state="snoozed")
+    ok.append("Verify fp present in state=snoozed after snooze")
+
+    # 9) Group lifecycle (optional)
     if group_key:
         _http_json(
             cfg,
@@ -293,45 +450,62 @@ def run_smoke(cfg: Cfg) -> None:
         )
         ok.append("POST /api/lifecycle/group/resolve")
 
-    # 9) Run diff (graceful if <2 runs)
-    _http_json(
-        cfg,
-        "GET",
-        "/api/runs/diff/latest",
-        query={"tenant_id": cfg.tenant_id, "workspace": cfg.workspace},
-        with_auth=True,
-        expected_status=(200,),
-    )
-    ok.append("GET /api/runs/diff/latest")
-
     print("SMOKE OK ✅")
     for x in ok:
         print("  -", x)
 
 
-def main() -> int:
-    base_url = (os.getenv("BASE_URL") or "http://127.0.0.1:5000").strip()
-    tenant_id = (os.getenv("TENANT_ID") or "").strip()
-    workspace = (os.getenv("WORKSPACE") or "").strip()
-    bearer = (os.getenv("API_BEARER_TOKEN") or "").strip()
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="McKaySystem API smoke checks")
+    p.add_argument("--base-url", default=os.getenv("BASE_URL") or "http://127.0.0.1:5000")
+    p.add_argument("--tenant-id", default=os.getenv("TENANT_ID") or "")
+    p.add_argument("--workspace", default=os.getenv("WORKSPACE") or "")
+    p.add_argument("--token", default=os.getenv("API_BEARER_TOKEN") or "")
+    p.add_argument("--timeout-s", type=float, default=float(os.getenv("TIMEOUT_S") or "20"))
+    p.add_argument("--no-strict-json", action="store_true", help="Do not enforce Content-Type application/json")
+    p.add_argument("--verbose", action="store_true", help="Print requests as they run")
+    return p.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _parse_args(list(argv or sys.argv[1:]))
+
+    base_url = str(args.base_url).strip()
+    tenant_id = str(args.tenant_id).strip()
+    workspace = str(args.workspace).strip()
+    bearer = str(args.token).strip()
 
     if not tenant_id or not workspace:
-        print("Missing TENANT_ID or WORKSPACE env var.", file=sys.stderr)
-        print("Example:", file=sys.stderr)
+        print("Missing TENANT_ID or WORKSPACE.", file=sys.stderr)
+        print("Examples:", file=sys.stderr)
         print("  export BASE_URL=http://127.0.0.1:5000", file=sys.stderr)
         print("  export TENANT_ID=bugfix", file=sys.stderr)
         print("  export WORKSPACE=noprod", file=sys.stderr)
         print("  export API_BEARER_TOKEN=...", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Or:", file=sys.stderr)
+        print(
+            "  ./api_smoke.py --base-url http://127.0.0.1:5000 --tenant-id bugfix --workspace noprod --token ...",
+            file=sys.stderr,
+        )
         return 2
 
-    cfg = Cfg(base_url=base_url, tenant_id=tenant_id, workspace=workspace, bearer_token=bearer)
+    cfg = Cfg(
+        base_url=base_url,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        bearer_token=bearer,
+        timeout_s=float(args.timeout_s),
+        strict_json=not bool(args.no_strict_json),
+        verbose=bool(args.verbose),
+    )
 
     try:
         run_smoke(cfg)
         return 0
-    except SmokeFail as e:
+    except SmokeFail as exc:
         print("SMOKE FAIL ❌", file=sys.stderr)
-        print(str(e), file=sys.stderr)
+        print(str(exc), file=sys.stderr)
         return 1
 
 
