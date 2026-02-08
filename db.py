@@ -224,13 +224,29 @@ def fetch_jsonb_one(sql: str, params: Optional[Sequence[Any]] = None) -> Any:
 # Dict row helpers
 # ---------------------------
 
+def _cols_from_description(desc: Any) -> list[str]:
+    """Extract column names from cursor.description safely."""
+    if not desc:
+        return []
+    cols: list[str] = []
+    for i, d in enumerate(desc):
+        # psycopg2 description items are sequences; be defensive anyway
+        name = None
+        try:
+            name = d[0]
+        except Exception:
+            name = None
+        cols.append(str(name) if name else f"col_{i}")
+    return cols
+
+
 def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
     """Convert cursor rows into list of dicts using cursor.description."""
-    cols = [d[0] for d in (cursor.description or ())]
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        out.append({cols[i]: r[i] for i in range(len(cols))})
-    return out
+    cols = _cols_from_description(getattr(cursor, "description", None))
+    if not cols:
+        return []
+    # zip truncates to shortest; avoids IndexError if row/cols length mismatch
+    return [dict(zip(cols, r)) for r in rows]
 
 
 def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[dict[str, Any]]:
@@ -240,8 +256,10 @@ def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = N
         row = cur.fetchone()
         if row is None:
             return None
-        cols = [d[0] for d in (cur.description or ())]
-        return {cols[i]: row[i] for i in range(len(cols))}
+        cols = _cols_from_description(getattr(cur, "description", None))
+        if not cols:
+            return None
+        return dict(zip(cols, row))
 
 
 def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:

@@ -319,6 +319,8 @@ def run_smoke(cfg: Cfg) -> None:
     _assert(bool(fp), "open finding has no fingerprint")
     ok.append("Select open finding fingerprint")
 
+    print("SMOKE using fingerprint:", fp)
+
     # 6) Groups list + detail (optional)
     _, groups_resp = _http_json(
         cfg,
