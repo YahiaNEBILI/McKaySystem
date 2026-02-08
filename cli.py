@@ -113,29 +113,6 @@ def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argu
     _run_cmd(cmd, cwd=root, env=env)
 
 
-def cmd_zip(args: argparse.Namespace) -> None:
-    root = _repo_root()
-    webapp_dir = root / (args.webapp_dir or "webapp_data")
-    zip_path = root / (args.zip_path or "webapp_data.zip")
-
-    if not webapp_dir.exists() or not webapp_dir.is_dir():
-        raise SystemExit(f"webapp_data directory not found: {webapp_dir}")
-
-    import zipfile  # local import on purpose
-
-    if zip_path.exists():
-        zip_path.unlink()
-
-    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(webapp_dir.rglob("*")):
-            if p.is_dir():
-                continue
-            arcname = p.relative_to(root)
-            zf.write(p, arcname.as_posix())
-
-    print(f"Wrote {zip_path}")
-
-
 def cmd_ingest(args: argparse.Namespace) -> None:
     root = _repo_root()
     if not _module_exists("ingest_exported_json") and not (root / "ingest_exported_json.py").exists():
@@ -168,9 +145,6 @@ def cmd_run_all(args: argparse.Namespace) -> None:
     if not args.skip_export:
         cmd_export(args)
 
-    if not args.skip_zip:
-        cmd_zip(args)
-
     if args.skip_ingest:
         return
 
@@ -199,11 +173,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory used by runner (or OUT_DIR env var).")
     sp.set_defaults(func=cmd_export)
-
-    sp = sub.add_parser("zip", help="Zip webapp_data/ into webapp_data.zip")
-    sp.add_argument("--webapp-dir", default=None, help="Directory to zip. Default: webapp_data")
-    sp.add_argument("--zip-path", default=None, help="Zip output path. Default: webapp_data.zip")
-    sp.set_defaults(func=cmd_zip)
 
     sp = sub.add_parser("ingest", help="Ingest exported JSON into DB (calls ingest_exported_json).")
     add_tenant_workspace(sp)
