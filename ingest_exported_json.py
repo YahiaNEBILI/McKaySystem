@@ -5,16 +5,11 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 from db import execute, execute_many, fetch_one
 
 
 DEFAULT_EXPORT_DIR = Path("webapp_data/")
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _parse_dt(value: str) -> Optional[datetime]:
@@ -199,8 +194,8 @@ def ingest_latest_export() -> None:
         (tenant_id, workspace, run_id),
     )
 
-    presence_rows: List[Tuple[Any, ...]] = []
-    latest_rows: List[Tuple[Any, ...]] = []
+    presence_rows: List[Sequence[Any]] = []
+    latest_rows: List[Sequence[Any]] = []
 
     for it in items:
         if not isinstance(it, dict):
@@ -251,42 +246,44 @@ def ingest_latest_export() -> None:
             )
         )
 
-    execute_many(
-        """
-        INSERT INTO finding_presence
-          (tenant_id, workspace, run_id, fingerprint, check_id, service, severity, title,
-           estimated_monthly_savings, region, account_id, detected_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """,
-        presence_rows,
-    )
+    if presence_rows:
+        execute_many(
+            """
+            INSERT INTO finding_presence
+            (tenant_id, workspace, run_id, fingerprint, check_id, service, severity, title,
+            estimated_monthly_savings, region, account_id, detected_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            presence_rows,
+        )
 
     # Upsert full payload into finding_latest (one row per fingerprint for latest snapshot)
     # NOTE: This expects a table:
     #   finding_latest(tenant_id, workspace, fingerprint PRIMARY KEY, ..., payload JSONB, detected_at, run_id, ...)
-    execute_many(
-        """
-        INSERT INTO finding_latest
-          (tenant_id, workspace, fingerprint, run_id,
-           check_id, service, severity, title,
-           estimated_monthly_savings, region, account_id,
-           payload, detected_at)
-        VALUES
-          (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
-        ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
-          run_id = EXCLUDED.run_id,
-          check_id = EXCLUDED.check_id,
-          service = EXCLUDED.service,
-          severity = EXCLUDED.severity,
-          title = EXCLUDED.title,
-          estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
-          region = EXCLUDED.region,
-          account_id = EXCLUDED.account_id,
-          payload = EXCLUDED.payload,
-          detected_at = EXCLUDED.detected_at
-        """,
-        latest_rows,
-    )
+    if latest_rows:
+        execute_many(
+            """
+            INSERT INTO finding_latest
+            (tenant_id, workspace, fingerprint, run_id,
+            check_id, service, severity, title,
+            estimated_monthly_savings, region, account_id,
+            payload, detected_at)
+            VALUES
+            (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+            ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
+            run_id = EXCLUDED.run_id,
+            check_id = EXCLUDED.check_id,
+            service = EXCLUDED.service,
+            severity = EXCLUDED.severity,
+            title = EXCLUDED.title,
+            estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
+            region = EXCLUDED.region,
+            account_id = EXCLUDED.account_id,
+            payload = EXCLUDED.payload,
+            detected_at = EXCLUDED.detected_at
+            """,
+            latest_rows,
+        )
 
     execute(
         "UPDATE runs SET status='ready', ingested_at=NOW() WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
