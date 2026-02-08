@@ -16,10 +16,6 @@ from pipeline.run_manifest import load_manifest, manifest_path
 DEFAULT_EXPORT_DIR = Path("webapp_data/")
 
 
-# ---------------------------
-# Parsing helpers (existing)
-# ---------------------------
-
 def _parse_dt(value: str) -> Optional[datetime]:
     v = (value or "").strip()
     if not v:
@@ -39,11 +35,8 @@ def _norm(s: Any) -> str:
     return str(s).strip()
 
 
-def _lower(s: Any) -> str:
-    return _norm(s).lower()
-
-
 def _to_float(v: Any) -> Optional[float]:
+    """Best-effort numeric parsing for savings/cost fields."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -68,12 +61,20 @@ def _to_float(v: Any) -> Optional[float]:
 
 
 def _pick_latest_json(export_dir: Path) -> Path:
+    """Pick the most relevant export JSON file.
+
+    Preference order:
+    - findings_full.json (unbounded, if you generate it)
+    - findings.json (bounded UI list)
+    - results.json / export.json (legacy)
+    - newest .json by mtime
+    """
     if not export_dir.exists():
         raise FileNotFoundError(f"export dir not found: {export_dir}")
     candidates = sorted(export_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not candidates:
         raise FileNotFoundError(f"no .json files in {export_dir}")
-    for name in ("findings_full.json", "results.json", "export.json", "findings.json"):
+    for name in ("findings_full.json", "findings.json", "results.json", "export.json"):
         for p in candidates:
             if p.name == name:
                 return p
@@ -132,7 +133,7 @@ def _fingerprint(item: Dict[str, Any]) -> str:
 
 
 # ---------------------------
-# NEW: taxonomy + grouping
+# Taxonomy + grouping helpers
 # ---------------------------
 
 _CATEGORY_BY_PREFIX: list[tuple[str, str]] = [
@@ -149,9 +150,9 @@ _CATEGORY_BY_PREFIX: list[tuple[str, str]] = [
 ]
 
 
-def _derive_category(check_id: Optional[str]) -> Optional[str]:
+def _derive_category(check_id: Optional[str]) -> str:
     if not check_id:
-        return None
+        return "other"
     for prefix, cat in _CATEGORY_BY_PREFIX:
         if check_id.startswith(prefix):
             return cat
@@ -159,10 +160,10 @@ def _derive_category(check_id: Optional[str]) -> Optional[str]:
 
 
 _ID_PATTERNS = [
-    r"\barn:[^\s]+",         # ARNs
-    r"\bi-[0-9a-f]{8,}\b",    # EC2 instance ids
-    r"\bvol-[0-9a-f]{8,}\b",  # EBS volume ids
-    r"\bsg-[0-9a-f]{8,}\b",   # SG ids
+    r"\barn:[^\s]+",
+    r"\bi-[0-9a-f]{8,}\b",
+    r"\bvol-[0-9a-f]{8,}\b",
+    r"\bsg-[0-9a-f]{8,}\b",
     r"\bsubnet-[0-9a-f]{8,}\b",
     r"\bvpc-[0-9a-f]{8,}\b",
     r"\b[a-z0-9-]{1,63}\.amazonaws\.com\b",
@@ -180,10 +181,8 @@ def _normalize_title(title: Optional[str]) -> str:
     return t.strip()
 
 
-def _derive_group_key(check_id: Optional[str], title: Optional[str], category: Optional[str]) -> Optional[str]:
-    # Prefer stability: same check + same normalized title (+ category as extra signal)
-    base = f"{(check_id or '').strip()}|{(category or '').strip()}|{_normalize_title(title)}"
-    base = base.strip("|")
+def _derive_group_key(check_id: Optional[str], category: str, title: Optional[str]) -> Optional[str]:
+    base = f"{(check_id or '').strip()}|{category}|{_normalize_title(title)}".strip("|")
     if not base:
         return None
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
@@ -194,17 +193,22 @@ def _guess_fields(
 ) -> Tuple[
     Optional[str], Optional[str], Optional[str], Optional[str],
     Optional[float], Optional[str], Optional[str],
-    Optional[str], Optional[str],
+    str, Optional[str],
 ]:
     check_id = _norm(item.get("check_id") or item.get("checkId") or "") or None
     service = _norm(item.get("service") or item.get("provider_service") or "") or None
     severity = _norm(item.get("severity") or item.get("severity_level") or "") or None
     title = _norm(item.get("title") or item.get("message") or item.get("summary") or "") or None
 
-    # Category: prefer JSON if present (exporter includes it). :contentReference[oaicite:4]{index=4}
-    category = _norm(item.get("category") or item.get("finding_category") or "") or None
+    # Prefer category coming from export JSON if present.
+    category = _norm(item.get("category") or item.get("finding_category") or "") or ""
     if not category:
         category = _derive_category(check_id)
+
+    # Prefer group_key coming from export JSON if present.
+    group_key = _norm(item.get("group_key") or item.get("groupKey") or "") or None
+    if not group_key:
+        group_key = _derive_group_key(check_id, category, title)
 
     savings = item.get("estimated_monthly_savings")
     if savings is None:
@@ -226,10 +230,6 @@ def _guess_fields(
     region = _norm(item.get("region") or item.get("aws_region") or "") or None
     account_id = _norm(item.get("account_id") or item.get("aws_account_id") or item.get("account") or "") or None
 
-    group_key = _norm(item.get("group_key") or item.get("groupKey") or "") or None
-    if not group_key:
-        group_key = _derive_group_key(check_id, title, category)
-
     return check_id, service, severity, title, savings_f, region, account_id, category, group_key
 
 
@@ -245,6 +245,7 @@ def ingest_latest_export() -> None:
         except Exception as exc:
             raise SystemExit(f"Invalid run manifest in export_dir: {mpath} ({exc})") from exc
 
+        # Fail fast on mismatch: prevents ingesting with the wrong tenant/workspace.
         env_tenant = (os.getenv("TENANT_ID") or "").strip()
         env_ws = (os.getenv("WORKSPACE") or "").strip()
         if env_tenant and not hmac.compare_digest(env_tenant, m.tenant_id):
@@ -290,6 +291,7 @@ def ingest_latest_export() -> None:
 
     items = _extract_items(payload)
 
+    # Re-ingesting a run should be idempotent for finding_presence
     execute(
         "DELETE FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
         (tenant_id, workspace, run_id),
@@ -308,6 +310,7 @@ def ingest_latest_export() -> None:
 
         check_id, service, severity, title, savings_f, region, account_id, category, group_key = _guess_fields(it)
 
+        # 1) presence rows (run membership + fast KPI aggregation)
         presence_rows.append(
             (
                 tenant_id,
@@ -325,6 +328,7 @@ def ingest_latest_export() -> None:
             )
         )
 
+        # 2) latest snapshot rows (full payload for UI/detail drilldowns)
         payload_json = json.dumps(it, ensure_ascii=False, separators=(",", ":"))
         latest_rows.append(
             (
@@ -357,6 +361,7 @@ def ingest_latest_export() -> None:
             presence_rows,
         )
 
+    # Upsert full payload into finding_latest (one row per fingerprint for latest snapshot)
     if latest_rows:
         execute_many(
             """

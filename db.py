@@ -1,28 +1,31 @@
 from __future__ import annotations
 
-"""db.py
+"""
+db.py
 
-Tiny PostgreSQL helper module (psycopg2) with a process-global connection pool.
+Tiny DB helper module for PostgreSQL (psycopg2) with connection pooling.
 
-Design goals
-------------
-- Fast in hosted runtimes (e.g. PythonAnywhere + remote Postgres like Neon): reuse
-  pooled connections instead of reconnecting per request.
-- Simple primitives with explicit transaction control.
-- Provide both tuple-based helpers and dict-row helpers (RealDictCursor).
+Why pooling matters
+-------------------
+Opening a new connection per query is extremely slow with remote Postgres
+(e.g. Neon) + hosted app runtimes (e.g. PythonAnywhere). We use a process-global
+SimpleConnectionPool and provide small helpers for common patterns.
 
-Environment
------------
-- DB_URL (required)
-- DB_POOL_MAXCONN (default 10)
-- DB_CONNECT_TIMEOUT (default 5 seconds)
+Additional helpers
+------------------
+This module also provides *_conn variants (e.g. fetch_all_conn) so request
+handlers can reuse a single connection for many queries (reducing round-trips
+and pool checkout overhead).
+
+JSON helpers are included because the app stores/reads JSONB blobs (e.g.
+dashboard_cache payload).
 """
 
 import atexit
 import json
 import os
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional, Sequence, Tuple, List, Dict
+from typing import Any, Iterator, Optional, Sequence, Tuple
 
 
 def _db_url() -> str:
@@ -32,6 +35,7 @@ def _db_url() -> str:
     return url
 
 
+# Keep a single global pool per process.
 _POOL = None
 _POOL_DSN: Optional[str] = None
 
@@ -64,7 +68,6 @@ def _close_pool() -> None:
         if _POOL is not None:
             _POOL.closeall()
     except Exception:
-        # best-effort cleanup
         pass
     finally:
         _POOL = None
@@ -77,7 +80,9 @@ atexit.register(_close_pool)
 def db_conn() -> Iterator[Any]:
     """Yield a pooled psycopg2 connection.
 
-    Callers should NOT close the connection; it is returned to the pool.
+    IMPORTANT:
+    - Reuses connections (pool) instead of reconnecting on every query.
+    - Callers should NOT close the connection; it is returned to the pool.
     """
     pool = _get_pool()
     conn = pool.getconn()
@@ -104,11 +109,11 @@ def fetch_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) 
         return cur.fetchone()
 
 
-def fetch_all_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> List[Tuple[Any, ...]]:
+def fetch_all_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[Tuple[Any, ...]]:
     """Execute a query on an existing connection and return all rows."""
     with conn.cursor() as cur:
         cur.execute(sql, params or ())
-        return list(cur.fetchall())
+        return cur.fetchall()
 
 
 def execute_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> None:
@@ -117,27 +122,12 @@ def execute_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) ->
         cur.execute(sql, params or ())
 
 
-# ---------------------------
-# Dict-row helpers
-# ---------------------------
-
-def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> List[Dict[str, Any]]:
-    """Execute a query and return rows as dicts (RealDictCursor)."""
-    from psycopg2.extras import RealDictCursor  # type: ignore
-
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, params or ())
-        return [dict(r) for r in cur.fetchall()]
-
-
-def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Dict[str, Any]]:
-    """Execute a query and return a single row as dict (or None)."""
-    from psycopg2.extras import RealDictCursor  # type: ignore
-
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, params or ())
-        row = cur.fetchone()
-        return dict(row) if row else None
+def execute_many_conn(conn: Any, sql: str, seq_of_params: list[Sequence[Any]]) -> None:
+    """Execute a statement against many parameter sets on an existing connection."""
+    if not seq_of_params:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(sql, seq_of_params)
 
 
 # ---------------------------
@@ -145,6 +135,7 @@ def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = N
 # ---------------------------
 
 def fetch_one(sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tuple[Any, ...]]:
+    """Execute a query and return one row (or None)."""
     with db_conn() as conn:
         try:
             return fetch_one_conn(conn, sql, params)
@@ -156,7 +147,8 @@ def fetch_one(sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tupl
             raise
 
 
-def fetch_all(sql: str, params: Optional[Sequence[Any]] = None) -> List[Tuple[Any, ...]]:
+def fetch_all(sql: str, params: Optional[Sequence[Any]] = None) -> list[Tuple[Any, ...]]:
+    """Execute a query and return all rows."""
     with db_conn() as conn:
         try:
             return fetch_all_conn(conn, sql, params)
@@ -168,31 +160,8 @@ def fetch_all(sql: str, params: Optional[Sequence[Any]] = None) -> List[Tuple[An
             raise
 
 
-def fetch_one_dict(sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Dict[str, Any]]:
-    with db_conn() as conn:
-        try:
-            return fetch_one_dict_conn(conn, sql, params)
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise
-
-
-def fetch_all_dict(sql: str, params: Optional[Sequence[Any]] = None) -> List[Dict[str, Any]]:
-    with db_conn() as conn:
-        try:
-            return fetch_all_dict_conn(conn, sql, params)
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise
-
-
 def execute(sql: str, params: Optional[Sequence[Any]] = None) -> None:
+    """Execute a statement (no returned rows) and commit."""
     with db_conn() as conn:
         try:
             execute_conn(conn, sql, params)
@@ -205,13 +174,13 @@ def execute(sql: str, params: Optional[Sequence[Any]] = None) -> None:
             raise
 
 
-def execute_many(sql: str, seq_of_params: List[Sequence[Any]]) -> None:
+def execute_many(sql: str, seq_of_params: list[Sequence[Any]]) -> None:
+    """Execute a statement against many parameter sets and commit."""
     if not seq_of_params:
         return
     with db_conn() as conn:
         try:
-            with conn.cursor() as cur:
-                cur.executemany(sql, seq_of_params)
+            execute_many_conn(conn, sql, seq_of_params)
             conn.commit()
         except Exception:
             try:
@@ -228,3 +197,56 @@ def execute_many(sql: str, seq_of_params: List[Sequence[Any]]) -> None:
 def to_jsonb(value: Any) -> str:
     """Serialize a Python object to a JSON string suitable for ::jsonb."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def fetch_jsonb_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Any:
+    """Fetch a single JSON/JSONB column value from an existing connection."""
+    row = fetch_one_conn(conn, sql, params)
+    if not row:
+        return None
+    return row[0]
+
+
+def fetch_jsonb_one(sql: str, params: Optional[Sequence[Any]] = None) -> Any:
+    """Fetch a single JSON/JSONB column value using a pooled connection."""
+    with db_conn() as conn:
+        try:
+            return fetch_jsonb_one_conn(conn, sql, params)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
+
+# ---------------------------
+# Dict row helpers
+# ---------------------------
+
+def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    """Convert cursor rows into list of dicts using cursor.description."""
+    cols = [d[0] for d in (cursor.description or ())]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append({cols[i]: r[i] for i in range(len(cols))})
+    return out
+
+
+def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[dict[str, Any]]:
+    """Execute a query and return one row as a dict (or None)."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in (cur.description or ())]
+        return {cols[i]: row[i] for i in range(len(cols))}
+
+
+def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+    """Execute a query and return all rows as dicts."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        rows = cur.fetchall()
+        return _rows_to_dicts(cur, rows)
