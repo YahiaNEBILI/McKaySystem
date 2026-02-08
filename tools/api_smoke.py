@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -86,7 +85,7 @@ def _assert(cond: bool, msg: str) -> None:
 
 
 def run_smoke(cfg: Cfg) -> None:
-    ok = []
+    ok: list[str] = []
 
     # 1) Public health
     _http_json(cfg, "GET", "/health", with_auth=False, expected_status=(200,))
@@ -131,7 +130,7 @@ def run_smoke(cfg: Cfg) -> None:
         with_auth=True,
     )
     _assert("items" in findings, "findings response missing 'items'")
-    items = findings.get("items") or []
+    items: list[dict[str, Any]] = findings.get("items") or []
     _assert(isinstance(items, list), "findings.items not a list")
     ok.append("GET /api/findings")
 
