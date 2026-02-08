@@ -215,8 +215,18 @@ def _assert(cond: bool, msg: str) -> None:
         raise SmokeFail(msg)
 
 
-def _collect_fps(payload: Dict[str, Any]) -> set[str]:
-    return {str(x.get("fingerprint") or "") for x in (payload.get("items") or [])}
+def _collect_fps(payload: Dict[str, Any], *, only_effective_state: Optional[str] = None) -> set[str]:
+    out: set[str] = set()
+    for x in (payload.get("items") or []):
+        fp = str((x or {}).get("fingerprint") or "").strip()
+        if not fp:
+            continue
+        if only_effective_state is not None:
+            st = str((x or {}).get("effective_state") or "").strip().lower()
+            if st != only_effective_state.strip().lower():
+                continue
+        out.add(fp)
+    return out
 
 
 def _get_findings(cfg: Cfg, *, state: Optional[str], limit: int = 200) -> Dict[str, Any]:
@@ -232,7 +242,7 @@ def _get_findings(cfg: Cfg, *, state: Optional[str], limit: int = 200) -> Dict[s
 def _wait_until_fp_not_in_state(cfg: Cfg, fp: str, *, state: str, retries: int = 8, sleep_s: float = 0.25) -> None:
     for _ in range(retries):
         payload = _get_findings(cfg, state=state, limit=400)
-        if fp not in _collect_fps(payload):
+        if fp not in _collect_fps(payload, only_effective_state=state):
             return
         time.sleep(sleep_s)
     raise SmokeFail(f"fingerprint still present in state={state!r} after lifecycle update")
@@ -241,7 +251,7 @@ def _wait_until_fp_not_in_state(cfg: Cfg, fp: str, *, state: str, retries: int =
 def _wait_until_fp_in_state(cfg: Cfg, fp: str, *, state: str, retries: int = 8, sleep_s: float = 0.25) -> None:
     for _ in range(retries):
         payload = _get_findings(cfg, state=state, limit=400)
-        if fp in _collect_fps(payload):
+        if fp in _collect_fps(payload, only_effective_state=state):
             return
         time.sleep(sleep_s)
     raise SmokeFail(f"fingerprint not found in state={state!r} after lifecycle update")
