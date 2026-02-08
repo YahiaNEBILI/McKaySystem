@@ -96,6 +96,35 @@ class FinOpsJsonExporter:
 
         print(f"[export_json] matched parquet files: {len(self._files)}")
 
+        # Fail fast if the tenant doesn't exist in the dataset (avoids silently
+        # producing empty JSON artifacts).
+        self._preflight_tenant()
+
+    def _preflight_tenant(self) -> None:
+        sql = """
+        WITH all_rows AS (
+            SELECT tenant_id FROM read_parquet(?, union_by_name=true)
+        )
+        SELECT tenant_id, count(*) AS n
+        FROM all_rows
+        GROUP BY 1
+        ORDER BY 2 DESC;
+        """
+        cur = self.con.execute(sql, [self._files])
+        rows = cur.fetchall() or []
+        tenants = {str(r[0]): int(r[1] or 0) for r in rows if r and r[0] is not None}
+
+        if not tenants:
+            # Unlikely, but be explicit.
+            raise ValueError("No rows found in parquet datasets.")
+
+        if self.cfg.tenant_id not in tenants:
+            preview = ", ".join([f"{k}({v})" for k, v in list(tenants.items())[:6]])
+            raise ValueError(
+                "Export tenant_id does not exist in parquet datasets. "
+                f"requested={self.cfg.tenant_id!r}, available={preview or 'none'}"
+            )
+
     def close(self) -> None:
         self.con.close()
 
