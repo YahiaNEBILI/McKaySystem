@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 from db import execute, execute_many, fetch_one
 
+from pipeline.run_manifest import load_manifest, manifest_path
+
 
 DEFAULT_EXPORT_DIR = Path("webapp_data/")
 
@@ -157,10 +159,35 @@ def _guess_fields(
 
 def ingest_latest_export() -> None:
     export_dir = Path(os.getenv("EXPORT_DIR", str(DEFAULT_EXPORT_DIR)))
+
+    # If export produced a manifest, use it as the single source of truth.
+    m = None
+    mpath = manifest_path(export_dir)
+    if mpath.exists():
+        try:
+            m = load_manifest(mpath)
+        except Exception as exc:
+            raise SystemExit(f"Invalid run manifest in export_dir: {mpath} ({exc})") from exc
+
+        # Fail fast on mismatch: prevents ingesting with the wrong tenant/workspace.
+        env_tenant = (os.getenv("TENANT_ID") or "").strip()
+        env_ws = (os.getenv("WORKSPACE") or "").strip()
+        if env_tenant and env_tenant != m.tenant_id:
+            raise SystemExit(f"TENANT_ID mismatch: env={env_tenant!r} manifest={m.tenant_id!r}")
+        if env_ws and env_ws != m.workspace:
+            raise SystemExit(f"WORKSPACE mismatch: env={env_ws!r} manifest={m.workspace!r}")
+
     file_path = _pick_latest_json(export_dir)
     payload = _load_json(file_path)
 
-    tenant_id, workspace, run_id, run_ts, engine_version = _extract_run_meta(payload, file_path)
+    if m:
+        tenant_id = m.tenant_id
+        workspace = m.workspace
+        run_id = m.run_id
+        run_ts = _parse_dt(m.run_ts) or datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+        engine_version = m.engine_version
+    else:
+        tenant_id, workspace, run_id, run_ts, engine_version = _extract_run_meta(payload, file_path)
 
     existing = fetch_one(
         "SELECT status FROM runs WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
