@@ -58,6 +58,7 @@ from contracts.services import ServicesFactory, Services
 from infra.aws_config import SDK_CONFIG
 from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
+from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
@@ -582,6 +583,30 @@ def main(argv: Sequence[str]) -> int:
     # --- Error counts ---
     logger.info("validation_errors_count: %s", len(total_invalid_errors))
     logger.info("cast_errors_count: %s", len(stats.cast_errors or []))
+
+    # --- Persist run manifest (single source of truth across steps) ---
+    # Downstream steps (export/ingest) should NOT rely on hidden defaults for
+    # tenant/workspace or dataset paths.
+    try:
+        manifest = RunManifest(
+            tenant_id=args.tenant,
+            workspace=args.workspace,
+            run_id=run_id,
+            run_ts=run_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            engine_name=ENGINE_NAME,
+            engine_version=ENGINE_VERSION,
+            rulepack_version=RULEPACK_VERSION,
+            schema_version=SCHEMA_VERSION,
+            out_raw=str(raw_out_dir),
+            out_correlated=str(corr_out_dir),
+            out_enriched=str(enriched_out_dir),
+            export_dir=str(paths.export_dir()),
+        )
+        mp = write_manifest(raw_out_dir, manifest)
+        logger.info("run_manifest: %s", mp)
+    except Exception as exc:  # pragma: no cover
+        # Never fail the run for a manifest write, but make it loud.
+        logger.warning("failed to write run manifest: %s", exc)
 
     # Non-zero exit code if nothing was written but we did receive records
     if stats.written == 0 and stats.received > 0:

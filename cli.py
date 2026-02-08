@@ -88,19 +88,29 @@ def cmd_run(args: argparse.Namespace) -> None:
     _run_cmd(cmd, cwd=root)
 
 
-def cmd_export(args: argparse.Namespace) -> None:
+def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argument
     root = _repo_root()
     if not _module_exists("export_findings") and not (root / "export_findings.py").exists():
         raise SystemExit(
             "export_findings module not found. Run from the project directory or ensure export_findings.py is installed."
         )
-
     tenant = args.tenant or _env_default("TENANT_ID")
+    workspace = args.workspace or _env_default("WORKSPACE")
+    out_dir = args.out or _env_default("OUT_DIR", "data/finops_findings")
+
     if not tenant:
-        raise SystemExit("Missing --tenant for export (or TENANT_ID env var)")
+        raise SystemExit("Missing --tenant for export (or TENANT_ID env var).")
+    if not workspace:
+        raise SystemExit("Missing --workspace for export (or WORKSPACE env var).")
+
+    # Ensure downstream script sees the same run identity.
     env = dict(os.environ)
     env["TENANT_ID"] = tenant
-    _run_cmd([_python(), "-m", "export_findings", "--tenant-id", tenant], cwd=root, env=env)
+    env["WORKSPACE"] = workspace
+
+    manifest_path = str((Path(out_dir) / "run_manifest.json").resolve())
+    cmd = [_python(), "-m", "export_findings", "--tenant-id", tenant, "--manifest", manifest_path]
+    _run_cmd(cmd, cwd=root, env=env)
 
 
 def cmd_zip(args: argparse.Namespace) -> None:
@@ -186,6 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("export", help="Export findings to webapp_data/ (calls export_findings).")
+    add_tenant_workspace(sp)
+    sp.add_argument("--out", default=None, help="Output directory used by runner (or OUT_DIR env var).")
     sp.set_defaults(func=cmd_export)
 
     sp = sub.add_parser("zip", help="Zip webapp_data/ into webapp_data.zip")
