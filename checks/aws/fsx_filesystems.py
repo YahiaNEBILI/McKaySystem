@@ -546,6 +546,41 @@ class FSxFileSystemsChecker(Checker):
             return []
         return file_systems
 
+    def _pricing_baseline_for_file_system(
+        self,
+        *,
+        ctx: RunContext,
+        region: str,
+        fs_type: str,
+        storage_type: str,
+        storage_gib: Optional[int],
+        throughput_cfg: Optional[int],
+    ) -> tuple[float, float, str, int]:
+        storage_price, storage_notes, storage_conf = _resolve_fsx_storage_price_usd_per_gb_month(
+            ctx,
+            region=region,
+            fs_type=fs_type,
+            storage_type=storage_type or "SSD",
+        )
+        throughput_price, throughput_notes, throughput_conf = _resolve_fsx_throughput_price_usd_per_mbps_month(
+            ctx,
+            region=region,
+            fs_type=fs_type,
+        )
+
+        storage_cost = 0.0
+        if storage_gib is not None and storage_gib > 0:
+            storage_cost = float(storage_gib) * float(storage_price)
+
+        throughput_cost = 0.0
+        if throughput_cfg is not None and throughput_cfg > 0:
+            throughput_cost = float(throughput_cfg) * float(throughput_price)
+
+        baseline_monthly_cost = money(storage_cost + throughput_cost)
+        pricing_notes = "; ".join([n for n in (storage_notes, throughput_notes) if n]).strip()
+        pricing_conf = int(min(storage_conf, throughput_conf))
+        return baseline_monthly_cost, throughput_cost, pricing_notes, pricing_conf
+
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         if ctx.services is None or getattr(ctx.services, "fsx", None) is None:
             return
@@ -591,33 +626,14 @@ class FSxFileSystemsChecker(Checker):
                 # FSx APIs differ; keep default as SSD for safety
                 storage_type = "SSD"
 
-            storage_price, storage_notes, storage_conf = _resolve_fsx_storage_price_usd_per_gb_month(
-                ctx,
+            baseline_monthly_cost, throughput_cost, pricing_notes, pricing_conf = self._pricing_baseline_for_file_system(
+                ctx=ctx,
                 region=region,
                 fs_type=fs_type,
-                storage_type=storage_type or "SSD",
+                storage_type=storage_type,
+                storage_gib=storage_gib,
+                throughput_cfg=throughput_cfg,
             )
-
-            throughput_price, throughput_notes, throughput_conf = _resolve_fsx_throughput_price_usd_per_mbps_month(
-                ctx,
-                region=region,
-                fs_type=fs_type,
-            )
-
-            storage_cost = 0.0
-            if storage_gib is not None and storage_gib > 0:
-                storage_cost = float(storage_gib) * float(storage_price)
-
-            throughput_cost = 0.0
-            if throughput_cfg is not None and throughput_cfg > 0:
-                throughput_cost = float(throughput_cfg) * float(throughput_price)
-
-            baseline_monthly_cost = money(storage_cost + throughput_cost)
-
-            pricing_notes = "; ".join(
-                [n for n in (storage_notes, throughput_notes) if n]
-            ).strip()
-            pricing_conf = int(min(storage_conf, throughput_conf))
 
 
             base_scope = build_scope(

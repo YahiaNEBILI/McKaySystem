@@ -63,8 +63,9 @@ from checks.aws._common import (
     pricing_service,
     safe_region_from_client,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import BACKUP_VAULTS_COLD_FALLBACK_USD, BACKUP_VAULTS_WARM_FALLBACK_USD
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
 
 
 # Actions that are generally high-impact if granted broadly.
@@ -272,7 +273,7 @@ class AwsBackupVaultsAuditChecker:
         self._expected_lock_max_days = expected_lock_max_days
         self._allowed_cross_account_ids = allowed_cross_account_ids or set()
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupVaultsAuditChecker requires ctx.services.backup")
 
@@ -839,8 +840,8 @@ class AwsBackupVaultsAuditChecker:
         *,
         region: str,
         vault_name: str,
-        warm_fallback_usd: float = 0.05,
-        cold_fallback_usd: float = 0.01,
+        warm_fallback_usd: float = BACKUP_VAULTS_WARM_FALLBACK_USD,
+        cold_fallback_usd: float = BACKUP_VAULTS_COLD_FALLBACK_USD,
     ) -> tuple[Optional[float], str, int]:
         """Estimate monthly storage cost for recovery points currently in a vault.
 
@@ -951,7 +952,7 @@ class AwsBackupVaultsAuditChecker:
 
 
 @register_checker("checks.aws.backup_vaults_audit:AwsBackupVaultsAuditChecker")
-def _factory(ctx, bootstrap):
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> AwsBackupVaultsAuditChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:
         raise RuntimeError("aws_account_id missing from bootstrap (required for AwsBackupVaultsAuditChecker)")

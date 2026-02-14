@@ -60,7 +60,7 @@ from checks.aws.defaults import (
     EC2_UNDERUTILIZED_LOOKBACK_DAYS,
     EC2_UNDERUTILIZED_NET_AVG_KIB_PER_HOUR_THRESHOLD,
 )
-from checks.registry import register_checker
+from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
 
 
@@ -1092,7 +1092,7 @@ class EC2InstancesChecker:
 
 
 @register_checker("checks.aws.ec2_instances:EC2InstancesChecker")
-def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> EC2InstancesChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> EC2InstancesChecker:
     """Instantiate this checker from runtime bootstrap data."""
 
     account_id = str(bootstrap.get("aws_account_id") or "")

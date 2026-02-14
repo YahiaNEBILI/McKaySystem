@@ -27,6 +27,17 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 import checks.aws._common as common
 from checks.aws._common import AwsAccountContext, build_scope
+from checks.aws.defaults import (
+    CLOUDWATCH_ALARMS_COUNT_WARN_THRESHOLD,
+    CLOUDWATCH_FALLBACK_USD_PER_ALARM_MONTH,
+    CLOUDWATCH_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH,
+    CLOUDWATCH_MAX_CUSTOM_METRIC_FINDINGS,
+    CLOUDWATCH_MIN_CUSTOM_METRICS_FOR_SIGNAL,
+    CLOUDWATCH_REQUIRE_RETENTION_POLICY,
+    CLOUDWATCH_SUPPRESS_TAG_KEYS,
+    CLOUDWATCH_SUPPRESS_TAG_VALUES,
+    CLOUDWATCH_SUPPRESS_VALUE_PREFIXES,
+)
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
 
@@ -41,39 +52,17 @@ class CloudWatchMetricsLogsCostConfig:
     """Configuration for CloudWatch Metrics & Logs cost checker."""
 
     # Log groups
-    require_retention_policy: bool = True
-    suppress_tag_keys: Tuple[str, ...] = (
-        "retain",
-        "retention",
-        "keep",
-        "do_not_delete",
-        "donotdelete",
-        "lifecycle",
-    )
-    suppress_tag_values: Tuple[str, ...] = (
-        "retain",
-        "retained",
-        "keep",
-        "true",
-        "yes",
-        "1",
-        "permanent",
-        "legal-hold",
-    )
-    suppress_value_prefixes: Tuple[str, ...] = (
-        "keep",
-        "retain",
-        "do-not-delete",
-        "do_not_delete",
-        "donotdelete",
-    )
+    require_retention_policy: bool = CLOUDWATCH_REQUIRE_RETENTION_POLICY
+    suppress_tag_keys: Tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_KEYS
+    suppress_tag_values: Tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_VALUES
+    suppress_value_prefixes: Tuple[str, ...] = CLOUDWATCH_SUPPRESS_VALUE_PREFIXES
 
     # Custom metrics
-    min_custom_metrics_for_signal: int = 1
-    max_custom_metric_findings: int = 50_000
+    min_custom_metrics_for_signal: int = CLOUDWATCH_MIN_CUSTOM_METRICS_FOR_SIGNAL
+    max_custom_metric_findings: int = CLOUDWATCH_MAX_CUSTOM_METRIC_FINDINGS
 
     # Alarms
-    alarms_count_warn_threshold: int = 100
+    alarms_count_warn_threshold: int = CLOUDWATCH_ALARMS_COUNT_WARN_THRESHOLD
 
 
 # -----------------------------
@@ -81,8 +70,8 @@ class CloudWatchMetricsLogsCostConfig:
 # -----------------------------
 
 
-_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH: float = 0.30
-_FALLBACK_USD_PER_ALARM_MONTH: float = 0.10
+_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH: float = CLOUDWATCH_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH
+_FALLBACK_USD_PER_ALARM_MONTH: float = CLOUDWATCH_FALLBACK_USD_PER_ALARM_MONTH
 
 
 def _pricing_service(ctx: RunContext) -> Any:
@@ -651,7 +640,7 @@ SPEC = "checks.aws.cloudwatch_metrics_logs_cost:CloudWatchMetricsLogsCostChecker
 
 
 @register_checker(SPEC)
-def _factory(ctx: Any, bootstrap: Bootstrap) -> CloudWatchMetricsLogsCostChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> CloudWatchMetricsLogsCostChecker:
     account_id = _safe_str(bootstrap.get("aws_account_id")).strip()
     billing_id = _safe_str(bootstrap.get("aws_billing_account_id")).strip() or account_id
     if not account_id:

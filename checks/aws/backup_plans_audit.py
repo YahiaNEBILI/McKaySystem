@@ -59,8 +59,14 @@ from checks.aws._common import (
     safe_region_from_client,
     utc,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import (
+    BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD,
+    BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS,
+    BACKUP_PLANS_STALE_DAYS,
+    BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD,
+)
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
 
 # Best-effort suppression keys/values (recovery point list responses may not always include tags).
 _SUPPRESS_KEYS = {
@@ -134,10 +140,10 @@ class AwsBackupPlansAuditChecker:
         self,
         *,
         account: AwsAccountContext,
-        stale_days: int = 90,
-        warm_gb_month_price_usd: float = 0.05,
-        cold_gb_month_price_usd: float = 0.01,
-        skip_if_deleting_within_days: int = 14,
+        stale_days: int = BACKUP_PLANS_STALE_DAYS,
+        warm_gb_month_price_usd: float = BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD,
+        cold_gb_month_price_usd: float = BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD,
+        skip_if_deleting_within_days: int = BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS,
     ) -> None:
         self._account = account
         self._stale_days = int(stale_days)
@@ -145,7 +151,7 @@ class AwsBackupPlansAuditChecker:
         self._cold_price = float(cold_gb_month_price_usd)
         self._skip_if_deleting_within_days = int(skip_if_deleting_within_days)
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         if ctx.services is None or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupPlansAuditChecker requires ctx.services.backup")
 
@@ -412,7 +418,7 @@ class AwsBackupPlansAuditChecker:
 
 
 @register_checker("checks.aws.backup_plans_audit:AwsBackupPlansAuditChecker")
-def _factory(ctx, bootstrap):
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> AwsBackupPlansAuditChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:
         raise RuntimeError("aws_account_id missing from bootstrap (required for AwsBackupPlansAuditChecker)")
@@ -420,13 +426,21 @@ def _factory(ctx, bootstrap):
     billing_account_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     partition = str(bootstrap.get("aws_partition") or "aws")
 
-    stale_days = int(bootstrap.get("backup_stale_recovery_point_days", 90))
+    stale_days = int(bootstrap.get("backup_stale_recovery_point_days", BACKUP_PLANS_STALE_DAYS))
 
     # Cost estimation knobs (approximate defaults)
-    warm_price = safe_float(bootstrap.get("backup_warm_gb_month_price_usd", 0.05), default=0.05)
-    cold_price = safe_float(bootstrap.get("backup_cold_gb_month_price_usd", 0.01), default=0.01)
+    warm_price = safe_float(
+        bootstrap.get("backup_warm_gb_month_price_usd", BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD),
+        default=BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD,
+    )
+    cold_price = safe_float(
+        bootstrap.get("backup_cold_gb_month_price_usd", BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD),
+        default=BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD,
+    )
 
-    skip_if_deleting_within_days = int(bootstrap.get("backup_skip_if_deleting_within_days", 14))
+    skip_if_deleting_within_days = int(
+        bootstrap.get("backup_skip_if_deleting_within_days", BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS)
+    )
 
     account = AwsAccountContext(
         account_id=account_id,

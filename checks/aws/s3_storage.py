@@ -27,8 +27,9 @@ from checks.aws._common import (
     AwsAccountContext,
     now_utc,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD, S3_METRIC_LOOKBACK_DAYS
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
 
 
 def _normalize_s3_location_constraint(value: Optional[str]) -> str:
@@ -83,14 +84,14 @@ class S3StorageChecker:
         self,
         *,
         account: AwsAccountContext,
-        default_storage_price_gb_month_usd: float = 0.023,
-        metric_lookback_days: int = 3,
+        default_storage_price_gb_month_usd: float = S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD,
+        metric_lookback_days: int = S3_METRIC_LOOKBACK_DAYS,
     ) -> None:
         self._account = account
         self._default_price = float(default_storage_price_gb_month_usd)
         self._lookback_days = int(metric_lookback_days)
 
-    def run(self, ctx: Any) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         if ctx.services is None:
             raise RuntimeError("S3StorageChecker requires ctx.services (AWS clients)")
 
@@ -562,7 +563,7 @@ class S3StorageChecker:
 
 
 @register_checker("checks.aws.s3_storage:S3StorageChecker")
-def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> S3StorageChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> S3StorageChecker:
     """Instantiate this checker from runtime bootstrap data."""
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:

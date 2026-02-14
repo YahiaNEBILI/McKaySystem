@@ -42,3 +42,118 @@ FSX_LARGE_STORAGE_GIB_THRESHOLD: Final[int] = 4096
 FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS: Final[int] = 7
 FSX_REQUIRED_TAG_KEYS: Final[tuple[str, ...]] = ("application", "applicationId", "environment")
 FSX_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+
+# Backup plans checker defaults
+BACKUP_PLANS_STALE_DAYS: Final[int] = 90
+BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD: Final[float] = 0.05
+BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD: Final[float] = 0.01
+BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS: Final[int] = 14
+
+# Backup vaults checker defaults
+BACKUP_VAULTS_WARM_FALLBACK_USD: Final[float] = 0.05
+BACKUP_VAULTS_COLD_FALLBACK_USD: Final[float] = 0.01
+
+# CloudWatch metrics/logs checker defaults
+CLOUDWATCH_REQUIRE_RETENTION_POLICY: Final[bool] = True
+CLOUDWATCH_SUPPRESS_TAG_KEYS: Final[tuple[str, ...]] = (
+    "retain",
+    "retention",
+    "keep",
+    "do_not_delete",
+    "donotdelete",
+    "lifecycle",
+)
+CLOUDWATCH_SUPPRESS_TAG_VALUES: Final[tuple[str, ...]] = (
+    "retain",
+    "retained",
+    "keep",
+    "true",
+    "yes",
+    "1",
+    "permanent",
+    "legal-hold",
+)
+CLOUDWATCH_SUPPRESS_VALUE_PREFIXES: Final[tuple[str, ...]] = (
+    "keep",
+    "retain",
+    "do-not-delete",
+    "do_not_delete",
+    "donotdelete",
+)
+CLOUDWATCH_MIN_CUSTOM_METRICS_FOR_SIGNAL: Final[int] = 1
+CLOUDWATCH_MAX_CUSTOM_METRIC_FINDINGS: Final[int] = 50_000
+CLOUDWATCH_ALARMS_COUNT_WARN_THRESHOLD: Final[int] = 100
+CLOUDWATCH_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH: Final[float] = 0.30
+CLOUDWATCH_FALLBACK_USD_PER_ALARM_MONTH: Final[float] = 0.10
+
+# EFS checker defaults
+EFS_LOOKBACK_DAYS: Final[int] = 14
+EFS_MIN_DAILY_DATAPOINTS: Final[int] = 7
+EFS_UNUSED_P95_DAILY_IO_BYTES_THRESHOLD: Final[float] = 5 * 1024.0**2
+EFS_UNUSED_MAX_CLIENT_CONNECTIONS_THRESHOLD: Final[float] = 0.0
+EFS_UNDERUTILIZED_P95_PERCENT_IO_LIMIT_THRESHOLD: Final[float] = 20.0
+EFS_PERCENT_IO_LIMIT_PERIOD_SECONDS: Final[int] = 3600
+EFS_SUPPRESS_TAG_KEYS: Final[tuple[str, ...]] = ("finops:ignore", "do-not-delete", "keep")
+EFS_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+
+# NAT checker defaults
+NAT_LOOKBACK_DAYS: Final[int] = 14
+NAT_IDLE_P95_DAILY_BYTES_THRESHOLD: Final[float] = 1_048_576.0
+NAT_MIN_DAILY_DATAPOINTS: Final[int] = 7
+NAT_HIGH_DATA_PROCESSING_GIB_MONTH_THRESHOLD: Final[float] = 100.0
+NAT_ORPHAN_MIN_AGE_DAYS: Final[int] = 1
+NAT_SUPPRESS_TAG_KEYS: Final[tuple[str, ...]] = ("finops:ignore", "do-not-delete", "keep")
+NAT_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+NAT_FALLBACK_HOURLY_USD: Final[float] = 0.045
+NAT_FALLBACK_DATA_USD_PER_GB: Final[float] = 0.045
+
+# ELBv2 checker defaults
+ELBV2_LOOKBACK_DAYS: Final[int] = 14
+ELBV2_MIN_DAILY_DATAPOINTS: Final[int] = 7
+ELBV2_IDLE_P95_DAILY_REQUESTS_THRESHOLD: Final[float] = 1.0
+ELBV2_IDLE_P95_DAILY_NEW_FLOWS_THRESHOLD: Final[float] = 1.0
+ELBV2_MIN_AGE_DAYS: Final[int] = 2
+ELBV2_SUPPRESS_TAG_KEYS: Final[tuple[str, ...]] = ("finops:ignore", "do-not-delete", "keep")
+ELBV2_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+ELBV2_FALLBACK_ALB_HOURLY_USD: Final[float] = 0.025
+ELBV2_FALLBACK_NLB_HOURLY_USD: Final[float] = 0.0225
+
+# RDS snapshots checker defaults
+RDS_SNAPSHOTS_STALE_DAYS: Final[int] = 30
+RDS_SNAPSHOTS_GB_MONTH_PRICE_USD: Final[float] = 0.095
+
+# S3 checker defaults
+S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD: Final[float] = 0.023
+S3_METRIC_LOOKBACK_DAYS: Final[int] = 3
+
+# EBS checker defaults
+EBS_UNATTACHED_MIN_AGE_DAYS: Final[int] = 7
+EBS_SNAPSHOT_OLD_AGE_DAYS: Final[int] = 45
+EBS_SUPPRESS_TAG_KEYS: Final[tuple[str, ...]] = (
+    "retain",
+    "retention",
+    "keep",
+    "do_not_delete",
+    "donotdelete",
+    "backup",
+    "purpose",
+    "lifecycle",
+)
+EBS_SUPPRESS_TAG_VALUES: Final[tuple[str, ...]] = (
+    "retain",
+    "retained",
+    "keep",
+    "true",
+    "yes",
+    "1",
+    "permanent",
+    "legal-hold",
+)
+EBS_SUPPRESS_VALUE_PREFIXES: Final[tuple[str, ...]] = (
+    "keep",
+    "retain",
+    "do-not-delete",
+    "do_not_delete",
+    "donotdelete",
+)
+EBS_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000

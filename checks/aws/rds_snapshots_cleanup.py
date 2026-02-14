@@ -72,8 +72,9 @@ from checks.aws._common import (
     utc,
     normalize_tags,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import RDS_SNAPSHOTS_GB_MONTH_PRICE_USD, RDS_SNAPSHOTS_STALE_DAYS
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
 
 
 SUPPRESS_TAG_KEYS = {"retain", "legal-hold", "backup-policy"}
@@ -130,14 +131,14 @@ class RDSSnapshotsCleanupChecker:
         self,
         *,
         account: AwsAccountContext,
-        stale_days: int = 30,
-        snapshot_gb_month_price_usd: float = 0.095,
+        stale_days: int = RDS_SNAPSHOTS_STALE_DAYS,
+        snapshot_gb_month_price_usd: float = RDS_SNAPSHOTS_GB_MONTH_PRICE_USD,
     ) -> None:
         self._account = account
         self._stale_days = stale_days
         self._snapshot_gb_month_price_usd = snapshot_gb_month_price_usd
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
             raise RuntimeError("RDSSnapshotsCleanupChecker requires ctx.services.rds")
 
@@ -489,14 +490,17 @@ class RDSSnapshotsCleanupChecker:
 
 
 @register_checker("checks.aws.rds_snapshots_cleanup:RDSSnapshotsCleanupChecker")
-def _factory(ctx, bootstrap):
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> Checker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:
         raise RuntimeError("aws_account_id missing from bootstrap (required for RDSSnapshotsCleanupChecker)")
 
     billing_account_id = str(bootstrap.get("aws_billing_account_id") or account_id)
-    stale_days = int(bootstrap.get("rds_snapshot_stale_days", 30))
-    price = safe_float(bootstrap.get("rds_snapshot_gb_month_price_usd", 0.095), default=0.095)
+    stale_days = int(bootstrap.get("rds_snapshot_stale_days", RDS_SNAPSHOTS_STALE_DAYS))
+    price = safe_float(
+        bootstrap.get("rds_snapshot_gb_month_price_usd", RDS_SNAPSHOTS_GB_MONTH_PRICE_USD),
+        default=RDS_SNAPSHOTS_GB_MONTH_PRICE_USD,
+    )
     partition = str(bootstrap.get("aws_partition") or "aws")
 
     account = AwsAccountContext(account_id=account_id, billing_account_id=billing_account_id, partition=partition)

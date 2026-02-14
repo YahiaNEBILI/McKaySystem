@@ -47,6 +47,17 @@ from checks.aws._common import (
     safe_float,
     safe_region_from_client,
 )
+from checks.aws.defaults import (
+    NAT_FALLBACK_DATA_USD_PER_GB,
+    NAT_FALLBACK_HOURLY_USD,
+    NAT_HIGH_DATA_PROCESSING_GIB_MONTH_THRESHOLD,
+    NAT_IDLE_P95_DAILY_BYTES_THRESHOLD,
+    NAT_LOOKBACK_DAYS,
+    NAT_MAX_FINDINGS_PER_TYPE,
+    NAT_MIN_DAILY_DATAPOINTS,
+    NAT_ORPHAN_MIN_AGE_DAYS,
+    NAT_SUPPRESS_TAG_KEYS,
+)
 
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
@@ -61,23 +72,23 @@ from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, 
 class NatGatewaysConfig:
     """Configuration knobs for :class:`NatGatewaysChecker`."""
 
-    lookback_days: int = 14
+    lookback_days: int = NAT_LOOKBACK_DAYS
     # For idle detection: p95 daily bytes threshold (default ~1 MiB/day).
-    idle_p95_daily_bytes_threshold: float = 1_048_576.0
+    idle_p95_daily_bytes_threshold: float = NAT_IDLE_P95_DAILY_BYTES_THRESHOLD
     # Minimum number of datapoints (daily) to consider metrics meaningful.
-    min_daily_datapoints: int = 7
+    min_daily_datapoints: int = NAT_MIN_DAILY_DATAPOINTS
 
     # High data processing: if monthly-equivalent traffic exceeds this threshold (GiB).
-    high_data_processing_gib_month_threshold: float = 100.0
+    high_data_processing_gib_month_threshold: float = NAT_HIGH_DATA_PROCESSING_GIB_MONTH_THRESHOLD
 
     # "Orphaned" detection: ignore NATs created very recently.
-    orphan_min_age_days: int = 1
+    orphan_min_age_days: int = NAT_ORPHAN_MIN_AGE_DAYS
 
     # Tag-based suppression (lowercased by normalize_tags)
-    suppress_tag_keys: Tuple[str, ...] = ("finops:ignore", "do-not-delete", "keep")
+    suppress_tag_keys: Tuple[str, ...] = NAT_SUPPRESS_TAG_KEYS
 
     # Safety valve for very large environments
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = NAT_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------
@@ -85,8 +96,8 @@ class NatGatewaysConfig:
 # -----------------------------
 
 
-_FALLBACK_NAT_HOURLY_USD: float = 0.045
-_FALLBACK_NAT_DATA_USD_PER_GB: float = 0.045
+_FALLBACK_NAT_HOURLY_USD: float = NAT_FALLBACK_HOURLY_USD
+_FALLBACK_NAT_DATA_USD_PER_GB: float = NAT_FALLBACK_DATA_USD_PER_GB
 
 
 def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float, str, int]:

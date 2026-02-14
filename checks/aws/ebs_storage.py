@@ -28,6 +28,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 from botocore.exceptions import BotoCoreError, ClientError
 
 import checks.aws._common as common
+from checks.aws.defaults import (
+    EBS_MAX_FINDINGS_PER_TYPE,
+    EBS_SNAPSHOT_OLD_AGE_DAYS,
+    EBS_SUPPRESS_TAG_KEYS,
+    EBS_SUPPRESS_TAG_VALUES,
+    EBS_SUPPRESS_VALUE_PREFIXES,
+    EBS_UNATTACHED_MIN_AGE_DAYS,
+)
 
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
@@ -41,44 +49,20 @@ from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, 
 
 @dataclass(frozen=True)
 class EBSStorageConfig:
-    unattached_min_age_days: int = 7
-    snapshot_old_age_days: int = 45
+    unattached_min_age_days: int = EBS_UNATTACHED_MIN_AGE_DAYS
+    snapshot_old_age_days: int = EBS_SNAPSHOT_OLD_AGE_DAYS
 
-    suppress_tag_keys: Tuple[str, ...] = (
-        "retain",
-        "retention",
-        "keep",
-        "do_not_delete",
-        "donotdelete",
-        "backup",
-        "purpose",
-        "lifecycle",
-    )
-    suppress_tag_values: Tuple[str, ...] = (
-        "retain",
-        "retained",
-        "keep",
-        "true",
-        "yes",
-        "1",
-        "permanent",
-        "legal-hold",
-    )
+    suppress_tag_keys: Tuple[str, ...] = EBS_SUPPRESS_TAG_KEYS
+    suppress_tag_values: Tuple[str, ...] = EBS_SUPPRESS_TAG_VALUES
     # Prefix-based suppression for common retention tags such as:
     #   retention_policy=keep-90-days
     #   purpose=backup-prod
     # This keeps strict equality matching but also treats any value starting with
     # one of these prefixes as a suppress signal when the key is in suppress_tag_keys.
-    suppress_value_prefixes: Tuple[str, ...] = (
-        "keep",
-        "retain",
-        "do-not-delete",
-        "do_not_delete",
-        "donotdelete",
-    )
+    suppress_value_prefixes: Tuple[str, ...] = EBS_SUPPRESS_VALUE_PREFIXES
 
 
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = EBS_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------

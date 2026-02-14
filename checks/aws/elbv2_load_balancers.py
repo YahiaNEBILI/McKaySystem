@@ -49,6 +49,17 @@ from checks.aws._common import (
     safe_float,
     safe_region_from_client,
 )
+from checks.aws.defaults import (
+    ELBV2_FALLBACK_ALB_HOURLY_USD,
+    ELBV2_FALLBACK_NLB_HOURLY_USD,
+    ELBV2_IDLE_P95_DAILY_NEW_FLOWS_THRESHOLD,
+    ELBV2_IDLE_P95_DAILY_REQUESTS_THRESHOLD,
+    ELBV2_LOOKBACK_DAYS,
+    ELBV2_MAX_FINDINGS_PER_TYPE,
+    ELBV2_MIN_AGE_DAYS,
+    ELBV2_MIN_DAILY_DATAPOINTS,
+    ELBV2_SUPPRESS_TAG_KEYS,
+)
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
 
@@ -62,21 +73,21 @@ from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, 
 class ElbV2LoadBalancersConfig:
     """Configuration knobs for :class:`ElbV2LoadBalancersChecker`."""
 
-    lookback_days: int = 14
-    min_daily_datapoints: int = 7
+    lookback_days: int = ELBV2_LOOKBACK_DAYS
+    min_daily_datapoints: int = ELBV2_MIN_DAILY_DATAPOINTS
 
     # Idle thresholds (p95 daily).
-    idle_p95_daily_requests_threshold: float = 1.0
-    idle_p95_daily_new_flows_threshold: float = 1.0
+    idle_p95_daily_requests_threshold: float = ELBV2_IDLE_P95_DAILY_REQUESTS_THRESHOLD
+    idle_p95_daily_new_flows_threshold: float = ELBV2_IDLE_P95_DAILY_NEW_FLOWS_THRESHOLD
 
     # Ignore very new LBs for orphan/idle.
-    min_age_days: int = 2
+    min_age_days: int = ELBV2_MIN_AGE_DAYS
 
     # Tag-based suppression keys (lowercased).
-    suppress_tag_keys: Tuple[str, ...] = ("finops:ignore", "do-not-delete", "keep")
+    suppress_tag_keys: Tuple[str, ...] = ELBV2_SUPPRESS_TAG_KEYS
 
     # Safety valve.
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = ELBV2_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------
@@ -84,8 +95,8 @@ class ElbV2LoadBalancersConfig:
 # -----------------------------
 
 
-_FALLBACK_ALB_HOURLY_USD: float = 0.025
-_FALLBACK_NLB_HOURLY_USD: float = 0.0225
+_FALLBACK_ALB_HOURLY_USD: float = ELBV2_FALLBACK_ALB_HOURLY_USD
+_FALLBACK_NLB_HOURLY_USD: float = ELBV2_FALLBACK_NLB_HOURLY_USD
 
 
 def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) -> Tuple[float, str, int]:

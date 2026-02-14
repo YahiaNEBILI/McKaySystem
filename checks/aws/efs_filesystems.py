@@ -46,6 +46,16 @@ from checks.aws._common import (
     now_utc,
     safe_region_from_client,
 )
+from checks.aws.defaults import (
+    EFS_LOOKBACK_DAYS,
+    EFS_MAX_FINDINGS_PER_TYPE,
+    EFS_MIN_DAILY_DATAPOINTS,
+    EFS_PERCENT_IO_LIMIT_PERIOD_SECONDS,
+    EFS_SUPPRESS_TAG_KEYS,
+    EFS_UNDERUTILIZED_P95_PERCENT_IO_LIMIT_THRESHOLD,
+    EFS_UNUSED_MAX_CLIENT_CONNECTIONS_THRESHOLD,
+    EFS_UNUSED_P95_DAILY_IO_BYTES_THRESHOLD,
+)
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
 
@@ -54,24 +64,24 @@ from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, 
 class EFSFileSystemsConfig:
     """Configuration knobs for :class:`EFSFileSystemsChecker`."""
 
-    lookback_days: int = 14
-    min_daily_datapoints: int = 7
+    lookback_days: int = EFS_LOOKBACK_DAYS
+    min_daily_datapoints: int = EFS_MIN_DAILY_DATAPOINTS
 
     # "Unused" heuristics
     # Daily p95 of (read+write) bytes must be below this threshold (bytes/day)
-    unused_p95_daily_io_bytes_threshold: float = 5 * 1024.0**2  # 5 MiB/day
+    unused_p95_daily_io_bytes_threshold: float = EFS_UNUSED_P95_DAILY_IO_BYTES_THRESHOLD
     # Max client connections over window must be <= this threshold
-    unused_max_client_connections_threshold: float = 0.0
+    unused_max_client_connections_threshold: float = EFS_UNUSED_MAX_CLIENT_CONNECTIONS_THRESHOLD
 
     # Provisioned throughput underutilization
-    underutilized_p95_percent_io_limit_threshold: float = 20.0
-    percent_io_limit_period_seconds: int = 3600
+    underutilized_p95_percent_io_limit_threshold: float = EFS_UNDERUTILIZED_P95_PERCENT_IO_LIMIT_THRESHOLD
+    percent_io_limit_period_seconds: int = EFS_PERCENT_IO_LIMIT_PERIOD_SECONDS
 
     # Suppression tags (lowercased by normalize_tags)
-    suppress_tag_keys: Tuple[str, ...] = ("finops:ignore", "do-not-delete", "keep")
+    suppress_tag_keys: Tuple[str, ...] = EFS_SUPPRESS_TAG_KEYS
 
     # Safety valve
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = EFS_MAX_FINDINGS_PER_TYPE
 
 
 def _safe_str(value: Any) -> str:

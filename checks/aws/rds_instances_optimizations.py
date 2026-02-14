@@ -56,8 +56,8 @@ from checks.aws._common import (
     safe_region_from_client,
 )
 
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
 
 _NONPROD_VALUES = {
     "dev", "test", "nprd", "staging", "nonprod", "non-prod", "sandbox", "qa", "uat"
@@ -635,6 +635,29 @@ class RDSInstancesOptimizationsChecker:
         # Some cases have ReadReplicaDBInstanceIdentifiers on primary, not the replica.
         return False
 
+    def _build_instance_scope(
+        self,
+        *,
+        ctx: RunContext,
+        region: str,
+        instance_id: str,
+        arn: str,
+    ) -> Scope:
+        partition = _arn_partition(arn) or self._account.partition
+        return build_scope(
+            ctx,
+            account=AwsAccountContext(
+                account_id=self._account.account_id,
+                billing_account_id=str(self._account.billing_account_id or self._account.account_id),
+                partition=partition,
+            ),
+            region=region,
+            service="rds",
+            resource_type="db_instance",
+            resource_id=instance_id,
+            resource_arn=arn,
+        )
+
     def _evaluate_instance(
         self,
         *,
@@ -648,20 +671,7 @@ class RDSInstancesOptimizationsChecker:
     ) -> Iterable[FindingDraft]:
         instance_id = str(inst.get("DBInstanceIdentifier") or "")
         arn = str(inst.get("DBInstanceArn") or "")
-        partition = _arn_partition(arn) or self._account.partition
-        scope = build_scope(
-            ctx,
-            account=AwsAccountContext(
-                account_id=self._account.account_id,
-                billing_account_id=str(self._account.billing_account_id or self._account.account_id),
-                partition=partition,
-            ),
-            region=region,
-            service="rds",
-            resource_type="db_instance",
-            resource_id=instance_id,
-            resource_arn=arn,
-        )
+        scope = self._build_instance_scope(ctx=ctx, region=region, instance_id=instance_id, arn=arn)
 
         status = str(inst.get("DBInstanceStatus") or "").lower()
         allocated_gb = float(inst.get("AllocatedStorage") or 0.0)
@@ -1042,7 +1052,7 @@ SPEC = "checks.aws.rds_instances_optimizations:RDSInstancesOptimizationsChecker"
 
 
 @register_checker(SPEC)
-def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> RDSInstancesOptimizationsChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> RDSInstancesOptimizationsChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     billing_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     if not account_id:
