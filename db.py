@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 db.py
 
@@ -20,6 +18,8 @@ and pool checkout overhead).
 JSON helpers are included because the app stores/reads JSONB blobs (e.g.
 dashboard_cache payload).
 """
+
+from __future__ import annotations
 
 import atexit
 import json
@@ -246,7 +246,7 @@ def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, A
     if not cols:
         return []
     # zip truncates to shortest; avoids IndexError if row/cols length mismatch
-    return [dict(zip(cols, r)) for r in rows]
+    return [dict(zip(cols, r, strict=False)) for r in rows]
 
 
 def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[dict[str, Any]]:
@@ -259,7 +259,7 @@ def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = N
         cols = _cols_from_description(getattr(cur, "description", None))
         if not cols:
             return None
-        return dict(zip(cols, row))
+        return dict(zip(cols, row, strict=False))
 
 
 def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:

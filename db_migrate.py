@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Minimal migration runner for the Postgres schema.
 
@@ -8,6 +6,8 @@ Usage:
   python db_migrate.py --dry-run
   python db_migrate.py --migrations-dir migrations
 """
+
+from __future__ import annotations
 
 import argparse
 import importlib.util
@@ -221,17 +221,35 @@ def _iter_migration_files(migrations_dir: Path) -> Iterable[Path]:
     return sorted(files, key=lambda p: p.name)
 
 
+def pending_migration_versions(conn, *, migrations_dir: Path) -> List[str]:
+    """Return pending migration versions for the provided connection."""
+    _ensure_migrations_table(conn)
+    applied = _applied_versions(conn)
+    pending: List[str] = []
+    for path in _iter_migration_files(migrations_dir):
+        version = path.stem
+        if version not in applied:
+            pending.append(version)
+    return pending
+
+
+def ensure_schema_current(*, migrations_dir: Path) -> None:
+    """Fail fast when database schema is behind local migrations."""
+    with db_conn() as conn:
+        pending = pending_migration_versions(conn, migrations_dir=migrations_dir)
+    if pending:
+        pending_csv = ", ".join(pending)
+        raise RuntimeError(
+            f"Database schema is out of date. Pending migrations: {pending_csv}. "
+            "Run `mckay migrate` (or `python db_migrate.py`) before ingest/API startup."
+        )
+
+
 def run_migrations(*, migrations_dir: Path, dry_run: bool = False) -> None:
     """Apply pending migrations (or print them in dry-run)."""
     with db_conn() as conn:
-        _ensure_migrations_table(conn)
-        applied = _applied_versions(conn)
-
-        pending = []
-        for path in _iter_migration_files(migrations_dir):
-            version = path.stem
-            if version not in applied:
-                pending.append(path)
+        pending_versions = set(pending_migration_versions(conn, migrations_dir=migrations_dir))
+        pending = [p for p in _iter_migration_files(migrations_dir) if p.stem in pending_versions]
 
         if dry_run:
             for p in pending:
@@ -260,7 +278,11 @@ def run_migrations(*, migrations_dir: Path, dry_run: bool = False) -> None:
 def main(argv: List[str] | None = None) -> None:
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(description="Apply database migrations.")
-    parser.add_argument("--dry-run", action="store_true", help="Show pending migrations without applying.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show pending migrations without applying.",
+    )
     parser.add_argument(
         "--migrations-dir",
         default=str(Path(__file__).parent / "migrations"),

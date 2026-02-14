@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """flask_app.py
 
 DB-backed API for McKaySystem (FinOpsAnalyzer).
@@ -23,14 +21,17 @@ Run
 FLASK_APP=flask_app.py flask run --host=0.0.0.0 --port=5000
 """
 
+from __future__ import annotations
+
 import hmac
 import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
 import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, abort, jsonify, request
 
@@ -141,6 +142,9 @@ class _TokenBucket:
 
 _rate_lock = threading.Lock()
 _rate_buckets: Dict[str, _TokenBucket] = {}
+_schema_gate_lock = threading.Lock()
+_schema_gate_checked = False
+_schema_gate_enabled = (os.getenv("API_ENFORCE_SCHEMA_GATE") or "1").strip() != "0"
 
 
 def _rate_limits() -> Tuple[Optional[float], Optional[float]]:
@@ -217,6 +221,41 @@ def _err(code: str, message: str, *, status: int, extra: Optional[Dict[str, Any]
     if extra:
         payload.update(extra)
     return jsonify(payload), status
+
+
+def _schema_migrations_dir() -> Path:
+    """Return the repository-local migrations directory used by schema gate."""
+    return Path(__file__).resolve().parents[2] / "migrations"
+
+
+def _ensure_schema_gate() -> None:
+    """Run DB schema gate once per process."""
+    global _schema_gate_checked
+    if not _schema_gate_enabled or _schema_gate_checked:
+        return
+    with _schema_gate_lock:
+        if _schema_gate_checked:
+            return
+        from db_migrate import ensure_schema_current
+
+        ensure_schema_current(migrations_dir=_schema_migrations_dir())
+        _schema_gate_checked = True
+
+
+@app.before_request
+def _enforce_schema_gate() -> Optional[Any]:
+    """Return 503 if the DB schema is behind local code migrations."""
+    path = request.path or ""
+    if not path.startswith("/api/"):
+        return None
+    if path in {"/api/health/db"}:
+        return None
+    try:
+        _ensure_schema_gate()
+    except RuntimeError as exc:
+        _log("ERROR", "schema_gate_failed", {"detail": str(exc)})
+        return _err("schema_mismatch", str(exc), status=503)
+    return None
 
 
 @app.errorhandler(429)
@@ -413,7 +452,7 @@ def api_runs_diff_latest() -> Any:
 
     Notes:
     - Uses finding_presence for membership (history).
-    - Attributes category/check_id/service using finding_latest (current snapshot). This is good enough for v1.
+    - Attributes category/check_id/service from finding_current (canonical read model).
     """
     try:
         tenant_id, workspace = _require_scope_from_query()
@@ -459,13 +498,13 @@ def api_runs_diff_latest() -> Any:
                   WHERE p0.tenant_id=%s AND p0.workspace=%s AND p0.run_id=%s
                 )
                 SELECT
-                  COALESCE(fl.category, 'other') AS category,
-                  COALESCE(fl.check_id, 'unknown') AS check_id,
-                  COALESCE(fl.service, 'unknown') AS service,
+                  COALESCE(fc.category, 'other') AS category,
+                  COALESCE(fc.check_id, 'unknown') AS check_id,
+                  COALESCE(fc.service, 'unknown') AS service,
                   COUNT(*)::bigint AS count
                 FROM new_fps nf
-                LEFT JOIN finding_latest fl
-                  ON fl.tenant_id=%s AND fl.workspace=%s AND fl.fingerprint=nf.fingerprint
+                LEFT JOIN finding_current fc
+                  ON fc.tenant_id=%s AND fc.workspace=%s AND fc.fingerprint=nf.fingerprint
                 GROUP BY 1,2,3
                 """,
                 (tenant_id, workspace, run_new, tenant_id, workspace, run_old, tenant_id, workspace),
@@ -484,13 +523,13 @@ def api_runs_diff_latest() -> Any:
                   WHERE p1.tenant_id=%s AND p1.workspace=%s AND p1.run_id=%s
                 )
                 SELECT
-                  COALESCE(fl.category, 'other') AS category,
-                  COALESCE(fl.check_id, 'unknown') AS check_id,
-                  COALESCE(fl.service, 'unknown') AS service,
+                  COALESCE(fc.category, 'other') AS category,
+                  COALESCE(fc.check_id, 'unknown') AS check_id,
+                  COALESCE(fc.service, 'unknown') AS service,
                   COUNT(*)::bigint AS count
                 FROM gone_fps gf
-                LEFT JOIN finding_latest fl
-                  ON fl.tenant_id=%s AND fl.workspace=%s AND fl.fingerprint=gf.fingerprint
+                LEFT JOIN finding_current fc
+                  ON fc.tenant_id=%s AND fc.workspace=%s AND fc.fingerprint=gf.fingerprint
                 GROUP BY 1,2,3
                 """,
                 (tenant_id, workspace, run_old, tenant_id, workspace, run_new, tenant_id, workspace),
@@ -581,53 +620,16 @@ def api_findings() -> Any:
             else "detected_at DESC"
         )
 
-        # Compute effective_state at query time by joining lifecycle overlays.
-        # This makes filters like state=open reflect lifecycle updates immediately,
-        # even if a DB view is stale/misaligned.
         sql = f"""
-            WITH base AS (
-              SELECT
-                fl.tenant_id,
-                fl.workspace,
-                fl.fingerprint,
-                fl.run_id,
-                fl.check_id,
-                fl.service,
-                fl.severity,
-                fl.title,
-                fl.estimated_monthly_savings,
-                fl.region,
-                fl.account_id,
-                fl.category,
-                fl.group_key,
-                fl.detected_at,
-                sc.state AS state,
-                sc.snooze_until AS snooze_until,
-                sc.reason AS reason,
-                CASE
-                  WHEN lower(COALESCE(gc.state,'')) IN ('ignored','ignore') THEN 'ignored'
-                  WHEN lower(COALESCE(gc.state,'')) IN ('resolved','resolve') THEN 'resolved'
-                  WHEN lower(COALESCE(gc.state,'')) IN ('snoozed','snooze') AND (gc.snooze_until IS NULL OR gc.snooze_until > now()) THEN 'snoozed'
-                  WHEN lower(COALESCE(sc.state,'')) IN ('ignored','ignore') THEN 'ignored'
-                  WHEN lower(COALESCE(sc.state,'')) IN ('resolved','resolve') THEN 'resolved'
-                  WHEN lower(COALESCE(sc.state,'')) IN ('snoozed','snooze') AND (sc.snooze_until IS NULL OR sc.snooze_until > now()) THEN 'snoozed'
-                  ELSE 'open'
-                END AS effective_state,
-                fl.payload AS payload
-              FROM finding_current fl
-              LEFT JOIN finding_state_current sc
-                ON sc.tenant_id = fl.tenant_id AND sc.workspace = fl.workspace AND sc.fingerprint = fl.fingerprint
-              LEFT JOIN finding_group_state_current gc
-                ON gc.tenant_id = fl.tenant_id AND gc.workspace = fl.workspace AND gc.group_key = fl.group_key
-            )
             SELECT
               tenant_id, workspace, fingerprint, run_id,
               check_id, service, severity, title,
               estimated_monthly_savings, region, account_id,
+              category, group_key,
               detected_at,
               state, snooze_until, reason, effective_state,
               payload
-            FROM base
+            FROM finding_current
             WHERE {' AND '.join(where)}
             ORDER BY {order_sql}
             LIMIT %s OFFSET %s
@@ -638,31 +640,7 @@ def api_findings() -> Any:
             rows = fetch_all_dict_conn(conn, sql, params2)
             count_row = fetch_one_dict_conn(
                 conn,
-                f"""
-                WITH base AS (
-                  SELECT
-                    fl.tenant_id, fl.workspace, fl.fingerprint,
-                    sc.state AS state,
-                    sc.snooze_until AS snooze_until,
-                    sc.reason AS reason,
-                    CASE
-                      WHEN lower(COALESCE(gc.state,'')) IN ('ignored','ignore') THEN 'ignored'
-                      WHEN lower(COALESCE(gc.state,'')) IN ('resolved','resolve') THEN 'resolved'
-                      WHEN lower(COALESCE(gc.state,'')) IN ('snoozed','snooze') AND (gc.snooze_until IS NULL OR gc.snooze_until > now()) THEN 'snoozed'
-                      WHEN lower(COALESCE(sc.state,'')) IN ('ignored','ignore') THEN 'ignored'
-                      WHEN lower(COALESCE(sc.state,'')) IN ('resolved','resolve') THEN 'resolved'
-                      WHEN lower(COALESCE(sc.state,'')) IN ('snoozed','snooze') AND (sc.snooze_until IS NULL OR sc.snooze_until > now()) THEN 'snoozed'
-                      ELSE 'open'
-                    END AS effective_state,
-                    fl.severity, fl.service, fl.check_id, fl.region, fl.account_id, fl.title
-                  FROM finding_current fl
-                  LEFT JOIN finding_state_current sc
-                    ON sc.tenant_id = fl.tenant_id AND sc.workspace = fl.workspace AND sc.fingerprint = fl.fingerprint
-                  LEFT JOIN finding_group_state_current gc
-                    ON gc.tenant_id = fl.tenant_id AND gc.workspace = fl.workspace AND gc.group_key = fl.group_key
-                )
-                SELECT COUNT(*) AS n FROM base WHERE {' AND '.join(where)}
-                """,
+                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
                 params,
             )
 
@@ -731,7 +709,15 @@ def api_findings_aggregates() -> Any:
                 """,
                 (tenant_id, workspace),
             )
-        return jsonify({"tenant_id": tenant_id, "workspace": workspace, "by_state": by_state, "by_severity": by_severity, "by_service": by_service})
+        return jsonify(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "by_state": by_state,
+                "by_severity": by_severity,
+                "by_service": by_service,
+            }
+        )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
@@ -848,7 +834,10 @@ def _audit_lifecycle(
             conn,
             """
             INSERT INTO finding_state_audit
-              (tenant_id, workspace, subject_type, subject_id, action, state, snooze_until, reason, updated_by, created_at)
+              (
+                tenant_id, workspace, subject_type, subject_id, action,
+                state, snooze_until, reason, updated_by, created_at
+              )
             VALUES
               (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
             """,
@@ -870,7 +859,10 @@ def _audit_lifecycle(
                 conn,
                 """
                 INSERT INTO lifecycle_audit
-                  (tenant_id, workspace, subject_type, subject_id, action, state, snooze_until, reason, updated_by, created_at)
+                  (
+                    tenant_id, workspace, subject_type, subject_id, action,
+                    state, snooze_until, reason, updated_by, created_at
+                  )
                 VALUES
                   (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
                 """,
@@ -891,7 +883,17 @@ def _audit_lifecycle(
 
 
 
-def _upsert_state(conn: Any, *, tenant_id: str, workspace: str, fingerprint: str, state: str, snooze_until: Optional[datetime], reason: Optional[str], updated_by: Optional[str]) -> None:
+def _upsert_state(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+    state: str,
+    snooze_until: Optional[datetime],
+    reason: Optional[str],
+    updated_by: Optional[str],
+) -> None:
     execute_conn(
         conn,
         """
@@ -965,7 +967,18 @@ def api_lifecycle_group_ignore() -> Any:
                 reason=reason,
                 updated_by=updated_by,
             )
-            _audit_lifecycle(conn, tenant_id=tenant_id, workspace=workspace, action="group_ignore", subject_type="group_key", subject_id=group_key, state="ignored", snooze_until=None, reason=reason, updated_by=updated_by)
+            _audit_lifecycle(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                action="group_ignore",
+                subject_type="group_key",
+                subject_id=group_key,
+                state="ignored",
+                snooze_until=None,
+                reason=reason,
+                updated_by=updated_by,
+            )
             conn.commit()
         return jsonify({"ok": True})
     except ValueError as exc:
@@ -995,7 +1008,18 @@ def api_lifecycle_group_resolve() -> Any:
                 reason=reason,
                 updated_by=updated_by,
             )
-            _audit_lifecycle(conn, tenant_id=tenant_id, workspace=workspace, action="group_resolve", subject_type="group_key", subject_id=group_key, state="resolved", snooze_until=None, reason=reason, updated_by=updated_by)
+            _audit_lifecycle(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                action="group_resolve",
+                subject_type="group_key",
+                subject_id=group_key,
+                state="resolved",
+                snooze_until=None,
+                reason=reason,
+                updated_by=updated_by,
+            )
             conn.commit()
         return jsonify({"ok": True})
     except ValueError as exc:
@@ -1029,7 +1053,18 @@ def api_lifecycle_group_snooze() -> Any:
                 reason=reason,
                 updated_by=updated_by,
             )
-            _audit_lifecycle(conn, tenant_id=tenant_id, workspace=workspace, action="group_snooze", subject_type="group_key", subject_id=group_key, state="snoozed", snooze_until=snooze_until, reason=reason, updated_by=updated_by)
+            _audit_lifecycle(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                action="group_snooze",
+                subject_type="group_key",
+                subject_id=group_key,
+                state="snoozed",
+                snooze_until=snooze_until,
+                reason=reason,
+                updated_by=updated_by,
+            )
             conn.commit()
         return jsonify({"ok": True})
     except ValueError as exc:
@@ -1041,7 +1076,7 @@ def api_lifecycle_group_snooze() -> Any:
 def api_groups() -> Any:
     """List grouped finding types.
 
-    Groups are defined by finding_latest.group_key (populated at ingest).
+    Groups are defined by finding_current.group_key (populated at ingest).
     """
     try:
         tenant_id, workspace = _require_scope_from_query()
@@ -1215,8 +1250,28 @@ def api_lifecycle_ignore() -> Any:
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
         with db_conn() as conn:
-            _upsert_state(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint, state="ignored", snooze_until=None, reason=reason, updated_by=updated_by)
-            _audit_lifecycle(conn, tenant_id=tenant_id, workspace=workspace, action="ignore", subject_type="fingerprint", subject_id=fingerprint, state="ignored", snooze_until=None, reason=reason, updated_by=updated_by)
+            _upsert_state(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                fingerprint=fingerprint,
+                state="ignored",
+                snooze_until=None,
+                reason=reason,
+                updated_by=updated_by,
+            )
+            _audit_lifecycle(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                action="ignore",
+                subject_type="fingerprint",
+                subject_id=fingerprint,
+                state="ignored",
+                snooze_until=None,
+                reason=reason,
+                updated_by=updated_by,
+            )
             conn.commit()
         return jsonify({"ok": True})
     except ValueError as exc:
@@ -1236,8 +1291,28 @@ def api_lifecycle_resolve() -> Any:
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
         with db_conn() as conn:
-            _upsert_state(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint, state="resolved", snooze_until=None, reason=reason, updated_by=updated_by)
-            _audit_lifecycle(conn, tenant_id=tenant_id, workspace=workspace, action="resolve", subject_type="fingerprint", subject_id=fingerprint, state="resolved", snooze_until=None, reason=reason, updated_by=updated_by)
+            _upsert_state(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                fingerprint=fingerprint,
+                state="resolved",
+                snooze_until=None,
+                reason=reason,
+                updated_by=updated_by,
+            )
+            _audit_lifecycle(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                action="resolve",
+                subject_type="fingerprint",
+                subject_id=fingerprint,
+                state="resolved",
+                snooze_until=None,
+                reason=reason,
+                updated_by=updated_by,
+            )
             conn.commit()
         return jsonify({"ok": True})
     except ValueError as exc:
@@ -1271,7 +1346,18 @@ def api_lifecycle_snooze() -> Any:
                 reason=reason,
                 updated_by=updated_by,
             )
-            _audit_lifecycle(conn, tenant_id=tenant_id, workspace=workspace, action="snooze", subject_type="fingerprint", subject_id=fingerprint, state="snoozed", snooze_until=snooze_until, reason=reason, updated_by=updated_by)
+            _audit_lifecycle(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                action="snooze",
+                subject_type="fingerprint",
+                subject_id=fingerprint,
+                state="snoozed",
+                snooze_until=snooze_until,
+                reason=reason,
+                updated_by=updated_by,
+            )
             conn.commit()
         return jsonify({"ok": True})
     except ValueError as exc:

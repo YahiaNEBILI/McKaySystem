@@ -31,7 +31,8 @@ Custom correlated output directory:
 python runner.py --tenant acme --workspace prod --correlation-out data/finops_findings_correlated
 
 Run everything except one checker:
-python runner.py --tenant acme --workspace prod --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
+python runner.py --tenant acme --workspace prod \
+  --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
 
 Run a subset:
 python runner.py --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
@@ -401,7 +402,7 @@ def main(argv: Sequence[str]) -> int:
         print(f"RULEPACK_VERSION={RULEPACK_VERSION}")
         print(f"SCHEMA_VERSION={SCHEMA_VERSION}")
         return 0
-    
+
     setup_logging(extra_fields={"app": "mckay", "component": "runner"})
 
     raw_arg = _clean_path(args.out)

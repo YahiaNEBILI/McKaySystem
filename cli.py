@@ -92,7 +92,8 @@ def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argu
     root = _repo_root()
     if not _module_exists("export_findings") and not (root / "export_findings.py").exists():
         raise SystemExit(
-            "export_findings module not found. Run from the project directory or ensure export_findings.py is installed."
+            "export_findings module not found. "
+            "Run from the project directory or ensure export_findings.py is installed."
         )
     tenant = args.tenant or _env_default("TENANT_ID")
     workspace = args.workspace or _env_default("WORKSPACE")

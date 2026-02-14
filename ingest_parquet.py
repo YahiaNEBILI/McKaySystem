@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """
 ingest_parquet.py
 
 Ingest findings from Parquet datasets into Postgres using run_manifest.json
 as the single source of truth for tenant/workspace/run and dataset paths.
 """
+
+from __future__ import annotations
 
 import csv
 import io
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
 import pyarrow.dataset as ds
 
@@ -282,6 +282,14 @@ def _default_db_api() -> DbApi:
     return DbApi(execute=execute, execute_many=execute_many, fetch_one=fetch_one)
 
 
+def _ensure_db_schema_current() -> None:
+    """Fail fast if the database schema is behind local migrations."""
+    from db_migrate import ensure_schema_current
+
+    migrations_dir = Path(__file__).parent / "migrations"
+    ensure_schema_current(migrations_dir=migrations_dir)
+
+
 @dataclass
 class IngestStats:
     dataset_used: str
@@ -291,6 +299,107 @@ class IngestStats:
     enriched_present: bool
     presence_rows: int
     latest_rows: int
+
+
+_AGG_DELETE_SQL = """
+DELETE FROM finding_aggregates_current
+WHERE tenant_id=%s AND workspace=%s
+"""
+
+
+_AGG_INSERT_SQL = """
+INSERT INTO finding_aggregates_current
+  (tenant_id, workspace, dimension, key, finding_count, total_savings, refreshed_at)
+SELECT
+  tenant_id,
+  workspace,
+  dimension,
+  key,
+  finding_count,
+  total_savings,
+  now()
+FROM (
+  SELECT
+    tenant_id,
+    workspace,
+    'effective_state'::text AS dimension,
+    COALESCE(effective_state, 'open') AS key,
+    COUNT(*)::bigint AS finding_count,
+    COALESCE(SUM(estimated_monthly_savings), 0)::double precision AS total_savings
+  FROM finding_current
+  WHERE tenant_id=%s AND workspace=%s
+  GROUP BY tenant_id, workspace, COALESCE(effective_state, 'open')
+
+  UNION ALL
+
+  SELECT
+    tenant_id,
+    workspace,
+    'severity'::text AS dimension,
+    COALESCE(severity, 'unknown') AS key,
+    COUNT(*)::bigint AS finding_count,
+    COALESCE(SUM(estimated_monthly_savings), 0)::double precision AS total_savings
+  FROM finding_current
+  WHERE tenant_id=%s AND workspace=%s
+  GROUP BY tenant_id, workspace, COALESCE(severity, 'unknown')
+
+  UNION ALL
+
+  SELECT
+    tenant_id,
+    workspace,
+    'service'::text AS dimension,
+    COALESCE(service, 'unknown') AS key,
+    COUNT(*)::bigint AS finding_count,
+    COALESCE(SUM(estimated_monthly_savings), 0)::double precision AS total_savings
+  FROM finding_current
+  WHERE tenant_id=%s AND workspace=%s
+  GROUP BY tenant_id, workspace, COALESCE(service, 'unknown')
+
+  UNION ALL
+
+  SELECT
+    tenant_id,
+    workspace,
+    'category'::text AS dimension,
+    COALESCE(category, 'other') AS key,
+    COUNT(*)::bigint AS finding_count,
+    COALESCE(SUM(estimated_monthly_savings), 0)::double precision AS total_savings
+  FROM finding_current
+  WHERE tenant_id=%s AND workspace=%s
+  GROUP BY tenant_id, workspace, COALESCE(category, 'other')
+) agg
+ON CONFLICT (tenant_id, workspace, dimension, key) DO UPDATE SET
+  finding_count = EXCLUDED.finding_count,
+  total_savings = EXCLUDED.total_savings,
+  refreshed_at = EXCLUDED.refreshed_at
+"""
+
+
+def _aggregate_params(tenant_id: str, workspace: str) -> tuple[str, str, str, str, str, str, str, str]:
+    """Return reusable parameter tuple for aggregate refresh SQL."""
+    return (
+        tenant_id,
+        workspace,
+        tenant_id,
+        workspace,
+        tenant_id,
+        workspace,
+        tenant_id,
+        workspace,
+    )
+
+
+def _refresh_aggregates_with_api(api: DbApi, *, tenant_id: str, workspace: str) -> None:
+    """Refresh aggregate read-model rows for one tenant/workspace."""
+    api.execute(_AGG_DELETE_SQL, (tenant_id, workspace))
+    api.execute(_AGG_INSERT_SQL, _aggregate_params(tenant_id, workspace))
+
+
+def _refresh_aggregates_with_cursor(cur, *, tenant_id: str, workspace: str) -> None:
+    """Refresh aggregate read-model rows inside an existing DB transaction."""
+    cur.execute(_AGG_DELETE_SQL, (tenant_id, workspace))
+    cur.execute(_AGG_INSERT_SQL, _aggregate_params(tenant_id, workspace))
 
 
 def ingest_from_manifest(
@@ -304,6 +413,9 @@ def ingest_from_manifest(
     api = db_api or _default_db_api()
     batch_size = batch_size or _env_int("INGEST_BATCH_SIZE", 2000)
     parquet_batch_size = parquet_batch_size or _env_int("PARQUET_BATCH_SIZE", 10_000)
+
+    if db_api is None and not _env_bool("ALLOW_SCHEMA_MISMATCH"):
+        _ensure_db_schema_current()
 
     manifest = load_manifest(manifest_path)
     expected_schema = int(SCHEMA_VERSION)
@@ -561,6 +673,12 @@ def ingest_from_manifest(
 
     _flush_presence()
     _flush_latest()
+
+    _refresh_aggregates_with_api(
+        api,
+        tenant_id=manifest.tenant_id,
+        workspace=manifest.workspace,
+    )
 
     api.execute(
         """
@@ -860,6 +978,12 @@ def _ingest_with_copy(
                     """
                 )
 
+                _refresh_aggregates_with_cursor(
+                    cur,
+                    tenant_id=manifest.tenant_id,
+                    workspace=manifest.workspace,
+                )
+
                 cur.execute(
                     """
                     UPDATE runs
@@ -878,7 +1002,7 @@ def _ingest_with_copy(
                 )
 
             conn.commit()
-        except Exception as exc:
+        except Exception:
             try:
                 conn.rollback()
             except Exception as rb_exc:
