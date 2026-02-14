@@ -79,9 +79,6 @@ class EC2InstancesConfig:
     # Tag governance
     required_instance_tag_keys: Tuple[str, ...] = ("ApplicationId", "Environment", "Application")
 
-    # Safety valve for environments with too much resources.
-    max_findings_per_type: int = 50_000
-
 # -----------------------------
 # Pricing helpers
 # -----------------------------

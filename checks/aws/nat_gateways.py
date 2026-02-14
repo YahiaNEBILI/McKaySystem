@@ -30,7 +30,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
-from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError, OperationNotPageableError
 
 from checks.aws._common import (
@@ -41,6 +40,7 @@ from checks.aws._common import (
     money,
     normalize_tags,
     now_utc,
+    paginate_items,
     safe_float,
     safe_region_from_client,
 )
@@ -185,50 +185,6 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
     if not notes:
         notes.append("using fallback pricing")
     return final_hourly, final_per_gb, "; ".join(notes), confidence
-
-
-# -----------------------------
-# Pagination helpers
-# -----------------------------
-
-
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    params = dict(params or {})
-
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except OperationNotPageableError:
-            # Fall back to token-based pagination.
-            pass
-        except (AttributeError, KeyError, TypeError, ValueError):
-            # Best-effort: some fakes/mocks or unusual clients may not behave like boto3.
-            pass
-
-    next_token: Optional[str] = None
-    while True:
-        call = getattr(client, operation)
-        req = dict(params)
-        if next_token:
-            req["NextToken"] = next_token
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_token = cast(Optional[str], resp.get("NextToken"))
-        if not next_token:
-            break
 
 
 # -----------------------------
@@ -426,7 +382,14 @@ class NatGatewaysChecker:
 
         # Inventory NAT gateways
         try:
-            nat_gateways = list(_paginate_items(ec2, "describe_nat_gateways", "NatGateways"))
+            nat_gateways = list(
+                paginate_items(
+                    ec2,
+                    "describe_nat_gateways",
+                    "NatGateways",
+                    paginator_fallback_exceptions=(OperationNotPageableError, AttributeError, KeyError, TypeError, ValueError),
+                )
+            )
         except ClientError as exc:
             yield self._access_error(ctx, region, "describe_nat_gateways", exc)
             return
@@ -683,14 +646,25 @@ class NatGatewaysChecker:
             params = {"Filters": [{"Name": "route.nat-gateway-id", "Values": chunk_ids}]}
             yielded = False
             try:
-                for item in _paginate_items(ec2, "describe_route_tables", "RouteTables", params=params):
+                for item in paginate_items(
+                    ec2,
+                    "describe_route_tables",
+                    "RouteTables",
+                    params=params,
+                    paginator_fallback_exceptions=(OperationNotPageableError, AttributeError, KeyError, TypeError, ValueError),
+                ):
                     yielded = True
                     yield item
             except ClientError:
                 if yielded:
                     raise
                 # Fallback: list all route tables once
-                for item in _paginate_items(ec2, "describe_route_tables", "RouteTables"):
+                for item in paginate_items(
+                    ec2,
+                    "describe_route_tables",
+                    "RouteTables",
+                    paginator_fallback_exceptions=(OperationNotPageableError, AttributeError, KeyError, TypeError, ValueError),
+                ):
                     yield item
                 return
 

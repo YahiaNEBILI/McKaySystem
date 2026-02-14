@@ -58,6 +58,7 @@ from checks.aws._common import (
     AwsAccountContext,
     build_scope,
     money,
+    paginate_items,
     safe_region_from_client,
 )
 from checks.registry import register_checker
@@ -80,42 +81,6 @@ _SENSITIVE_ACTIONS: Set[str] = {
     "backup:*",
     "*",
 }
-
-
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    params = dict(params or {})
-
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except Exception:
-            # Fall back to NextToken pagination
-            pass
-
-    next_token: Optional[str] = None
-    while True:
-        call = getattr(client, operation)
-        req = dict(params)
-        if next_token:
-            req["NextToken"] = next_token
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_token = resp.get("NextToken")
-        if not next_token:
-            break
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -305,7 +270,7 @@ class AwsBackupVaultsAuditChecker:
         region = safe_region_from_client(backup)
 
         try:
-            vaults = list(_paginate_items(backup, "list_backup_vaults", "BackupVaultList"))
+            vaults = list(paginate_items(backup, "list_backup_vaults", "BackupVaultList"))
         except ClientError as exc:
             yield self._access_error_finding(ctx, region, "list_backup_vaults", exc)
             return
@@ -879,7 +844,7 @@ class AwsBackupVaultsAuditChecker:
         total_warm_bytes = 0
         total_cold_bytes = 0
         try:
-            for rp in _paginate_items(
+            for rp in paginate_items(
                 backup,
                 "list_recovery_points_by_backup_vault",
                 "RecoveryPoints",

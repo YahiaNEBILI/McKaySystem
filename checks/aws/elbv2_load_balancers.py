@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
-from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 
 from checks.aws._common import (
@@ -43,6 +42,7 @@ from checks.aws._common import (
     money,
     normalize_tags,
     now_utc,
+    paginate_items,
     safe_float,
     safe_region_from_client,
 )
@@ -172,50 +172,6 @@ def _is_access_denied(exc: ClientError) -> bool:
         "UnauthorizedOperation",
         "UnrecognizedClientException",
     }
-
-
-# -----------------------------
-# Pagination helpers
-# -----------------------------
-
-
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    params = dict(params or {})
-
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except (ClientError, BotoCoreError):
-            raise
-        except (AttributeError, KeyError, TypeError, ValueError):
-            pass
-
-    next_marker: Optional[str] = None
-    while True:
-        call = getattr(client, operation, None)
-        if call is None:
-            raise AttributeError(f"client has no operation {operation}")
-        req = dict(params)
-        if next_marker:
-            req["Marker"] = next_marker
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_marker = cast(Optional[str], resp.get("NextMarker") or resp.get("Marker"))
-        if not next_marker:
-            break
 
 
 def _chunk(seq: Sequence[str], size: int) -> Iterator[List[str]]:
@@ -361,7 +317,16 @@ class ElbV2LoadBalancersChecker:
 
         # Inventory
         try:
-            lbs = list(_paginate_items(elbv2, "describe_load_balancers", "LoadBalancers"))
+            lbs = list(
+                paginate_items(
+                    elbv2,
+                    "describe_load_balancers",
+                    "LoadBalancers",
+                    paginator_fallback_exceptions=(AttributeError, KeyError, TypeError, ValueError),
+                    request_token_key="Marker",
+                    response_token_keys=("NextMarker", "Marker"),
+                )
+            )
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code") or "")
             yield FindingDraft(
@@ -504,11 +469,14 @@ class ElbV2LoadBalancersChecker:
         for lb_arn in lb_arns:
             try:
                 listeners = list(
-                    _paginate_items(
+                    paginate_items(
                         elbv2,
                         "describe_listeners",
                         "Listeners",
                         params={"LoadBalancerArn": lb_arn},
+                        paginator_fallback_exceptions=(AttributeError, KeyError, TypeError, ValueError),
+                        request_token_key="Marker",
+                        response_token_keys=("NextMarker", "Marker"),
                     )
                 )
             except ClientError as exc:
@@ -537,11 +505,14 @@ class ElbV2LoadBalancersChecker:
         for lb_arn in lb_arns:
             try:
                 tgs = list(
-                    _paginate_items(
+                    paginate_items(
                         elbv2,
                         "describe_target_groups",
                         "TargetGroups",
                         params={"LoadBalancerArn": lb_arn},
+                        paginator_fallback_exceptions=(AttributeError, KeyError, TypeError, ValueError),
+                        request_token_key="Marker",
+                        response_token_keys=("NextMarker", "Marker"),
                     )
                 )
             except ClientError as exc:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, MutableMapping, Optional
+from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from contracts.finops_checker_pattern import Scope
 
@@ -219,3 +219,55 @@ def is_suppressed(
                     return True
 
     return False
+
+
+def paginate_items(
+    client: Any,
+    operation: str,
+    result_key: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    request_token_key: str = "NextToken",
+    response_token_keys: Sequence[str] = ("NextToken",),
+    paginator_fallback_exceptions: Tuple[type[Exception], ...] = (Exception,),
+) -> Iterator[Dict[str, Any]]:
+    """Yield dict items from paginator when available, else token-loop fallback.
+
+    This keeps checker pagination behavior deterministic while still supporting
+    unit-test fakes/mocks that do not fully implement boto3 paginators.
+    """
+    params = dict(params or {})
+
+    if hasattr(client, "get_paginator"):
+        try:
+            paginator = client.get_paginator(operation)
+            for page in paginator.paginate(**params):
+                for item in page.get(result_key, []) or []:
+                    if isinstance(item, dict):
+                        yield item
+            return
+        except paginator_fallback_exceptions:
+            pass
+
+    call = getattr(client, operation, None)
+    if call is None:
+        raise AttributeError(f"client has no operation {operation}")
+
+    next_token: Optional[str] = None
+    while True:
+        req = dict(params)
+        if next_token:
+            req[request_token_key] = next_token
+        resp = call(**req) if req else call()
+        for item in resp.get(result_key, []) or []:
+            if isinstance(item, dict):
+                yield item
+
+        next_token = None
+        for key in response_token_keys:
+            token = resp.get(key)
+            if token:
+                next_token = str(token)
+                break
+        if not next_token:
+            break

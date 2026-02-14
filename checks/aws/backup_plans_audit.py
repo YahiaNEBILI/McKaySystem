@@ -52,6 +52,7 @@ from checks.aws._common import (
     is_suppressed,
     money,
     now_utc,
+    paginate_items,
     safe_float,
     safe_region_from_client,
     utc,
@@ -128,48 +129,6 @@ def _pricing_backup_gb_month_price(
     return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
 
 
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    """
-    Yield dict items from either a paginator (preferred) or a NextToken loop fallback.
-
-    This keeps the checker robust against local stubs/mocks that may not implement paginator behavior.
-    """
-    params = dict(params or {})
-
-    # Prefer paginator if present and works
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except Exception:
-            # Fall back to token loop below
-            pass
-
-    next_token: Optional[str] = None
-    while True:
-        call = getattr(client, operation)
-        req = dict(params)
-        if next_token:
-            req["NextToken"] = next_token
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_token = resp.get("NextToken")
-        if not next_token:
-            break
-
-
 class AwsBackupPlansAuditChecker:
     """
     One checker, three issue types (distinct check_id values).
@@ -221,7 +180,7 @@ class AwsBackupPlansAuditChecker:
     # ------------------------- 1) plans without selections ------------------------- #
 
     def _plans_without_selections(self, ctx, backup: BaseClient, region: str) -> Iterable[FindingDraft]:
-        for plan in _paginate_items(backup, "list_backup_plans", "BackupPlansList"):
+        for plan in paginate_items(backup, "list_backup_plans", "BackupPlansList"):
             plan_id = str(plan.get("BackupPlanId") or "")
             plan_name = str(plan.get("BackupPlanName") or plan_id or "")
             if not plan_id:
@@ -229,7 +188,7 @@ class AwsBackupPlansAuditChecker:
 
             # List selections (can be paginated)
             has_any_selection = False
-            for _sel in _paginate_items(
+            for _sel in paginate_items(
                 backup,
                 "list_backup_selections",
                 "BackupSelectionsList",
@@ -263,7 +222,7 @@ class AwsBackupPlansAuditChecker:
     # ------------------------- 2) rules missing lifecycle -------------------------- #
 
     def _rules_no_lifecycle(self, ctx, backup: BaseClient, region: str) -> Iterable[FindingDraft]:
-        for plan in _paginate_items(backup, "list_backup_plans", "BackupPlansList"):
+        for plan in paginate_items(backup, "list_backup_plans", "BackupPlansList"):
             plan_id = str(plan.get("BackupPlanId") or "")
             plan_name = str(plan.get("BackupPlanName") or plan_id or "")
             if not plan_id:
@@ -320,12 +279,12 @@ class AwsBackupPlansAuditChecker:
         cutoff = (now - timedelta(days=self._stale_days)).replace(microsecond=0)
         skip_cutoff = now + timedelta(days=self._skip_if_deleting_within_days)
 
-        for vault in _paginate_items(backup, "list_backup_vaults", "BackupVaultList"):
+        for vault in paginate_items(backup, "list_backup_vaults", "BackupVaultList"):
             vault_name = str(vault.get("BackupVaultName") or "")
             if not vault_name:
                 continue
 
-            for rp in _paginate_items(
+            for rp in paginate_items(
                 backup,
                 "list_recovery_points_by_backup_vault",
                 "RecoveryPoints",
