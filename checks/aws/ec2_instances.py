@@ -110,7 +110,7 @@ def _estimate_instance_monthly_cost_usd(ctx: RunContext, *, region: str, instanc
     location = None
     try:
         location = pricing.location_for_region(region)
-    except Exception:
+    except (AttributeError, TypeError, ValueError, BotoCoreError, ClientError):
         location = None
     if not location:
         return None, 30, "pricing location unavailable"
@@ -138,7 +138,7 @@ def _estimate_instance_monthly_cost_usd(ctx: RunContext, *, region: str, instanc
     for filters in attempts:
         try:
             quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except Exception:
+        except (AttributeError, TypeError, ValueError, BotoCoreError, ClientError):
             quote = None
         if quote is not None:
             break
@@ -149,7 +149,7 @@ def _estimate_instance_monthly_cost_usd(ctx: RunContext, *, region: str, instanc
     # Convert hourly -> monthly using a standard 730 hours/month approximation.
     try:
         hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         hourly = 0.0
     if hourly <= 0.0:
         return None, 35, "invalid on-demand EC2 unit price"
@@ -586,7 +586,7 @@ class EC2InstancesChecker:
                     continue
                 try:
                     sz = float(v.get("Size") or 0.0)
-                except Exception:
+                except (TypeError, ValueError):
                     sz = 0.0
                 size_gib += max(sz, 0.0)
                 est_storage_cost += _estimate_ebs_monthly_cost_usd(sz, str(v.get("VolumeType") or "gp2"))

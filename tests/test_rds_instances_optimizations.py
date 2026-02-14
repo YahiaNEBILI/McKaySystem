@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, cast
 from datetime import datetime, timezone
 import pytest
 
 from checks.aws.rds_instances_optimizations import (
     AwsAccountContext,
     RDSInstancesOptimizationsChecker,
+    _arn_partition,
 )
 
 from botocore.exceptions import ClientError
@@ -601,3 +602,25 @@ def test_cloudwatch_access_error_emits_and_checker_continues() -> None:
 
     assert any(f.check_id == "aws.rds.instances.access_error" for f in findings)
     assert any(f.check_id == "aws.rds.multi_az.non_prod" for f in findings)
+
+
+def test_arn_partition_returns_empty_on_malformed_value() -> None:
+    assert _arn_partition(cast(Any, None)) == ""
+
+
+def test_access_error_handles_malformed_clienterror_response() -> None:
+    checker = _mk_checker()
+    ctx = _FakeCtx()
+    ctx.services = _FakeServices(rds=None, cloudwatch=None)
+
+    class _BadClientError(Exception):
+        response = 123
+
+    finding = checker._access_error(
+        ctx,
+        region="eu-west-3",
+        action="describe_db_instances",
+        exc=cast(ClientError, _BadClientError()),
+    )
+    assert finding.check_id == "aws.rds.instances.access_error"
+    assert "ErrorCode=" in finding.message

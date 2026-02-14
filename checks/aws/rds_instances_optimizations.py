@@ -67,7 +67,7 @@ def _arn_partition(arn: str) -> str:
         parts = arn.split(":")
         if len(parts) >= 2 and parts[0] == "arn":
             return parts[1] or ""
-    except Exception:  # pragma: no cover
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover
         return ""
     return ""
 
@@ -944,12 +944,8 @@ class RDSInstancesOptimizationsChecker:
         code = ""
         try:
             code = str(exc.response.get("Error", {}).get("Code", ""))
-        except Exception:  # pragma: no cover
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
             code = ""
-            try:
-                code = str(exc.response.get("Error", {}).get("Code", ""))
-            except Exception:  # pragma: no cover
-                code = ""
 
         scope = build_scope(
             ctx,

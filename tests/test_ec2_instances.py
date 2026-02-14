@@ -325,3 +325,64 @@ def test_unused_security_group_excludes_referenced(monkeypatch: pytest.MonkeyPat
     hits = [f for f in findings if f.check_id == "aws.ec2.security_groups.unused"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "sg-unused"
+
+
+def test_pricing_lookup_handles_malformed_pricing_data() -> None:
+    import checks.aws.ec2_instances as mod
+
+    class BadPricing:
+        def location_for_region(self, _region: str) -> str:
+            return "EU (Paris)"
+
+        def get_on_demand_unit_price(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(unit_price="not-a-number")
+
+    monthly, confidence, notes = mod._estimate_instance_monthly_cost_usd(
+        cast(RunContext, SimpleNamespace(services=SimpleNamespace(pricing=BadPricing()))),
+        region="eu-west-3",
+        instance_type="t3.micro",
+    )
+    assert monthly is None
+    assert confidence == 35
+    assert "invalid on-demand EC2 unit price" in notes
+
+
+def test_stopped_long_ignores_malformed_volume_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.ec2_instances as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc))
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_instances": [
+                {
+                    "Reservations": [
+                        {
+                            "Instances": [
+                                {
+                                    "InstanceId": "i-stop-bad-vol",
+                                    "InstanceType": "t3.micro",
+                                    "State": {"Name": "stopped"},
+                                    "StateTransitionReason": "User initiated (2025-12-01 00:00:00)",
+                                    "BlockDeviceMappings": [{"Ebs": {"VolumeId": "vol-bad"}}],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "describe_security_groups": [{"SecurityGroups": []}],
+            "describe_network_interfaces": [{"NetworkInterfaces": []}],
+        },
+        volumes={"vol-bad": {"VolumeId": "vol-bad", "Size": "oops", "VolumeType": "gp2"}},
+    )
+
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=None)
+    checker = EC2InstancesChecker(
+        account=mod.AwsAccountContext(account_id="123", billing_account_id="123"),
+        cfg=EC2InstancesConfig(stopped_long_age_days=30),
+    )
+    findings = list(checker.run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.stopped_long")
+    assert hit.scope.resource_id == "i-stop-bad-vol"
+    assert float(hit.estimated_monthly_cost or 0.0) == pytest.approx(0.0, rel=1e-6)
