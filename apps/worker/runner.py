@@ -1,5 +1,5 @@
 """
-runner.py
+apps.worker.runner
 
 FinOps SaaS runner (checkers -> validated wire findings -> storage-cast -> parquet).
 
@@ -22,20 +22,20 @@ Regions are configured in infra/aws_config.py (AWS_REGIONS).
 No CLI args are used for region selection.
 
 Run everything (default):
-python runner.py --tenant acme --workspace prod
+python -m apps.worker.runner --tenant acme --workspace prod
 
 Disable correlation:
-python runner.py --tenant acme --workspace prod --no-correlation
+python -m apps.worker.runner --tenant acme --workspace prod --no-correlation
 
 Custom correlated output directory:
-python runner.py --tenant acme --workspace prod --correlation-out data/finops_findings_correlated
+python -m apps.worker.runner --tenant acme --workspace prod --correlation-out data/finops_findings_correlated
 
 Run everything except one checker:
-python runner.py --tenant acme --workspace prod \
+python -m apps.worker.runner --tenant acme --workspace prod \
   --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
 
 Run a subset:
-python runner.py --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
+python -m apps.worker.runner --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
 """
 
 from __future__ import annotations

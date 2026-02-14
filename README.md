@@ -24,11 +24,11 @@ Quick commands:
 ```bash
 pip install -e ".[dev]"
 pytest
-python runner.py --tenant acme --workspace prod
-python export_findings.py
+python -m apps.worker.runner --tenant acme --workspace prod
+python -m apps.worker.export_findings
 ```
 
-Note: `export_findings.py` writes `webapp_data/findings.json` for the UI. DB ingestion reads Parquet via `run_manifest.json`.
+Note: `python -m apps.worker.export_findings` writes `webapp_data/findings.json` for the UI. DB ingestion reads Parquet via `run_manifest.json`.
 Migrations: run `python db_migrate.py` (or `mckay migrate`) before first ingest.
 
 Monorepo separation:
@@ -123,7 +123,7 @@ Canonical definitions live in `docs/00_overview/glossary.md`.
 
 ```
 .
-├── runner.py                    # Main orchestration entrypoint
+├── apps/worker/runner.py        # Main orchestration entrypoint
 ├── contracts/                   # Canonical schema & validation
 │   ├── schema.py                # Arrow schema (source of truth)
 │   ├── finops_contracts.py      # Canonicalization & hashing
@@ -336,8 +336,8 @@ This fully decouples backend evolution from the UI.
 ## Typical end-to-end run
 
 ```bash
-python runner.py --tenant acme --workspace prod
-python export_findings.py
+python -m apps.worker.runner --tenant acme --workspace prod
+python -m apps.worker.export_findings
 ```
 
 If CUR data exists, costs appear automatically. If not, the UI degrades gracefully.

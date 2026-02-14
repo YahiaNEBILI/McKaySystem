@@ -3,7 +3,7 @@
 This module is intentionally tiny so it can be used as a one-liner during local
 development:
 
-  python export_findings.py
+  python -m apps.worker.export_findings
 
 It reads the default pipeline paths from :class:`infra.pipeline_paths.PipelinePaths`
 and runs :func:`pipeline.export_json.run_export`.

@@ -1,5 +1,5 @@
 """
-ingest_parquet.py
+apps.worker.ingest_parquet
 
 Ingest findings from Parquet datasets into Postgres using run_manifest.json
 as the single source of truth for tenant/workspace/run and dataset paths.

@@ -8,8 +8,6 @@ Worker entrypoint implementations:
 - `apps/worker/ingest_parquet.py`
 - `apps/worker/export_findings.py`
 
-Root scripts still exist as compatibility wrappers for existing automation.
-
 Rules:
 - Worker code must stay deterministic and idempotent.
 - Worker deploy/runtime is separate from backend deploy/runtime.

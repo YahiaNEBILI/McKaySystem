@@ -57,18 +57,13 @@ exclude = ["tests*", "docs*", "data*", "webapp_data*", "build*", "dist*"]
 
 [tool.setuptools]
 py-modules = [
-  "cli",
-  "runner",
   "db",
-  "export_findings",
-  "ingest_exported_json",
-  "ingest_parquet",
   "db_migrate",
   "version",
 ]
 
 [project.scripts]
-mckay = "cli:main"
+mckay = "apps.worker.cli:main"
 
 
 [tool.pytest.ini_options]

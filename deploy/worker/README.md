@@ -19,6 +19,3 @@ CI workflow:
 - `.github/workflows/worker-ci.yml` (path-scoped worker checks)
 
 Do not couple worker release cadence to backend API deployment.
-
-Note:
-- Root scripts (`runner.py`, `cli.py`, `ingest_parquet.py`, etc.) remain as compatibility wrappers.

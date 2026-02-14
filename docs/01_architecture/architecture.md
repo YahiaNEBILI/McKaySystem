@@ -134,7 +134,7 @@ Important files:
 
 ---
 
-### 2.4 `runner.py` (Orchestration)
+### 2.4 `apps/worker/runner.py` (Orchestration)
 
 Runner builds and wires:
 - `RunContext` (immutable run metadata)
@@ -142,7 +142,7 @@ Runner builds and wires:
 - checker instances
 - writer config
 
-Runner is the only place where you should load SDK config and instantiate cloud clients.
+The worker runner is the only place where you should load SDK config and instantiate cloud clients.
 
 ### 2.5 Checker discovery model
 
@@ -436,7 +436,7 @@ This keeps factories pure and testable.
 ### Run a checker
 
 ```bash
-python3 runner.py   --tenant acme   --workspace prod   --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker   --out data/finops_findings
+python3 -m apps.worker.runner --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker --out data/finops_findings
 ```
 
 ### Query Parquet with DuckDB

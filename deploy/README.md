@@ -9,7 +9,7 @@ Path/docs:
 
 2. Worker runtime (scanner/pipeline)
 Path/docs:
-- engine paths + worker entrypoints (`runner.py`, `cli.py`, etc.)
+- engine paths + `apps/worker/` entrypoints
 - `deploy/worker/README.md`
 
 Keep release cadence and runtime environments separate.

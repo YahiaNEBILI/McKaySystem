@@ -3,7 +3,7 @@
 
 flowchart TD
   %% --- Entry / orchestration ---
-  CLI["CLI / Scheduler\n(runner.py)"] --> RC["Build RunContext\n(tenant/workspace/run_id/run_ts)\n+ inject Services (AWS SDK clients)"]
+  CLI["CLI / Scheduler\n(apps.worker.runner)"] --> RC["Build RunContext\n(tenant/workspace/run_id/run_ts)\n+ inject Services (AWS SDK clients)"]
 
   %% --- Checker execution ---
   RC --> DISC["Checker selection\n(default: all)\n(optional: include/exclude)"]

@@ -13,7 +13,7 @@ import pytest
 import db_migrate
 from contracts.finops_contracts import build_ids_and_validate
 from db import db_conn
-from ingest_parquet import DbApi, ingest_from_manifest
+from apps.worker.ingest_parquet import DbApi, ingest_from_manifest
 from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import SCHEMA_VERSION

@@ -13,7 +13,6 @@ mckay migrate
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 import subprocess
 import sys
@@ -27,7 +26,7 @@ def _walk_up_for_root(start: Path) -> Optional[Path]:
     if cur.is_file():
         cur = cur.parent
     for _ in range(10):
-        if (cur / "pyproject.toml").exists() or (cur / "runner.py").exists():
+        if (cur / "pyproject.toml").exists() or (cur / "apps/worker/runner.py").exists():
             return cur
         if cur.parent == cur:
             break
@@ -43,10 +42,6 @@ def _repo_root() -> Path:
     you typically run the command from the repo).
     """
     return _walk_up_for_root(Path.cwd()) or _walk_up_for_root(Path(__file__)) or Path.cwd().resolve()
-
-
-def _module_exists(mod_name: str) -> bool:
-    return importlib.util.find_spec(mod_name) is not None
 
 
 def _python() -> str:
@@ -78,23 +73,19 @@ def cmd_run(args: argparse.Namespace) -> None:
     if not workspace:
         raise SystemExit("Missing --workspace (or WORKSPACE env var).")
 
-    # Run as module so it works whether we're in-repo or installed as py-modules
-    if not _module_exists("runner") and not (root / "runner.py").exists():
-        raise SystemExit(
-            "runner module not found. Run from the project directory or ensure runner.py is installed as a module."
-        )
+    runner_module = "apps.worker.runner"
+    if not (root / "apps/worker/runner.py").exists():
+        raise SystemExit(f"{runner_module} module not found. Run from the project directory.")
 
-    cmd = [_python(), "-m", "runner", "--tenant", tenant, "--workspace", workspace, "--out", out_dir]
+    cmd = [_python(), "-m", runner_module, "--tenant", tenant, "--workspace", workspace, "--out", out_dir]
     _run_cmd(cmd, cwd=root)
 
 
 def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argument
     root = _repo_root()
-    if not _module_exists("export_findings") and not (root / "export_findings.py").exists():
-        raise SystemExit(
-            "export_findings module not found. "
-            "Run from the project directory or ensure export_findings.py is installed."
-        )
+    export_module = "apps.worker.export_findings"
+    if not (root / "apps/worker/export_findings.py").exists():
+        raise SystemExit(f"{export_module} module not found. Run from the project directory.")
     tenant = args.tenant or _env_default("TENANT_ID")
     workspace = args.workspace or _env_default("WORKSPACE")
     out_dir = args.out or _env_default("OUT_DIR", "data/finops_findings")
@@ -110,16 +101,15 @@ def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argu
     env["WORKSPACE"] = workspace
 
     manifest_path = str((Path(out_dir) / "run_manifest.json").resolve())
-    cmd = [_python(), "-m", "export_findings", "--tenant-id", tenant, "--manifest", manifest_path]
+    cmd = [_python(), "-m", export_module, "--tenant-id", tenant, "--manifest", manifest_path]
     _run_cmd(cmd, cwd=root, env=env)
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
     root = _repo_root()
-    if not _module_exists("ingest_parquet") and not (root / "ingest_parquet.py").exists():
-        raise SystemExit(
-            "ingest_parquet module not found. Run from the project directory or ensure ingest_parquet.py is installed."
-        )
+    ingest_module = "apps.worker.ingest_parquet"
+    if not (root / "apps/worker/ingest_parquet.py").exists():
+        raise SystemExit(f"{ingest_module} module not found. Run from the project directory.")
 
     db_url = args.db_url or _env_default("DB_URL")
     tenant = args.tenant or _env_default("TENANT_ID")
@@ -137,7 +127,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     env["TENANT_ID"] = tenant
     env["WORKSPACE"] = workspace
 
-    cmd = [_python(), "-m", "ingest_parquet"]
+    cmd = [_python(), "-m", ingest_module]
     manifest_arg = getattr(args, "manifest", None)
     if manifest_arg:
         cmd.extend(["--manifest", str(manifest_arg)])
@@ -152,9 +142,9 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 def cmd_migrate(args: argparse.Namespace) -> None:
     root = _repo_root()
-    if not _module_exists("db_migrate") and not (root / "db_migrate.py").exists():
+    if not (root / "db_migrate.py").exists():
         raise SystemExit(
-            "db_migrate module not found. Run from the project directory or ensure db_migrate.py is installed."
+            "db_migrate module not found. Run from the project directory."
         )
 
     env = None
@@ -180,7 +170,7 @@ def cmd_run_all(args: argparse.Namespace) -> None:
 
     db_url = args.db_url or _env_default("DB_URL")
     if not db_url:
-        print("DB_URL not set and --db-url not provided → skipping ingest.")
+        print("DB_URL not set and --db-url not provided -> skipping ingest.")
         if not args.skip_export:
             cmd_export(args)
         return

@@ -20,13 +20,12 @@ This policy keeps the monorepo operable while hosting:
 - Owned implementation paths:
   - `apps/worker/` (entrypoint implementations)
   - `checks/`, `contracts/`, `pipeline/`, `infra/`, `services/`
-- Root worker scripts (`runner.py`, `cli.py`, ingest/export scripts) are compatibility wrappers only.
 - Deployment docs: `deploy/worker/`
 
 ## Root-Level Rules
 
 Root should only contain:
-- stable entrypoints (`runner.py`, `cli.py`, ingest/export/migrate scripts)
+- DB and project entrypoints (`db_migrate.py`, `db.py`)
 - project metadata/config (`pyproject.toml`, `pytest.ini`, `README.md`, `LICENSE`)
 - top-level owned directories (`apps/`, `docs/`, `checks/`, `pipeline/`, etc.)
 
