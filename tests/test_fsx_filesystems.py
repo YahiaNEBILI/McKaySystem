@@ -236,3 +236,90 @@ def test_windows_storage_type_mismatch_emits_when_ssd_low_activity(monkeypatch: 
     findings = list(checker.run(ctx))
 
     assert any(f.check_id == "aws.fsx.windows.storage_type_mismatch" for f in findings)
+
+
+def test_fsx_storage_pricing_uses_service_quote() -> None:
+    import checks.aws.fsx_filesystems as mod
+
+    quote = SimpleNamespace(
+        unit_price_usd=0.22,
+        source="catalog",
+        as_of=datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc),
+        unit="GB-Mo",
+    )
+
+    pricing = SimpleNamespace(
+        location_for_region=lambda _region: "EU (Ireland)",
+        get_on_demand_unit_price=lambda **_kwargs: quote,
+    )
+    ctx = cast(RunContext, SimpleNamespace(cloud="aws", services=SimpleNamespace(pricing=pricing)))
+
+    price, notes, confidence = mod._resolve_fsx_storage_price_usd_per_gb_month(
+        ctx,
+        region="eu-west-1",
+        fs_type="WINDOWS",
+        storage_type="SSD",
+    )
+
+    assert price == pytest.approx(0.22)
+    assert confidence == 70
+    assert "PricingService catalog" in notes
+
+
+def test_fsx_storage_pricing_falls_back_on_lookup_error() -> None:
+    import checks.aws.fsx_filesystems as mod
+
+    def _raise_type_error(**_kwargs: Any) -> Any:
+        raise TypeError("boom")
+
+    pricing = SimpleNamespace(
+        location_for_region=lambda _region: "EU (Ireland)",
+        get_on_demand_unit_price=_raise_type_error,
+    )
+    ctx = cast(RunContext, SimpleNamespace(cloud="aws", services=SimpleNamespace(pricing=pricing)))
+
+    price, notes, confidence = mod._resolve_fsx_storage_price_usd_per_gb_month(
+        ctx,
+        region="eu-west-1",
+        fs_type="WINDOWS",
+        storage_type="SSD",
+    )
+
+    assert price == pytest.approx(0.13)
+    assert confidence == 30
+    assert "fallback pricing" in notes
+
+
+def test_fsx_throughput_pricing_tries_multiple_units() -> None:
+    import checks.aws.fsx_filesystems as mod
+
+    calls: List[str] = []
+
+    def _get_on_demand_unit_price(*, unit: str, **_kwargs: Any) -> Any:
+        calls.append(unit)
+        if unit == "MBps-month":
+            return SimpleNamespace(
+                unit_price_usd=1.7,
+                source="catalog",
+                as_of=datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc),
+                unit=unit,
+            )
+        return None
+
+    pricing = SimpleNamespace(
+        location_for_region=lambda _region: "EU (Ireland)",
+        get_on_demand_unit_price=_get_on_demand_unit_price,
+    )
+    ctx = cast(RunContext, SimpleNamespace(cloud="aws", services=SimpleNamespace(pricing=pricing)))
+
+    price, notes, confidence = mod._resolve_fsx_throughput_price_usd_per_mbps_month(
+        ctx,
+        region="eu-west-1",
+        fs_type="WINDOWS",
+    )
+
+    assert price == pytest.approx(1.7)
+    assert confidence == 70
+    assert "PricingService catalog" in notes
+    assert "MBps-Mo" in calls
+    assert "MBps-month" in calls

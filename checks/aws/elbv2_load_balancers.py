@@ -43,6 +43,9 @@ from checks.aws._common import (
     normalize_tags,
     now_utc,
     paginate_items,
+    pricing_location_for_region,
+    pricing_on_demand_first_positive,
+    pricing_service,
     safe_float,
     safe_region_from_client,
 )
@@ -85,25 +88,17 @@ _FALLBACK_ALB_HOURLY_USD: float = 0.025
 _FALLBACK_NLB_HOURLY_USD: float = 0.0225
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
 def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) -> Tuple[float, str, int]:
     """Best-effort hourly price for ALB/NLB.
 
     Returns: (usd_per_hour, notes, confidence_0_100)
     """
     fallback = _FALLBACK_ALB_HOURLY_USD if lb_type == "application" else _FALLBACK_NLB_HOURLY_USD
-    pricing = _pricing_service(ctx)
+    pricing = pricing_service(ctx)
     if pricing is None:
         return fallback, "PricingService unavailable; using fallback pricing.", 30
 
-    location = ""
-    try:
-        location = str(pricing.location_for_region(region) or "")
-    except (AttributeError, TypeError, ValueError):
-        location = ""
+    location = pricing_location_for_region(pricing, region)
     if not location:
         return fallback, "Pricing region mapping missing; using fallback pricing.", 30
 
@@ -135,20 +130,14 @@ def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) ->
             ],
         ]
 
-    hourly: Optional[float] = None
-    for filters in attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except (ClientError, BotoCoreError, AttributeError, TypeError, ValueError):
-            quote = None
-        if quote is None:
-            continue
-        try:
-            hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except (TypeError, ValueError):
-            hourly = None
-        if hourly and hourly > 0.0:
-            return float(hourly), "on-demand hourly price resolved via PricingService", 60
+    hourly, _ = pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonEC2",
+        attempts=[("Hrs", flt) for flt in attempts],
+        call_exceptions=(ClientError, BotoCoreError, AttributeError, TypeError, ValueError),
+    )
+    if hourly and hourly > 0.0:
+        return float(hourly), "on-demand hourly price resolved via PricingService", 60
 
     return float(fallback), "using fallback pricing", 30
 

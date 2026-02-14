@@ -324,3 +324,63 @@ def pricing_first_positive(
                 return price, method_name
 
     return None, ""
+
+
+def pricing_location_for_region(pricing: Any, region: str) -> str:
+    """Return pricing location for a region, or empty string on failure."""
+    if pricing is None:
+        return ""
+    fn = getattr(pricing, "location_for_region", None)
+    if not callable(fn):
+        return ""
+    try:
+        return str(fn(region) or "")
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def pricing_quote_unit_price(quote: Any) -> Optional[float]:
+    """Extract a positive unit price from a quote-like object."""
+    if quote is None:
+        return None
+    for attr in ("unit_price_usd", "unit_price", "price"):
+        try:
+            raw = getattr(quote, attr, None)
+            if raw is None:
+                continue
+            value = float(raw)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if value > 0.0:
+            return value
+    return None
+
+
+def pricing_on_demand_first_positive(
+    pricing: Any,
+    *,
+    service_code: str,
+    attempts: Sequence[Tuple[str, Sequence[Mapping[str, str]]]],
+    call_exceptions: Tuple[type[Exception], ...],
+) -> Tuple[Optional[float], Any]:
+    """Return first positive on-demand quote price for (unit, filters) attempts.
+
+    Returns ``(price, quote)`` where ``quote`` is the raw quote object. If no
+    match is found, returns ``(None, None)``.
+    """
+    if pricing is None:
+        return None, None
+    fn = getattr(pricing, "get_on_demand_unit_price", None)
+    if not callable(fn):
+        return None, None
+
+    for unit, filters in attempts:
+        try:
+            quote = fn(service_code=service_code, filters=list(filters), unit=unit)
+        except call_exceptions:
+            continue
+        price = pricing_quote_unit_price(quote)
+        if price is not None and price > 0.0:
+            return float(price), quote
+
+    return None, None

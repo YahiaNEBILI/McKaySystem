@@ -36,6 +36,9 @@ from botocore.exceptions import ClientError
 from checks.aws._common import (
     build_scope,
     AwsAccountContext,
+    pricing_location_for_region,
+    pricing_on_demand_first_positive,
+    pricing_service,
     normalize_tags,
     now_utc,
     safe_region_from_client,
@@ -108,11 +111,6 @@ _FALLBACK_FSX_THROUGHPUT_USD_PER_MBPS_MONTH: Dict[str, float] = {
 _NONPROD_HINTS = ("dev", "test", "staging", "sbx", "nprod", "qa", "nonprod")
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    """Return PricingService if injected in ctx.services, else None."""
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
 def _fallback_storage_usd_per_gb_month(*, fs_type: str, storage_type: str) -> float:
     t = str(fs_type or "").upper()
     st = str(storage_type or "").upper()
@@ -142,11 +140,11 @@ def _resolve_fsx_storage_price_usd_per_gb_month(
     Returns: (usd_per_gb_month, notes, confidence_int)
     """
     default_price = _fallback_storage_usd_per_gb_month(fs_type=fs_type, storage_type=storage_type)
-    pricing = _pricing_service(ctx)
+    pricing = pricing_service(ctx)
     if pricing is None:
         return (default_price, "PricingService unavailable; using fallback pricing.", 30)
 
-    location = pricing.location_for_region(region)
+    location = pricing_location_for_region(pricing, region)
     if not location:
         return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
 
@@ -174,21 +172,22 @@ def _resolve_fsx_storage_price_usd_per_gb_month(
         ],
     ]
 
-    try:
-        for filters in attempts:
-            quote = pricing.get_on_demand_unit_price(
-                service_code="AmazonFSx",
-                filters=filters,
-                unit="GB-Mo",
-            )
-            if quote is not None:
-                return (
-                    float(quote.unit_price_usd),
-                    f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                    60 if quote.source == "cache" else 70,
-                )
-    except Exception:
-        pass
+    price, quote = pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonFSx",
+        attempts=[("GB-Mo", flt) for flt in attempts],
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
+    if price is not None and quote is not None:
+        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+        as_of = getattr(quote, "as_of", None)
+        unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+        return (
+            float(price),
+            f"PricingService {source} as_of={as_of_txt} unit={unit}",
+            60 if source == "cache" else 70,
+        )
 
     return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
 
@@ -208,11 +207,11 @@ def _resolve_fsx_throughput_price_usd_per_mbps_month(
     if default_price <= 0.0:
         return (0.0, "No throughput fallback for this FSx type; leaving throughput estimate as 0.", 20)
 
-    pricing = _pricing_service(ctx)
+    pricing = pricing_service(ctx)
     if pricing is None:
         return (default_price, "PricingService unavailable; using fallback pricing.", 30)
 
-    location = pricing.location_for_region(region)
+    location = pricing_location_for_region(pricing, region)
     if not location:
         return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
 
@@ -238,22 +237,23 @@ def _resolve_fsx_throughput_price_usd_per_mbps_month(
         ],
     ]
 
-    try:
-        for unit in units:
-            for filters in attempts:
-                quote = pricing.get_on_demand_unit_price(
-                    service_code="AmazonFSx",
-                    filters=filters,
-                    unit=unit,
-                )
-                if quote is not None:
-                    return (
-                        float(quote.unit_price_usd),
-                        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                        60 if quote.source == "cache" else 70,
-                    )
-    except Exception:
-        pass
+    attempt_units = [(unit, flt) for unit in units for flt in attempts]
+    price, quote = pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonFSx",
+        attempts=attempt_units,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
+    if price is not None and quote is not None:
+        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+        as_of = getattr(quote, "as_of", None)
+        unit = str(getattr(quote, "unit", "MBps-Mo") or "MBps-Mo")
+        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+        return (
+            float(price),
+            f"PricingService {source} as_of={as_of_txt} unit={unit}",
+            60 if source == "cache" else 70,
+        )
 
     return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
 
@@ -374,7 +374,7 @@ def _cw_get(
         return []
     except ClientError:
         return []
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return []
 
 
@@ -531,7 +531,7 @@ class FSxFileSystemsChecker(Checker):
                     for fs_any in page_fs:
                         if isinstance(fs_any, dict):
                             file_systems.append(fs_any)
-        except Exception:
+        except (AttributeError, TypeError, ValueError, ClientError):
             # Fallback: single call (older mocks / unusual clients / edge cases).
             try:
                 resp = fsx.describe_file_systems()
@@ -542,7 +542,7 @@ class FSxFileSystemsChecker(Checker):
                             file_systems.append(fs_any)
             except ClientError:
                 return
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 return
 
         if not file_systems:
@@ -910,7 +910,7 @@ class FSxFileSystemsChecker(Checker):
                 parts = maint.split(":")
                 if len(parts) >= 2:
                     hour = int(parts[1])
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 hour = None
 
             if hour is not None and 8 <= hour <= 18 and not _is_nonprod(tags):

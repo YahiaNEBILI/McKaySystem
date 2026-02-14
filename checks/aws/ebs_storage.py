@@ -102,11 +102,6 @@ def _usd_per_gb_month(volume_type: str) -> float:
     return float(_FALLBACK_USD_PER_GB_MONTH.get(str(volume_type or "gp2"), 0.10))
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    """Return PricingService if injected in ctx.services, else None."""
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
 def _resolve_ebs_volume_storage_price_usd_per_gb_month(
     ctx: RunContext,
     *,
@@ -118,17 +113,13 @@ def _resolve_ebs_volume_storage_price_usd_per_gb_month(
     Returns: (usd_per_gb_month, notes, confidence)
     """
     default_price = _usd_per_gb_month(volume_type)
-    pricing = _pricing_service(ctx)
+    pricing = common.pricing_service(ctx)
     if pricing is None:
         return (default_price, "PricingService unavailable; using fallback pricing.", 30)
 
-    location = getattr(pricing, "location_for_region", None)
-    if callable(location):
-        try:
-            if not pricing.location_for_region(region):
-                return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
-        except (AttributeError, TypeError, ValueError, ClientError):
-            return (default_price, "Pricing lookup failed; using fallback pricing.", 30)
+    location = common.pricing_location_for_region(pricing, region)
+    if not location:
+        return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
 
     # Pricing API attributes for EBS can change; we attempt common usageType patterns.
     vt = str(volume_type or "gp2").strip().lower()
@@ -147,26 +138,33 @@ def _resolve_ebs_volume_storage_price_usd_per_gb_month(
     else:
         usage_types = ["EBS:VolumeUsage"]
 
-    try:
-        for ut in usage_types:
-            quote = pricing.get_on_demand_unit_price(
-                service_code="AmazonEC2",
-                filters=[
-                    {"Field": "location", "Value": pricing.location_for_region(region) or ""},
-                    {"Field": "productFamily", "Value": "Storage"},
-                    {"Field": "usagetype", "Value": ut},
-                ],
-                unit="GB-Mo",
-            )
-            if quote is not None:
-                return (
-                    float(getattr(quote, "unit_price_usd", None) or getattr(quote, "unit_price", None) or getattr(quote, "price", None)),
-                    f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                    60 if quote.source == "cache" else 70,
-                )
-    except (AttributeError, TypeError, ValueError, ClientError):
-        # Pricing is best-effort; never fail the checker.
-        pass
+    attempts = [
+        (
+            "GB-Mo",
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Storage"},
+                {"Field": "usagetype", "Value": ut},
+            ],
+        )
+        for ut in usage_types
+    ]
+    price, quote = common.pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonEC2",
+        attempts=attempts,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
+    if price is not None and quote is not None:
+        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+        as_of = getattr(quote, "as_of", None)
+        unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+        return (
+            float(price),
+            f"PricingService {source} as_of={as_of_txt} unit={unit}",
+            60 if source == "cache" else 70,
+        )
 
     return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
 
@@ -178,28 +176,38 @@ def _resolve_ebs_snapshot_storage_price_usd_per_gb_month(
 ) -> tuple[float, str, int]:
     """Resolve EBS snapshot storage unit price (GB-Mo) best-effort."""
     default_price = _usd_per_gb_month("gp2")
-    pricing = _pricing_service(ctx)
+    pricing = common.pricing_service(ctx)
     if pricing is None:
         return (default_price, "PricingService unavailable; using fallback pricing.", 30)
+    location = common.pricing_location_for_region(pricing, region)
+    if not location:
+        return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
 
-    try:
-        quote = pricing.get_on_demand_unit_price(
-            service_code="AmazonEC2",
-            filters=[
-                {"Field": "location", "Value": pricing.location_for_region(region) or ""},
-                {"Field": "productFamily", "Value": "Storage"},
-                {"Field": "usagetype", "Value": "EBS:SnapshotUsage"},
-            ],
-            unit="GB-Mo",
+    price, quote = common.pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonEC2",
+        attempts=(
+            (
+                "GB-Mo",
+                [
+                    {"Field": "location", "Value": location},
+                    {"Field": "productFamily", "Value": "Storage"},
+                    {"Field": "usagetype", "Value": "EBS:SnapshotUsage"},
+                ],
+            ),
+        ),
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
+    if price is not None and quote is not None:
+        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+        as_of = getattr(quote, "as_of", None)
+        unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+        return (
+            float(price),
+            f"PricingService {source} as_of={as_of_txt} unit={unit}",
+            60 if source == "cache" else 70,
         )
-        if quote is not None:
-            return (
-                float(getattr(quote, "unit_price_usd", None) or getattr(quote, "unit_price", None) or getattr(quote, "price", None)),
-                f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                60 if quote.source == "cache" else 70,
-            )
-    except (AttributeError, TypeError, ValueError, ClientError):
-        pass
 
     return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
 

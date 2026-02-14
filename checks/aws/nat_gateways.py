@@ -41,6 +41,9 @@ from checks.aws._common import (
     normalize_tags,
     now_utc,
     paginate_items,
+    pricing_location_for_region,
+    pricing_on_demand_first_positive,
+    pricing_service,
     safe_float,
     safe_region_from_client,
 )
@@ -86,25 +89,17 @@ _FALLBACK_NAT_HOURLY_USD: float = 0.045
 _FALLBACK_NAT_DATA_USD_PER_GB: float = 0.045
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
 def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float, str, int]:
     """
     Best-effort pricing for NAT Gateway.
 
     Returns: (usd_per_hour, usd_per_gb_processed, notes, confidence_0_100)
     """
-    pricing = _pricing_service(ctx)
+    pricing = pricing_service(ctx)
     if pricing is None:
         return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "PricingService unavailable; using fallback pricing.", 30
 
-    location = ""
-    try:
-        location = str(pricing.location_for_region(region) or "")
-    except (AttributeError, TypeError, ValueError):
-        location = ""
+    location = pricing_location_for_region(pricing, region)
     if not location:
         return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "Pricing region mapping missing; using fallback pricing.", 30
 
@@ -130,21 +125,14 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
         ],
     ]
 
-    for filters in hourly_attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except (AttributeError, TypeError, ValueError, ClientError):
-            quote = None
-        if quote is None:
-            continue
-        try:
-            hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except (TypeError, ValueError):
-            hourly = None
-        if hourly and hourly > 0.0:
-            notes.append("on-demand hourly price resolved via PricingService")
-            break
-        hourly = None
+    hourly, _ = pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonEC2",
+        attempts=[("Hrs", flt) for flt in hourly_attempts],
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
+    if hourly and hourly > 0.0:
+        notes.append("on-demand hourly price resolved via PricingService")
 
     # Data processing (GB)
     data_attempts: List[List[Dict[str, str]]] = [
@@ -163,21 +151,14 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
             {"Field": "operation", "Value": "DataProcessing"},
         ],
     ]
-    for filters in data_attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="GB")
-        except (AttributeError, TypeError, ValueError, ClientError):
-            quote = None
-        if quote is None:
-            continue
-        try:
-            per_gb = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except (TypeError, ValueError):
-            per_gb = None
-        if per_gb and per_gb > 0.0:
-            notes.append("on-demand data processing price resolved via PricingService")
-            break
-        per_gb = None
+    per_gb, _ = pricing_on_demand_first_positive(
+        pricing,
+        service_code="AmazonEC2",
+        attempts=[("GB", flt) for flt in data_attempts],
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
+    if per_gb and per_gb > 0.0:
+        notes.append("on-demand data processing price resolved via PricingService")
 
     final_hourly = float(hourly if hourly and hourly > 0.0 else _FALLBACK_NAT_HOURLY_USD)
     final_per_gb = float(per_gb if per_gb and per_gb > 0.0 else _FALLBACK_NAT_DATA_USD_PER_GB)
