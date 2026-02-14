@@ -828,10 +828,8 @@ def _audit_lifecycle(
 ) -> None:
     """Best-effort lifecycle audit logging.
 
-    Always logs to stdout. Optionally inserts into a DB audit table if it exists.
-    Supported optional table names:
-      - finding_state_audit
-      - lifecycle_audit
+    Always logs to stdout. Best-effort insert into finding_state_audit.
+    Audit write failures must never impact the caller transaction.
     """
     evt = {
         "tenant_id": tenant_id,
@@ -885,32 +883,17 @@ def _audit_lifecycle(
                 cur.execute("RELEASE SAVEPOINT mckay_audit_1")
             except Exception:
                 pass
-
-        try:
-            cur.execute("SAVEPOINT mckay_audit_2")
-            cur.execute(
-                """
-                INSERT INTO lifecycle_audit
-                  (
-                    tenant_id, workspace, subject_type, subject_id, action,
-                    state, snooze_until, reason, updated_by, created_at
-                  )
-                VALUES
-                  (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
-                """,
-                params,
+            _log(
+                "WARN",
+                "lifecycle_audit_db_write_failed",
+                {
+                    "tenant_id": tenant_id,
+                    "workspace": workspace,
+                    "action": action,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                },
             )
-            cur.execute("RELEASE SAVEPOINT mckay_audit_2")
-            return
-        except Exception:
-            try:
-                cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_2")
-            except Exception:
-                pass
-            try:
-                cur.execute("RELEASE SAVEPOINT mckay_audit_2")
-            except Exception:
-                pass
             return
 
 

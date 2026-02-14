@@ -126,6 +126,28 @@ States are typically:
 
 ---
 
+### `finding_state_audit` (lifecycle audit trail)
+
+Append-only audit log for lifecycle actions:
+
+> “Who changed lifecycle state, on what subject, and when?”
+
+**What it stores**
+- scope (`tenant_id`, `workspace`)
+- subject (`subject_type`, `subject_id`)
+- action/state details (`action`, `state`, `snooze_until`)
+- attribution (`reason`, `updated_by`, `created_at`)
+
+**Used for**
+- operational traceability
+- incident/debug investigations
+
+**Behavior**
+- best-effort write from API lifecycle endpoints
+- must never block/rollback the primary lifecycle upsert
+
+---
+
 ### `finding_current` (canonical read model)
 
 A DB view combining the snapshot and the lifecycle overlay:
@@ -194,5 +216,5 @@ Lifecycle updates:
 
 - Group-level lifecycle (ignore/snooze/resolve a whole `group_key`)
 - Materialized aggregates for large tenants (groups, facets, KPIs)
-- Optional event-sourced lifecycle log + `finding_state_current` as a projection
+- richer event-sourced lifecycle model derived from `finding_state_audit`
 - Partitioning `finding_presence` by time or tenant if volume requires

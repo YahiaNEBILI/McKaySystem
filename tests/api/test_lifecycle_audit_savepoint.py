@@ -10,10 +10,9 @@ import apps.flask_api.flask_app as flask_app
 class _FakeConn:
     """Minimal fake DB connection exposing cursor()."""
 
-    def __init__(self, *, fail_finding_state_audit: bool, fail_lifecycle_audit: bool) -> None:
+    def __init__(self, *, fail_finding_state_audit: bool) -> None:
         self.aborted = False
         self.fail_finding_state_audit = fail_finding_state_audit
-        self.fail_lifecycle_audit = fail_lifecycle_audit
         self.inserts: list[str] = []
 
     def cursor(self) -> _FakeCursor:
@@ -54,13 +53,6 @@ class _FakeCursor:
             self._conn.inserts.append("finding_state_audit")
             return
 
-        if "INSERT INTO LIFECYCLE_AUDIT" in text:
-            if self._conn.fail_lifecycle_audit:
-                self._conn.aborted = True
-                raise RuntimeError('relation "lifecycle_audit" does not exist')
-            self._conn.inserts.append("lifecycle_audit")
-            return
-
 
 def _call_audit(conn: _FakeConn) -> None:
     """Invoke _audit_lifecycle with fixed values."""
@@ -78,17 +70,17 @@ def _call_audit(conn: _FakeConn) -> None:
     )
 
 
-def test_audit_fallback_does_not_leave_aborted_transaction() -> None:
-    """If first audit table is missing, fallback insert should still succeed."""
-    conn = _FakeConn(fail_finding_state_audit=True, fail_lifecycle_audit=False)
+def test_audit_insert_writes_finding_state_audit_when_available() -> None:
+    """Audit writes should target finding_state_audit."""
+    conn = _FakeConn(fail_finding_state_audit=False)
     _call_audit(conn)
-    assert conn.inserts == ["lifecycle_audit"]
+    assert conn.inserts == ["finding_state_audit"]
     assert conn.aborted is False
 
 
 def test_audit_failures_are_isolated_from_caller_transaction() -> None:
-    """If both audit inserts fail, transaction state must be restored."""
-    conn = _FakeConn(fail_finding_state_audit=True, fail_lifecycle_audit=True)
+    """Audit write failure must not leave transaction in aborted state."""
+    conn = _FakeConn(fail_finding_state_audit=True)
     _call_audit(conn)
     assert conn.inserts == []
     assert conn.aborted is False
