@@ -211,6 +211,7 @@ def _parse_major_minor(version: str) -> Optional[Tuple[int, int]]:
 
         return (_lead_int(major_txt), _lead_int(minor_txt))
     except ValueError:
+        _LOGGER.warning("Failed to parse engine version: %s", version)
         return None
 
 

@@ -413,11 +413,21 @@ class S3StorageChecker:
         if not datapoints:
             return None
 
+        # Filter out None values and ensure we have valid timestamps
+        valid_datapoints = [
+            d for d in datapoints
+            if isinstance(d, dict) and d.get("Timestamp") is not None
+        ]
+        if not valid_datapoints:
+            return None
+
         latest = max(
-            datapoints,
+            valid_datapoints,
             key=lambda d: d.get("Timestamp") or datetime.min.replace(tzinfo=timezone.utc),
         )
         avg = latest.get("Average")
+        if avg is None:
+            return None
         try:
             avg_f = float(avg)
         except (TypeError, ValueError):

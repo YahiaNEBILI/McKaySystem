@@ -295,8 +295,8 @@ def _fetch_t_credit_metrics(
 
     out: Dict[str, Dict[str, float]] = {}
 
-    # 2 queries per instance -> 250 instances/request safely under 500 limit.
-    for batch in _chunked(list(instance_ids), 250):
+    # 2 queries per instance -> 200 instances/request (leaving safety margin under 500 limit).
+    for batch in _chunked(list(instance_ids), 200):
         queries: List[Dict[str, Any]] = []
         for i, iid in enumerate(batch):
             dims = [{"Name": "InstanceId", "Value": iid}]
