@@ -57,7 +57,7 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return max(1, int(raw))
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -71,7 +71,7 @@ def _parse_dt(value: Any) -> Optional[datetime]:
             return None
         try:
             dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
-        except Exception:
+        except ValueError:
             return None
 
     if dt.tzinfo is None:
@@ -109,7 +109,7 @@ def _to_float(v: Any) -> Optional[float]:
         if s.count(",") >= 1 and s.count(".") >= 1:
             s = s.replace(",", "")
         return float(s)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -516,7 +516,12 @@ def ingest_from_manifest(
         (manifest.tenant_id, manifest.workspace, manifest.run_id),
     )
     if existing and existing[0] == "ready":
-        print(f"SKIP: run already ingested: {manifest.tenant_id}/{manifest.workspace}/{manifest.run_id}")
+        logger.info(
+            "SKIP: run already ingested: %s/%s/%s",
+            manifest.tenant_id,
+            manifest.workspace,
+            manifest.run_id,
+        )
         return IngestStats(
             dataset_used=dataset_label,
             dataset_dir=dataset_dir,
@@ -737,7 +742,14 @@ def ingest_from_manifest(
                 manifest.run_id,
             ),
         )
-    except Exception:
+    except Exception as exc:
+        logger.exception(
+            "Ingest failed for %s/%s/%s: %s",
+            manifest.tenant_id,
+            manifest.workspace,
+            manifest.run_id,
+            exc,
+        )
         api.execute(
             """
             UPDATE runs
@@ -748,10 +760,15 @@ def ingest_from_manifest(
         )
         raise
 
-    print(
-        f"OK: ingested {total_presence} items from {dataset_dir} as run "
-        f"{manifest.tenant_id}/{manifest.workspace}/{manifest.run_id} "
-        f"(presence={total_presence}, latest={total_latest})"
+    logger.info(
+        "OK: ingested %s items from %s as run %s/%s/%s (presence=%s, latest=%s)",
+        total_presence,
+        dataset_dir,
+        manifest.tenant_id,
+        manifest.workspace,
+        manifest.run_id,
+        total_presence,
+        total_latest,
     )
 
     return IngestStats(
@@ -893,8 +910,11 @@ def _ingest_with_copy(
                         actor=lock_owner,
                     )
                 conn.commit()
-                print(
-                    f"SKIP: run already ingested: {manifest.tenant_id}/{manifest.workspace}/{manifest.run_id}"
+                logger.info(
+                    "SKIP: run already ingested: %s/%s/%s",
+                    manifest.tenant_id,
+                    manifest.workspace,
+                    manifest.run_id,
                 )
                 return IngestStats(
                     dataset_used=dataset_label,
@@ -1131,15 +1151,20 @@ def _ingest_with_copy(
             except Exception as state_exc:
                 try:
                     conn.rollback()
-                except Exception:
-                    pass
+                except Exception as rb_exc:
+                    logger.warning("Rollback failed while persisting failed run state: %s", rb_exc)
                 logger.warning("Failed to persist failed run state: %s", state_exc)
             raise
 
-    print(
-        f"OK: ingested {total_presence} items from {dataset_dir} as run "
-        f"{manifest.tenant_id}/{manifest.workspace}/{manifest.run_id} "
-        f"(presence={total_presence}, latest={total_latest})"
+    logger.info(
+        "OK: ingested %s items from %s as run %s/%s/%s (presence=%s, latest=%s)",
+        total_presence,
+        dataset_dir,
+        manifest.tenant_id,
+        manifest.workspace,
+        manifest.run_id,
+        total_presence,
+        total_latest,
     )
 
     return IngestStats(

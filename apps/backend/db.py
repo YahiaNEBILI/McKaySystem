@@ -241,7 +241,7 @@ def _cols_from_description(desc: Any) -> list[str]:
         name = None
         try:
             name = d[0]
-        except Exception:
+        except (IndexError, KeyError, TypeError):
             name = None
         cols.append(str(name) if name else f"col_{i}")
     return cols

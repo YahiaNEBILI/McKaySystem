@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, abort, jsonify, request
+from werkzeug.exceptions import BadRequest
 
 from apps.backend.db import (
     db_conn,
@@ -43,6 +45,7 @@ from apps.backend.db import (
 )
 
 app = Flask(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 
 # --------------------
@@ -63,14 +66,20 @@ def _iso_z(dt: datetime) -> str:
 
 
 def _log(level: str, event: str, fields: Dict[str, Any]) -> None:
-    """Emit a single-line JSON log to stdout."""
+    """Emit a single-line JSON log via the standard logging pipeline."""
     level_u = (level or "INFO").upper()
     order = {"ERROR": 3, "WARN": 2, "INFO": 1}
     if order.get(level_u, 1) < order.get(_API_LOG_LEVEL, 1):
         return
     payload: Dict[str, Any] = {"ts": _iso_z(_now_utc()), "level": level_u, "event": event}
     payload.update(fields)
-    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if level_u == "ERROR":
+        _LOGGER.error("%s", payload_json)
+    elif level_u == "WARN":
+        _LOGGER.warning("%s", payload_json)
+    else:
+        _LOGGER.info("%s", payload_json)
 
 
 def _merge_vary_header(current: Optional[str], token: str) -> str:
@@ -99,7 +108,7 @@ def _safe_scope_from_request() -> Tuple[Optional[str], Optional[str]]:
             w = payload.get("workspace")
             if t and w:
                 return str(t), str(w)
-    except Exception:
+    except (BadRequest, TypeError, ValueError):
         pass
     return None, None
 
@@ -124,8 +133,8 @@ def _log_request(resp: Response) -> Response:
                 "workspace": workspace,
             },
         )
-    except Exception:
-        pass
+    except (RuntimeError, TypeError, ValueError) as exc:
+        _LOGGER.debug("request logging skipped: %s", exc)
 
     # Findings/lifecycle data must never be served stale from intermediary caches.
     path = request.path or ""
@@ -240,6 +249,40 @@ def _err(code: str, message: str, *, status: int, extra: Optional[Dict[str, Any]
     return jsonify(payload), status
 
 
+def _api_internal_error_response(exc: Exception) -> Any:
+    """Map API internal errors to stable, route-specific response shapes."""
+    path = request.path or ""
+    exc_text = str(exc)
+
+    if path == "/api/health/db":
+        if _API_DEBUG_ERRORS:
+            return _err("db_unhealthy", "db health check failed", status=500, extra={"detail": exc_text})
+        return _err("db_unhealthy", "db health check failed", status=500)
+
+    if path == "/api/findings":
+        extra = None
+        if _API_DEBUG_ERRORS:
+            extra = {"detail": exc_text, "traceback": traceback.format_exc()}
+        return _err("internal_error", "internal error", status=500, extra=extra)
+
+    if path in {
+        "/api/findings/aggregates",
+        "/api/facets",
+        "/api/lifecycle/group/ignore",
+        "/api/lifecycle/group/resolve",
+        "/api/lifecycle/group/snooze",
+        "/api/lifecycle/ignore",
+        "/api/lifecycle/resolve",
+        "/api/lifecycle/snooze",
+    }:
+        return jsonify({"error": "internal_error", "detail": exc_text}), 500
+
+    if path in {"/api/runs/diff/latest", "/api/groups"} or path.startswith("/api/groups/"):
+        return _json({"error": "internal_error", "message": exc_text}, status=500)
+
+    return _err("internal_error", "internal error", status=500)
+
+
 def _schema_migrations_dir() -> Path:
     """Return the repository-local migrations directory used by schema gate."""
     return Path(__file__).resolve().parents[2] / "migrations"
@@ -282,12 +325,13 @@ def _err_429(_: Exception) -> Any:
 
 @app.errorhandler(500)
 def _err_500(exc: Exception) -> Any:
+    root_exc = getattr(exc, "original_exception", None) or exc
+    tb = traceback.format_exc()
+    fields: Dict[str, Any] = {"path": request.path, "detail": str(root_exc)}
     if _API_DEBUG_ERRORS:
-        tb = traceback.format_exc()
-        _log("ERROR", "unhandled_exception", {"path": request.path, "detail": str(exc), "traceback": tb})
-        return _err("internal_error", "internal error", status=500, extra={"detail": str(exc), "traceback": tb})
-    _log("ERROR", "unhandled_exception", {"path": request.path, "detail": str(exc)})
-    return _err("internal_error", "internal error", status=500)
+        fields["traceback"] = tb
+    _log("ERROR", "unhandled_exception", fields)
+    return _api_internal_error_response(root_exc)
 
 # --------------------
 # Auth (Bearer token)
@@ -421,14 +465,9 @@ def health() -> Any:
 
 @app.get("/api/health/db")
 def api_health_db() -> Any:
-    try:
-        with db_conn() as conn:
-            row = fetch_one_dict_conn(conn, "SELECT 1 AS ok")
-        return _ok({"db": bool(row and row.get("ok") == 1)})
-    except Exception as exc:
-        if _API_DEBUG_ERRORS:
-            return _err("db_unhealthy", "db health check failed", status=500, extra={"detail": str(exc)})
-        return _err("db_unhealthy", "db health check failed", status=500)
+    with db_conn() as conn:
+        row = fetch_one_dict_conn(conn, "SELECT 1 AS ok")
+    return _ok({"db": bool(row and row.get("ok") == 1)})
 
 
 # --------------------
@@ -583,8 +622,6 @@ def api_runs_diff_latest() -> Any:
         )
     except ValueError as exc:
         return _json({"error": "bad_request", "message": str(exc)}, status=400)
-    except Exception as exc:
-        return _json({"error": "internal_error", "message": str(exc)}, status=500)
 
 # --------------------
 # Findings (canonical)
@@ -673,11 +710,6 @@ def api_findings() -> Any:
         )
     except ValueError as exc:
         return _err("bad_request", str(exc), status=400)
-    except Exception as exc:
-        extra = None
-        if _API_DEBUG_ERRORS:
-            extra = {"detail": str(exc), "traceback": traceback.format_exc()}
-        return _err("internal_error", "internal error", status=500, extra=extra)
 
 
 @app.get("/api/findings/aggregates")
@@ -737,8 +769,6 @@ def api_findings_aggregates() -> Any:
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 @app.get("/api/facets")
@@ -804,8 +834,6 @@ def api_facets() -> Any:
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 # --------------------
@@ -828,7 +856,7 @@ def _audit_lifecycle(
 ) -> None:
     """Best-effort lifecycle audit logging.
 
-    Always logs to stdout. Best-effort insert into finding_state_audit.
+    Always emits a structured audit log event. Best-effort insert into finding_state_audit.
     Audit write failures must never impact the caller transaction.
     """
     evt = {
@@ -998,8 +1026,6 @@ def api_lifecycle_group_ignore() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 @app.post("/api/lifecycle/group/resolve")
@@ -1039,8 +1065,6 @@ def api_lifecycle_group_resolve() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 @app.post("/api/lifecycle/group/snooze")
@@ -1084,8 +1108,6 @@ def api_lifecycle_group_snooze() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 @app.get("/api/groups")
 def api_groups() -> Any:
@@ -1177,8 +1199,6 @@ def api_groups() -> Any:
 
     except ValueError as exc:
         return _json({"error": "bad_request", "message": str(exc)}, status=400)
-    except Exception as exc:
-        return _json({"error": "internal_error", "message": str(exc)}, status=500)
 
 
 @app.get("/api/groups/<group_key>")
@@ -1251,8 +1271,6 @@ def api_group_detail(group_key: str) -> Any:
 
     except ValueError as exc:
         return _json({"error": "bad_request", "message": str(exc)}, status=400)
-    except Exception as exc:
-        return _json({"error": "internal_error", "message": str(exc)}, status=500)
 
 @app.post("/api/lifecycle/ignore")
 def api_lifecycle_ignore() -> Any:
@@ -1291,8 +1309,6 @@ def api_lifecycle_ignore() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 @app.post("/api/lifecycle/resolve")
@@ -1332,8 +1348,6 @@ def api_lifecycle_resolve() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 @app.post("/api/lifecycle/snooze")
@@ -1377,8 +1391,6 @@ def api_lifecycle_snooze() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "internal_error", "detail": str(exc)}), 500
 
 
 if __name__ == "__main__":

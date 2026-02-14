@@ -144,3 +144,61 @@ def test_lifecycle_ignore_preserves_exact_fingerprint(monkeypatch) -> None:  # t
     assert captured["workspace"] == "prod"
     assert captured["fingerprint"] == "  fp-with-padding  "
     assert captured["state"] == "ignored"
+
+
+def test_health_db_internal_error_contract(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/health/db` keeps db_unhealthy contract when internals fail."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(flask_app, "_API_DEBUG_ERRORS", False)
+
+    def _boom_db_conn() -> Any:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(flask_app, "db_conn", _boom_db_conn)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/health/db")
+
+    assert resp.status_code == 500
+    payload = resp.get_json() or {}
+    assert payload.get("ok") is False
+    assert payload.get("error") == "db_unhealthy"
+    assert payload.get("message") == "db health check failed"
+
+
+def test_runs_diff_internal_error_contract(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/runs/diff/latest` keeps `message`-style internal error payloads."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(flask_app, "_API_DEBUG_ERRORS", False)
+
+    def _boom_fetch_all(_conn: object, _sql: str, _params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+        raise RuntimeError("boom-runs-diff")
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _boom_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/runs/diff/latest?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 500
+    payload = resp.get_json() or {}
+    assert payload.get("error") == "internal_error"
+    assert payload.get("message") == "boom-runs-diff"
+
+
+def test_facets_internal_error_contract(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/facets` keeps `detail`-style internal error payloads."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(flask_app, "_API_DEBUG_ERRORS", False)
+
+    def _boom_fetch_all(_conn: object, _sql: str, _params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+        raise RuntimeError("boom-facets")
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _boom_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/facets?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 500
+    payload = resp.get_json() or {}
+    assert payload.get("error") == "internal_error"
+    assert payload.get("detail") == "boom-facets"
