@@ -7,6 +7,7 @@ mckay run-all --tenant engie --workspace noprod --out data/finops_findings --db-
 mckay run --tenant engie --workspace noprod --out data/finops_findings
 mckay export
 mckay ingest --db-url "postgresql://..."
+mckay recover --tenant engie --workspace noprod --db-url "postgresql://..."
 mckay migrate
 """
 
@@ -161,6 +162,53 @@ def cmd_migrate(args: argparse.Namespace) -> None:
     _run_cmd(cmd, cwd=root, env=env)
 
 
+def cmd_recover(args: argparse.Namespace) -> None:
+    root = _repo_root()
+    recover_module = "apps.worker.recover_runs"
+    if not (root / "apps/worker/recover_runs.py").exists():
+        raise SystemExit(
+            f"{recover_module} module not found. Run from the project directory."
+        )
+
+    db_url = args.db_url or _env_default("DB_URL")
+    tenant = args.tenant or _env_default("TENANT_ID")
+    workspace = args.workspace or _env_default("WORKSPACE")
+
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = getattr(args, "recover_limit", 200)
+    actor = getattr(args, "actor", None)
+    if actor is None:
+        actor = getattr(args, "recover_actor", None)
+
+    if not db_url:
+        raise SystemExit("Missing --db-url (or DB_URL env var).")
+    if not tenant:
+        raise SystemExit("Missing --tenant (or TENANT_ID env var).")
+    if not workspace:
+        raise SystemExit("Missing --workspace (or WORKSPACE env var).")
+
+    env = dict(os.environ)
+    env["DB_URL"] = db_url
+    env["TENANT_ID"] = tenant
+    env["WORKSPACE"] = workspace
+
+    cmd = [
+        _python(),
+        "-m",
+        recover_module,
+        "--tenant",
+        tenant,
+        "--workspace",
+        workspace,
+        "--limit",
+        str(max(1, int(limit))),
+    ]
+    if actor:
+        cmd.extend(["--actor", str(actor)])
+    _run_cmd(cmd, cwd=root, env=env)
+
+
 def cmd_run_all(args: argparse.Namespace) -> None:
     cmd_run(args)
 
@@ -175,6 +223,9 @@ def cmd_run_all(args: argparse.Namespace) -> None:
         if not args.skip_export:
             cmd_export(args)
         return
+
+    if not args.skip_recover:
+        cmd_recover(args)
 
     cmd_ingest(args)
 
@@ -204,6 +255,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.add_argument("--manifest", default=None, help="Path to run_manifest.json (optional).")
     sp.set_defaults(func=cmd_ingest)
+    sp = sub.add_parser("recover", help="Recover stale run locks/states for one tenant/workspace.")
+    add_tenant_workspace(sp)
+    sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
+    sp.add_argument("--limit", type=int, default=200, help="Max rows per recovery step (default: 200).")
+    sp.add_argument("--actor", default=None, help="Actor id recorded in run_events.")
+    sp.set_defaults(func=cmd_recover)
     sp = sub.add_parser("migrate", help="Apply database migrations.")
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.add_argument("--dry-run", action="store_true", help="Show pending migrations without applying.")
@@ -215,6 +272,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.add_argument("--skip-export", action="store_true", help="Skip export step.")
     sp.add_argument("--skip-ingest", action="store_true", help="Skip ingest step.")
+    sp.add_argument("--skip-recover", action="store_true", help="Skip stale run recovery before ingest.")
+    sp.add_argument("--recover-limit", type=int, default=200, help="Recovery row limit before ingest.")
+    sp.add_argument("--recover-actor", default=None, help="Recovery actor id before ingest.")
     sp.set_defaults(func=cmd_run_all)
 
     return p

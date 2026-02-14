@@ -11,6 +11,8 @@ Last reviewed: 2026-02-01
    - output base directory
    - optional flags to enable/disable correlation and CUR enrichment
 3. (Optional) Use `mckay run-all` to run -> ingest -> export (if `DB_URL` is set).
+4. (Recommended before ingest) Run `mckay recover --tenant <tenant> --workspace <workspace> --db-url <url>`
+   to reap expired run locks and fail stale `running` runs without active lock.
 
 ## Outputs (high level)
 
@@ -48,6 +50,12 @@ Or via the CLI:
 
 ```
 mckay migrate
+```
+
+Recovery sweep (tenant/workspace scoped):
+
+```
+mckay recover --tenant <tenant> --workspace <workspace> --db-url <url>
 ```
 
 ---

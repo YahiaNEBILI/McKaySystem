@@ -28,6 +28,15 @@ class RunLock:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class RunRecoveryStats:
+    """Summary of stale-run recovery in one tenant/workspace scope."""
+
+    expired_locks_reaped: int
+    stale_runs_failed: int
+    recovered_run_ids: tuple[str, ...]
+
+
 def default_owner(prefix: str) -> str:
     """Build a deterministic lock owner id for this process."""
     return f"{prefix}:{os.getpid()}"
@@ -363,4 +372,123 @@ def transition_run_to_failed(
         from_state=previous_status,
         to_state=STATE_FAILED,
         payload={"reason": reason[:2000]},
+    )
+
+
+def recover_stale_runs_for_scope(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    actor: str,
+    limit: int = 200,
+) -> RunRecoveryStats:
+    """Recover stale orchestration state for one tenant/workspace.
+
+    Recovery policy:
+    - remove expired locks (TTL enforcement)
+    - transition ``running`` runs to ``failed`` when no active lock exists
+    """
+    if int(limit) <= 0:
+        raise ValueError("limit must be >= 1")
+    max_rows = int(limit)
+
+    expired_rows: list[tuple[str, str, datetime]] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH expired AS (
+              SELECT tenant_id, workspace, run_id, lock_owner, expires_at
+              FROM run_locks
+              WHERE tenant_id=%s
+                AND workspace=%s
+                AND expires_at <= now()
+              ORDER BY expires_at ASC, run_id ASC
+              LIMIT %s
+              FOR UPDATE SKIP LOCKED
+            )
+            DELETE FROM run_locks l
+            USING expired
+            WHERE l.tenant_id = expired.tenant_id
+              AND l.workspace = expired.workspace
+              AND l.run_id = expired.run_id
+            RETURNING expired.run_id, expired.lock_owner, expired.expires_at
+            """,
+            (tenant_id, workspace, max_rows),
+        )
+        rows = cur.fetchall() or []
+        for row in rows:
+            if not row or row[0] is None:
+                continue
+            expired_rows.append((str(row[0]), str(row[1] or ""), row[2]))
+
+    expired_run_ids = {run_id for run_id, _, _ in expired_rows}
+    for run_id, lock_owner, expires_at in expired_rows:
+        expires_at_iso = (
+            expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at)
+        )
+        append_run_event(
+            conn,
+            tenant_id=tenant_id,
+            workspace=workspace,
+            run_id=run_id,
+            event_type="run.lock.expired",
+            actor=actor,
+            payload={
+                "expired_lock_owner": lock_owner,
+                "expired_at": expires_at_iso,
+            },
+        )
+
+    stale_run_ids: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH candidates AS (
+              SELECT r.tenant_id, r.workspace, r.run_id
+              FROM runs r
+              LEFT JOIN run_locks l
+                ON l.tenant_id = r.tenant_id
+               AND l.workspace = r.workspace
+               AND l.run_id = r.run_id
+               AND l.expires_at > now()
+              WHERE r.tenant_id=%s
+                AND r.workspace=%s
+                AND r.status=%s
+                AND l.run_id IS NULL
+              ORDER BY r.run_ts ASC, r.run_id ASC
+              LIMIT %s
+              FOR UPDATE OF r SKIP LOCKED
+            )
+            UPDATE runs r
+            SET status=%s
+            FROM candidates
+            WHERE r.tenant_id = candidates.tenant_id
+              AND r.workspace = candidates.workspace
+              AND r.run_id = candidates.run_id
+            RETURNING r.run_id
+            """,
+            (tenant_id, workspace, STATE_RUNNING, max_rows, STATE_FAILED),
+        )
+        rows = cur.fetchall() or []
+        stale_run_ids = [str(row[0]) for row in rows if row and row[0]]
+
+    for run_id in stale_run_ids:
+        reason = "recovery:expired_lock" if run_id in expired_run_ids else "recovery:no_active_lock"
+        append_run_event(
+            conn,
+            tenant_id=tenant_id,
+            workspace=workspace,
+            run_id=run_id,
+            event_type="run.state.changed",
+            actor=actor,
+            from_state=STATE_RUNNING,
+            to_state=STATE_FAILED,
+            payload={"reason": reason},
+        )
+
+    return RunRecoveryStats(
+        expired_locks_reaped=len(expired_rows),
+        stale_runs_failed=len(stale_run_ids),
+        recovered_run_ids=tuple(stale_run_ids),
     )
