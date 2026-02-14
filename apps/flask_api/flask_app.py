@@ -73,6 +73,15 @@ def _log(level: str, event: str, fields: Dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
+def _merge_vary_header(current: Optional[str], token: str) -> str:
+    """Return a Vary header value that includes token exactly once."""
+    items = [x.strip() for x in str(current or "").split(",") if x.strip()]
+    token_norm = token.strip()
+    if token_norm and token_norm.lower() not in {x.lower() for x in items}:
+        items.append(token_norm)
+    return ", ".join(items)
+
+
 @app.before_request
 def _start_timer() -> None:
     request.environ["_mckay_t0"] = time.monotonic()
@@ -117,6 +126,14 @@ def _log_request(resp: Response) -> Response:
         )
     except Exception:
         pass
+
+    # Findings/lifecycle data must never be served stale from intermediary caches.
+    path = request.path or ""
+    if path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        resp.headers["Vary"] = _merge_vary_header(resp.headers.get("Vary"), "Authorization")
     return resp
 
 

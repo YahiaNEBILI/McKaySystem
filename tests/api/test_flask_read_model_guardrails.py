@@ -77,3 +77,26 @@ def test_runs_diff_latest_attributes_from_finding_current(monkeypatch) -> None: 
     assert sql_blob.count("finding_current") >= 2
     assert "tenant_id=%s" in sql_blob
     assert "workspace=%s" in sql_blob
+
+
+def test_api_findings_sets_no_cache_headers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/findings` responses should disable intermediary caching."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, _sql: str, _params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+        return []
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Optional[Sequence[Any]] = None) -> dict[str, Any]:
+        return {"n": 0}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/findings?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    assert resp.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0"
+    assert resp.headers.get("Pragma") == "no-cache"
+    assert resp.headers.get("Expires") == "0"
+    assert "authorization" in str(resp.headers.get("Vary") or "").lower()

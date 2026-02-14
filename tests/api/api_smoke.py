@@ -23,6 +23,8 @@ class Cfg:
     timeout_s: float = 20.0
     strict_json: bool = True
     verbose: bool = False
+    lifecycle_retries: int = 40
+    lifecycle_sleep_s: float = 0.5
 
 
 class SmokeFail(RuntimeError):
@@ -104,6 +106,9 @@ def _http_json(
     headers: Dict[str, str] = {
         "Accept": "application/json" if expect_json else "*/*",
         "User-Agent": "mckay-api-smoke/1.3",
+        # Reduce stale reads when API is behind caching layers.
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
 
     bearer = cfg.bearer_token
@@ -230,7 +235,13 @@ def _collect_fps(payload: Dict[str, Any], *, only_effective_state: Optional[str]
 
 
 def _get_findings(cfg: Cfg, *, state: Optional[str], limit: int = 200) -> Dict[str, Any]:
-    q: Dict[str, str] = {"tenant_id": cfg.tenant_id, "workspace": cfg.workspace, "limit": str(limit)}
+    q: Dict[str, str] = {
+        "tenant_id": cfg.tenant_id,
+        "workspace": cfg.workspace,
+        "limit": str(limit),
+        # Cache buster for API gateway / CDN paths.
+        "_ts": str(time.time_ns()),
+    }
     if state:
         q["state"] = state
     _, payload = _http_json(cfg, "GET", "/api/findings", query=q, with_auth=True, expected_status=(200,))
@@ -239,21 +250,56 @@ def _get_findings(cfg: Cfg, *, state: Optional[str], limit: int = 200) -> Dict[s
     return payload
 
 
-def _wait_until_fp_not_in_state(cfg: Cfg, fp: str, *, state: str, retries: int = 8, sleep_s: float = 0.25) -> None:
-    for _ in range(retries):
+def _wait_until_fp_not_in_state(
+    cfg: Cfg,
+    fp: str,
+    *,
+    state: str,
+    retries: Optional[int] = None,
+    sleep_s: Optional[float] = None,
+) -> None:
+    retries_i = max(1, int(retries if retries is not None else cfg.lifecycle_retries))
+    sleep_s_f = max(0.01, float(sleep_s if sleep_s is not None else cfg.lifecycle_sleep_s))
+    last_payload: Dict[str, Any] = {}
+    for _ in range(retries_i):
         payload = _get_findings(cfg, state=state, limit=400)
+        last_payload = payload
         if fp not in _collect_fps(payload, only_effective_state=state):
             return
-        time.sleep(sleep_s)
-    raise SmokeFail(f"fingerprint still present in state={state!r} after lifecycle update")
+        time.sleep(sleep_s_f)
+    details = []
+    for item in (last_payload.get("items") or []):
+        if str((item or {}).get("fingerprint") or "").strip() == fp:
+            details.append(
+                {
+                    "fingerprint": fp,
+                    "state": item.get("state"),
+                    "effective_state": item.get("effective_state"),
+                    "group_key": item.get("group_key"),
+                    "run_id": item.get("run_id"),
+                }
+            )
+    raise SmokeFail(
+        f"fingerprint still present in state={state!r} after lifecycle update. "
+        f"details={details or 'not in current page'}"
+    )
 
 
-def _wait_until_fp_in_state(cfg: Cfg, fp: str, *, state: str, retries: int = 8, sleep_s: float = 0.25) -> None:
-    for _ in range(retries):
+def _wait_until_fp_in_state(
+    cfg: Cfg,
+    fp: str,
+    *,
+    state: str,
+    retries: Optional[int] = None,
+    sleep_s: Optional[float] = None,
+) -> None:
+    retries_i = max(1, int(retries if retries is not None else cfg.lifecycle_retries))
+    sleep_s_f = max(0.01, float(sleep_s if sleep_s is not None else cfg.lifecycle_sleep_s))
+    for _ in range(retries_i):
         payload = _get_findings(cfg, state=state, limit=400)
         if fp in _collect_fps(payload, only_effective_state=state):
             return
-        time.sleep(sleep_s)
+        time.sleep(sleep_s_f)
     raise SmokeFail(f"fingerprint not found in state={state!r} after lifecycle update")
 
 
@@ -474,6 +520,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--workspace", default=os.getenv("WORKSPACE") or "")
     p.add_argument("--token", default=os.getenv("API_BEARER_TOKEN") or "")
     p.add_argument("--timeout-s", type=float, default=float(os.getenv("TIMEOUT_S") or "20"))
+    p.add_argument("--lifecycle-retries", type=int, default=int(os.getenv("LIFECYCLE_RETRIES") or "40"))
+    p.add_argument("--lifecycle-sleep-s", type=float, default=float(os.getenv("LIFECYCLE_SLEEP_S") or "0.5"))
     p.add_argument("--no-strict-json", action="store_true", help="Do not enforce Content-Type application/json")
     p.add_argument("--verbose", action="store_true", help="Print requests as they run")
     return p.parse_args(argv)
@@ -510,6 +558,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         timeout_s=float(args.timeout_s),
         strict_json=not bool(args.no_strict_json),
         verbose=bool(args.verbose),
+        lifecycle_retries=max(1, int(args.lifecycle_retries)),
+        lifecycle_sleep_s=max(0.01, float(args.lifecycle_sleep_s)),
     )
 
     try:
