@@ -16,9 +16,9 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.cloudwatch.access_error`
-- `aws.logs.log_groups.retention_missing`
-- `aws.cloudwatch.custom_metrics.from_log_filters`
+- `aws.cloudwatch.access.error`
+- `aws.logs.log.groups.retention.missing`
+- `aws.cloudwatch.custom.metrics.from.log.filters`
 
 ## Notes / limitations
 

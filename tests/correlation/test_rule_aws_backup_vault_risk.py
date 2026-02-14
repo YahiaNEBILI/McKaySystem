@@ -55,8 +55,8 @@ def _draft_stale_recovery_point(
     score: int = 650,
 ) -> FindingDraft:
     return FindingDraft(
-        check_id="aws.backup.recovery_points.stale",
-        check_name="aws.backup.recovery_points.stale",
+        check_id="aws.backup.recovery.points.stale",
+        check_name="aws.backup.recovery.points.stale",
         category="governance",
         status="fail",
         severity=Severity(level="medium", score=score),
@@ -77,7 +77,7 @@ def _draft_stale_recovery_point(
         # IMPORTANT: the rule joins via this dimension
         dimensions={"vault_name": vault_name},
         issue_key={
-            "check_id": "aws.backup.recovery_points.stale",
+            "check_id": "aws.backup.recovery.points.stale",
             "account_id": account_id,
             "region": region,
             "vault": vault_name,
@@ -96,7 +96,7 @@ def test_rule_emits_when_two_signals_present(tmp_path: Path) -> None:
 
     drafts = [
         _draft_vault_signal(
-            check_id="aws.backup.vaults.no_lifecycle",
+            check_id="aws.backup.vaults.no.lifecycle",
             account_id=account_id,
             region=region,
             vault_name=vault_name,
@@ -135,7 +135,7 @@ def test_rule_does_not_emit_with_single_signal(tmp_path: Path) -> None:
 
     drafts = [
         _draft_vault_signal(
-            check_id="aws.backup.vaults.no_lifecycle",
+            check_id="aws.backup.vaults.no.lifecycle",
             account_id=account_id,
             region=region,
             vault_name=vault_name,
@@ -169,7 +169,7 @@ def test_rule_is_deterministic_for_same_input(tmp_path: Path) -> None:
 
     drafts = [
         _draft_vault_signal(
-            check_id="aws.backup.vaults.no_lifecycle",
+            check_id="aws.backup.vaults.no.lifecycle",
             account_id=account_id,
             region=region,
             vault_name=vault_name,
@@ -182,7 +182,7 @@ def test_rule_is_deterministic_for_same_input(tmp_path: Path) -> None:
         ),
         # extra signal to reduce risk of borderline rule tweaks later
         _draft_vault_signal(
-            check_id="aws.backup.vaults.access_policy_misconfig",
+            check_id="aws.backup.vaults.access.policy.misconfig",
             account_id=account_id,
             region=region,
             vault_name=vault_name,

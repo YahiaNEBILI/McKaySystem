@@ -1,12 +1,12 @@
--- rule_id: aws.logs.correlation.retention_missing_sprawl
+-- rule_id: aws.logs.correlation.retention.missing.sprawl
 -- name: CloudWatch Logs retention missing (correlated)
 -- enabled: true
--- required_check_ids: aws.logs.log_groups.retention_missing
+-- required_check_ids: aws.logs.log.groups.retention.missing
 
 -- Correlates log groups missing a retention policy into an account/region meta finding.
 --
 -- Source signal:
---   - aws.logs.log_groups.retention_missing
+--   - aws.logs.log.groups.retention.missing
 --
 -- Emits a single meta finding per tenant/workspace/run/account/region.
 --
@@ -25,7 +25,7 @@ sig AS (
     MAX(COALESCE(severity.score, 0)) AS max_sev_score
   FROM rule_input
   WHERE status = 'fail'
-    AND check_id = 'aws.logs.log_groups.retention_missing'
+    AND check_id = 'aws.logs.log.groups.retention.missing'
     AND scope.resource_type = 'log_group'
   GROUP BY ALL
 )
@@ -51,7 +51,7 @@ SELECT
     resource_arn := ''
   ) AS scope,
 
-  'aws.logs.correlation.retention_missing_sprawl' AS check_id,
+  'aws.logs.correlation.retention.missing.sprawl' AS check_id,
   'CloudWatch Logs retention missing (correlated)' AS check_name,
   'waste' AS category,
   'observability' AS sub_category,

@@ -146,7 +146,7 @@ def test_stopped_instances_with_storage_emits() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    f = next(x for x in findings if x.check_id == "aws.rds.instances.stopped_storage")
+    f = next(x for x in findings if x.check_id == "aws.rds.instances.stopped.storage")
     assert f.status == "fail"
     assert f.estimated_monthly_cost is not None
     assert float(f.estimated_monthly_cost) > 0.0
@@ -214,7 +214,7 @@ def test_multi_az_non_prod_emits_when_env_tag_non_prod() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    f = next(x for x in findings if x.check_id == "aws.rds.multi_az.non_prod")
+    f = next(x for x in findings if x.check_id == "aws.rds.multi.az.non.prod")
     assert f.status == "fail"
     assert f.estimate_confidence is not None
     assert int(f.estimate_confidence) <= 40
@@ -243,7 +243,7 @@ def test_multi_az_non_prod_suppressed_when_env_prod() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(x.check_id != "aws.rds.multi_az.non_prod" for x in findings)
+    assert all(x.check_id != "aws.rds.multi.az.non.prod" for x in findings)
 
 
 def test_instance_family_old_generation_emits() -> None:
@@ -269,7 +269,7 @@ def test_instance_family_old_generation_emits() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    f = next(x for x in findings if x.check_id == "aws.rds.instance_family.old_generation")
+    f = next(x for x in findings if x.check_id == "aws.rds.instance.family.old.generation")
     assert f.status == "fail"
     assert f.dimensions.get("family") == "m3"
 
@@ -311,7 +311,7 @@ def test_engine_needs_upgrade_policy(engine: str, version: str, should_emit: boo
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    has = any(x.check_id == "aws.rds.engine.needs_upgrade" for x in findings)
+    has = any(x.check_id == "aws.rds.engine.needs.upgrade" for x in findings)
     assert has is should_emit
 
 def test_storage_overprovisioned_no_finding_when_datapoints_too_sparse() -> None:
@@ -412,7 +412,7 @@ def test_multi_az_missing_env_tag_no_finding() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(x.check_id != "aws.rds.multi_az.non_prod" for x in findings)
+    assert all(x.check_id != "aws.rds.multi.az.non.prod" for x in findings)
 
 
 @pytest.mark.parametrize(
@@ -462,7 +462,7 @@ def test_engine_versions_do_not_crash_and_follow_policy(
 
     findings = list(_mk_checker().run(ctx))
 
-    emitted = any(f.check_id == "aws.rds.engine.needs_upgrade" for f in findings)
+    emitted = any(f.check_id == "aws.rds.engine.needs.upgrade" for f in findings)
     assert emitted is should_emit
 
 
@@ -498,7 +498,7 @@ def test_unused_read_replica_emits_when_p95_read_iops_zero() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert any(f.check_id == "aws.rds.read_replica.unused" for f in findings)
+    assert any(f.check_id == "aws.rds.read.replica.unused" for f in findings)
 
 
 def test_unused_read_replica_suppressed_by_purpose_tag() -> None:
@@ -532,7 +532,7 @@ def test_unused_read_replica_suppressed_by_purpose_tag() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(f.check_id != "aws.rds.read_replica.unused" for f in findings)
+    assert all(f.check_id != "aws.rds.read.replica.unused" for f in findings)
 
 
 def test_unused_read_replica_skipped_for_aurora() -> None:
@@ -565,7 +565,7 @@ def test_unused_read_replica_skipped_for_aurora() -> None:
     ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(f.check_id != "aws.rds.read_replica.unused" for f in findings)
+    assert all(f.check_id != "aws.rds.read.replica.unused" for f in findings)
 
 
 class _FakeCloudWatchClientDeny:
@@ -600,8 +600,8 @@ def test_cloudwatch_access_error_emits_and_checker_continues() -> None:
 
     findings = list(_mk_checker().run(ctx))
 
-    assert any(f.check_id == "aws.rds.instances.access_error" for f in findings)
-    assert any(f.check_id == "aws.rds.multi_az.non_prod" for f in findings)
+    assert any(f.check_id == "aws.rds.instances.access.error" for f in findings)
+    assert any(f.check_id == "aws.rds.multi.az.non.prod" for f in findings)
 
 
 def test_arn_partition_returns_empty_on_malformed_value() -> None:
@@ -622,5 +622,5 @@ def test_access_error_handles_malformed_clienterror_response() -> None:
         action="describe_db_instances",
         exc=cast(ClientError, _BadClientError()),
     )
-    assert finding.check_id == "aws.rds.instances.access_error"
+    assert finding.check_id == "aws.rds.instances.access.error"
     assert "ErrorCode=" in finding.message

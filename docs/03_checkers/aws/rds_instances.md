@@ -16,13 +16,13 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.rds.engine.needs_upgrade`
-- `aws.rds.instance_family.old_generation`
-- `aws.rds.instances.access_error`
+- `aws.rds.engine.needs.upgrade`
+- `aws.rds.instance.family.old.generation`
+- `aws.rds.instances.access.error`
 - `aws.rds.instances.optimizations`
-- `aws.rds.instances.stopped_storage`
-- `aws.rds.multi_az.non_prod`
-- `aws.rds.read_replica.unused`
+- `aws.rds.instances.stopped.storage`
+- `aws.rds.multi.az.non.prod`
+- `aws.rds.read.replica.unused`
 - `aws.rds.storage.overprovisioned`
 
 ## Notes / limitations

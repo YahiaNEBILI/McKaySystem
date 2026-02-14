@@ -158,7 +158,7 @@ def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatc
         cfg=EC2InstancesConfig(stopped_long_age_days=30),
     )
     findings = list(checker.run(ctx))
-    hits = [f for f in findings if f.check_id == "aws.ec2.instances.stopped_long"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.instances.stopped.long"]
     assert len(hits) == 1
     f = hits[0]
     # 100 GiB * 0.10 = 10
@@ -187,7 +187,7 @@ def test_old_generation_family_emits_info(monkeypatch: pytest.MonkeyPatch) -> No
     ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=None)
     checker = EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
     findings = list(checker.run(ctx))
-    hits = [f for f in findings if f.check_id == "aws.ec2.instances.old_generation"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.instances.old.generation"]
     assert len(hits) == 1
     assert hits[0].status == "info"
 
@@ -251,7 +251,7 @@ def test_t_family_credit_issue_emits(monkeypatch: pytest.MonkeyPatch) -> None:
         cfg=mod.EC2InstancesConfig(t_credit_balance_min_threshold=20.0, t_credit_lookback_days=7),
     )
     findings = list(checker.run(ctx))
-    hits = [f for f in findings if f.check_id == "aws.ec2.instances.t_credit_issues"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.instances.t.credit.issues"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "i-t"
 
@@ -274,7 +274,7 @@ def test_imdsv1_allowed_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=None)
     checker = mod.EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
     findings = list(checker.run(ctx))
-    hits = [f for f in findings if f.check_id == "aws.ec2.instances.security.imdsv1_allowed"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.instances.security.imdsv1.allowed"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "i-1"
 
@@ -322,7 +322,7 @@ def test_unused_security_group_excludes_referenced(monkeypatch: pytest.MonkeyPat
     ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=None)
     checker = EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
     findings = list(checker.run(ctx))
-    hits = [f for f in findings if f.check_id == "aws.ec2.security_groups.unused"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.security.groups.unused"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "sg-unused"
 
@@ -383,6 +383,6 @@ def test_stopped_long_ignores_malformed_volume_size(monkeypatch: pytest.MonkeyPa
         cfg=EC2InstancesConfig(stopped_long_age_days=30),
     )
     findings = list(checker.run(ctx))
-    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.stopped_long")
+    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.stopped.long")
     assert hit.scope.resource_id == "i-stop-bad-vol"
     assert float(hit.estimated_monthly_cost or 0.0) == pytest.approx(0.0, rel=1e-6)

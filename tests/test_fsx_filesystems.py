@@ -86,7 +86,7 @@ def test_possible_unused_emits_when_metrics_zero(monkeypatch: pytest.MonkeyPatch
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig(unused_lookback_days=14))
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.filesystems.possible_unused" for f in findings)
+    assert any(f.check_id == "aws.fsx.filesystems.possible.unused" for f in findings)
 
 
 def test_multi_az_in_nonprod_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,7 +109,7 @@ def test_multi_az_in_nonprod_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.filesystems.multi_az_in_nonprod" for f in findings)
+    assert any(f.check_id == "aws.fsx.filesystems.multi.az.in.nonprod" for f in findings)
 
 
 def test_windows_backups_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +132,7 @@ def test_windows_backups_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.windows.backups_disabled" for f in findings)
+    assert any(f.check_id == "aws.fsx.windows.backups.disabled" for f in findings)
 
 
 def test_windows_copy_tags_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,7 +155,7 @@ def test_windows_copy_tags_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> No
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.windows.copy_tags_to_backups_disabled" for f in findings)
+    assert any(f.check_id == "aws.fsx.windows.copy.tags.to.backups.disabled" for f in findings)
 
 
 def test_windows_maintenance_window_missing_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,7 +178,7 @@ def test_windows_maintenance_window_missing_emits(monkeypatch: pytest.MonkeyPatc
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.windows.maintenance_window_missing" for f in findings)
+    assert any(f.check_id == "aws.fsx.windows.maintenance.window.missing" for f in findings)
 
 
 def test_missing_required_tags_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +204,7 @@ def test_missing_required_tags_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.filesystems.missing_required_tags" for f in findings)
+    assert any(f.check_id == "aws.fsx.filesystems.missing.required.tags" for f in findings)
 
 
 def test_windows_storage_type_mismatch_emits_when_ssd_low_activity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,7 +235,7 @@ def test_windows_storage_type_mismatch_emits_when_ssd_low_activity(monkeypatch: 
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.windows.storage_type_mismatch" for f in findings)
+    assert any(f.check_id == "aws.fsx.windows.storage.type.mismatch" for f in findings)
 
 
 def test_fsx_storage_pricing_uses_service_quote() -> None:

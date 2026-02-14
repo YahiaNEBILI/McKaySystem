@@ -268,7 +268,7 @@ class EFSFileSystemsChecker(Checker):
         except (ClientError, BotoCoreError, AttributeError, TypeError, ValueError) as exc:
             code = _extract_client_error_code(exc)
             yield FindingDraft(
-                check_id="aws.efs.filesystems.access_error",
+                check_id="aws.efs.filesystems.access.error",
                 check_name=self._CHECK_NAME,
                 category=self._CATEGORY_GOV,
                 status="unknown",
@@ -276,7 +276,7 @@ class EFSFileSystemsChecker(Checker):
                 title="Unable to list EFS file systems",
                 scope=build_scope(ctx, account=self._account, region=region, service="efs"),
                 message=f"Unable to list EFS file systems ({code or type(exc).__name__}).",
-                issue_key={"check_id": "aws.efs.filesystems.access_error", "region": region},
+                issue_key={"check_id": "aws.efs.filesystems.access.error", "region": region},
             )
             return
 
@@ -381,7 +381,7 @@ class EFSFileSystemsChecker(Checker):
                 # We requested p95 over hourly periods; take max as a conservative "worst" p95 signal
                 p95_pct = max(p95_vals) if p95_vals else 0.0
                 if p95_vals and p95_pct <= float(cfg.underutilized_p95_percent_io_limit_threshold):
-                    check_id = "aws.efs.filesystems.provisioned_throughput_underutilized"
+                    check_id = "aws.efs.filesystems.provisioned.throughput.underutilized"
                     if not _cap(check_id):
                         yield FindingDraft(
                             check_id=check_id,
@@ -407,7 +407,7 @@ class EFSFileSystemsChecker(Checker):
                         )
 
             # 3) Lifecycle missing
-            check_id = "aws.efs.filesystems.lifecycle_missing"
+            check_id = "aws.efs.filesystems.lifecycle.missing"
             try:
                 lc = efs.describe_lifecycle_configuration(FileSystemId=fs_id)
                 policies = lc.get("LifecyclePolicies", []) if isinstance(lc, Mapping) else []
@@ -455,7 +455,7 @@ class EFSFileSystemsChecker(Checker):
                 bp = efs.describe_backup_policy(FileSystemId=fs_id)
                 status = _safe_str((bp.get("BackupPolicy", {}) or {}).get("Status"))
                 if status and status.upper() == "DISABLED":
-                    bid = "aws.efs.filesystems.backup_disabled"
+                    bid = "aws.efs.filesystems.backup.disabled"
                     if not _cap(bid):
                         yield FindingDraft(
                             check_id=bid,

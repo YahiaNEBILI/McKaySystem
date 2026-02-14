@@ -1,7 +1,7 @@
--- rule_id: aws.backup.correlation.vault_risk
+-- rule_id: aws.backup.correlation.vault.risk
 -- name: AWS Backup vault risk (correlated)
 -- enabled: true
--- required_check_ids: aws.backup.vaults.no_lifecycle, aws.backup.vaults.access_policy_misconfig, aws.backup.recovery_points.stale, aws.backup.rules.no_lifecycle, aws.backup.plans.no_selections
+-- required_check_ids: aws.backup.vaults.no.lifecycle, aws.backup.vaults.access.policy.misconfig, aws.backup.recovery.points.stale, aws.backup.rules.no.lifecycle, aws.backup.plans.no.selections
 
 -- pipeline/correlation/rules/aws_backup_vault_risk.sql
 --
@@ -20,11 +20,11 @@
 -- it still includes the vault name in `dimensions['vault_name']` (or adjust below).
 --
 -- REQUIRED CHECK IDS for this rule:
---   aws.backup.vaults.no_lifecycle
---   aws.backup.vaults.access_policy_misconfig
---   aws.backup.recovery_points.stale
---   aws.backup.rules.no_lifecycle
---   aws.backup.plans.no_selections
+--   aws.backup.vaults.no.lifecycle
+--   aws.backup.vaults.access.policy.misconfig
+--   aws.backup.recovery.points.stale
+--   aws.backup.rules.no.lifecycle
+--   aws.backup.plans.no.selections
 
 WITH
 -- 1) Anchor vaults: any vault with at least one relevant vault-level finding
@@ -45,8 +45,8 @@ vault_anchors AS (
   FROM rule_input
   WHERE status = 'fail'
     AND check_id IN (
-      'aws.backup.vaults.no_lifecycle',
-      'aws.backup.vaults.access_policy_misconfig'
+      'aws.backup.vaults.no.lifecycle',
+      'aws.backup.vaults.access.policy.misconfig'
     )
     AND scope.resource_type = 'backup_vault'
 ),
@@ -63,8 +63,8 @@ vault_signals AS (
     scope.resource_arn        AS vault_arn,
 
     -- Presence signals
-    MAX(CASE WHEN check_id = 'aws.backup.vaults.no_lifecycle' THEN 1 ELSE 0 END)          AS sig_no_guardrail,
-    MAX(CASE WHEN check_id = 'aws.backup.vaults.access_policy_misconfig' THEN 1 ELSE 0 END) AS sig_policy_misconfig,
+    MAX(CASE WHEN check_id = 'aws.backup.vaults.no.lifecycle' THEN 1 ELSE 0 END)          AS sig_no_guardrail,
+    MAX(CASE WHEN check_id = 'aws.backup.vaults.access.policy.misconfig' THEN 1 ELSE 0 END) AS sig_policy_misconfig,
 
     -- Worst severity among vault-level findings (score)
     MAX(COALESCE(severity.score, 0)) AS vault_max_sev_score,
@@ -100,7 +100,7 @@ stale_rp_by_vault AS (
     LIST(DISTINCT fingerprint) AS stale_source_fps
   FROM rule_input
   WHERE status = 'fail'
-    AND check_id = 'aws.backup.recovery_points.stale'
+    AND check_id = 'aws.backup.recovery.points.stale'
   GROUP BY ALL
 ),
 
@@ -128,7 +128,7 @@ rules_no_lifecycle_by_vault AS (
     LIST(DISTINCT fingerprint) AS rules_source_fps
   FROM rule_input
   WHERE status = 'fail'
-    AND check_id = 'aws.backup.rules.no_lifecycle'
+    AND check_id = 'aws.backup.rules.no.lifecycle'
   GROUP BY ALL
 ),
 
@@ -142,7 +142,7 @@ plans_no_selections AS (
     COUNT(*) AS plans_no_selections_count
   FROM rule_input
   WHERE status = 'fail'
-    AND check_id = 'aws.backup.plans.no_selections'
+    AND check_id = 'aws.backup.plans.no.selections'
   GROUP BY ALL
 ),
 
@@ -233,7 +233,7 @@ SELECT
   ) AS scope,
 
   -- Meta check identity
-  'aws.backup.correlation.vault_risk' AS check_id,
+  'aws.backup.correlation.vault.risk' AS check_id,
   'AWS Backup vault risk (correlated)' AS check_name,
   'governance' AS category,
   '' AS sub_category,

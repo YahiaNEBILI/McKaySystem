@@ -17,10 +17,10 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 ## Check IDs emitted
 
 - `aws.efs.filesystems`
-- `aws.efs.filesystems.access_error`
-- `aws.efs.filesystems.backup_disabled`
-- `aws.efs.filesystems.lifecycle_missing`
-- `aws.efs.filesystems.provisioned_throughput_underutilized`
+- `aws.efs.filesystems.access.error`
+- `aws.efs.filesystems.backup.disabled`
+- `aws.efs.filesystems.lifecycle.missing`
+- `aws.efs.filesystems.provisioned.throughput.underutilized`
 - `aws.efs.filesystems.unencrypted`
 - `aws.efs.filesystems.unused`
 

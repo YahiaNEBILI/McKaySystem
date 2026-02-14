@@ -620,7 +620,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.stopped_long",
+                    check_id="aws.ec2.instances.stopped.long",
                     check_name="EC2 stopped for a long time",
                     category="cost",
                     status="fail",
@@ -681,7 +681,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.old_generation",
+                    check_id="aws.ec2.instances.old.generation",
                     check_name="EC2 old generation instance family",
                     category="cost",
                     status="info",
@@ -733,7 +733,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.security.imdsv1_allowed",
+                    check_id="aws.ec2.instances.security.imdsv1.allowed",
                     check_name="EC2 IMDSv1 allowed (HttpTokens not required)",
                     category="governance",
                     status="fail",
@@ -817,7 +817,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.security_groups.unused",
+                    check_id="aws.ec2.security.groups.unused",
                     check_name="Unused security group",
                     category="governance",
                     status="fail",
@@ -916,7 +916,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.t_credit_issues",
+                    check_id="aws.ec2.instances.t.credit.issues",
                     check_name="EC2 burstable CPU credit issues",
                     category="cost",
                     status="fail",
@@ -1057,7 +1057,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.security.admin_ports_open_world",
+                    check_id="aws.ec2.instances.security.admin.ports.open.world",
                     check_name="EC2 SSH/RDP open to the world",
                     category="governance",
                     status="fail",

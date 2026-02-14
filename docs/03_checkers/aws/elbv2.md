@@ -17,11 +17,11 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 ## Check IDs emitted
 
 - `aws.elbv2.load.balancers`
-- `aws.elbv2.load_balancers.access_error`
-- `aws.elbv2.load_balancers.idle`
-- `aws.elbv2.load_balancers.no_healthy_targets`
-- `aws.elbv2.load_balancers.no_listeners`
-- `aws.elbv2.load_balancers.no_registered_targets`
+- `aws.elbv2.load.balancers.access.error`
+- `aws.elbv2.load.balancers.idle`
+- `aws.elbv2.load.balancers.no.healthy.targets`
+- `aws.elbv2.load.balancers.no.listeners`
+- `aws.elbv2.load.balancers.no.registered.targets`
 
 ## Notes / limitations
 

@@ -16,10 +16,10 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.backup.access_error`
-- `aws.backup.vaults.access_policy_misconfig`
+- `aws.backup.access.error`
+- `aws.backup.vaults.access.policy.misconfig`
 - `aws.backup.vaults.audit`
-- `aws.backup.vaults.no_lifecycle`
+- `aws.backup.vaults.no.lifecycle`
 
 ## Notes / limitations
 

@@ -332,7 +332,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         )
 
         return FindingDraft(
-            check_id="aws.cloudwatch.access_error",
+            check_id="aws.cloudwatch.access.error",
             check_name="CloudWatch access error",
             category="governance",
             status="info",
@@ -402,7 +402,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
             findings.append(
                 FindingDraft(
-                    check_id="aws.logs.log_groups.retention_missing",
+                    check_id="aws.logs.log.groups.retention.missing",
                     check_name="CloudWatch Logs retention policy",
                     category="governance",
                     status="fail",
@@ -533,7 +533,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
             findings.append(
                 FindingDraft(
-                    check_id="aws.cloudwatch.custom_metrics.from_log_filters",
+                    check_id="aws.cloudwatch.custom.metrics.from.log.filters",
                     check_name="CloudWatch custom metrics created by log metric filters",
                     category="waste",
                     status="info",
@@ -610,7 +610,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
         return [
             FindingDraft(
-                check_id="aws.cloudwatch.alarms.high_count",
+                check_id="aws.cloudwatch.alarms.high.count",
                 check_name="CloudWatch alarms count",
                 category="waste",
                 status="info",

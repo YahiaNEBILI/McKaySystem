@@ -4,7 +4,7 @@ AWS Backup Vaults Audit Checker
 
 This module adds two governance-oriented checks for AWS Backup vaults:
 
-1) aws.backup.vaults.no_lifecycle
+1) aws.backup.vaults.no.lifecycle
    IMPORTANT NOTE (AWS reality):
    AWS Backup retention "lifecycle" (cold storage / delete after) is defined on
    *backup plan rules*, not on vaults. However, AWS Backup provides a vault-level
@@ -23,7 +23,7 @@ This module adds two governance-oriented checks for AWS Backup vaults:
        *current* recovery point storage cost in the vault (warm/cold), using
        PricingService when available.
 
-2) aws.backup.vaults.access_policy_misconfig
+2) aws.backup.vaults.access.policy.misconfig
    Detects common misconfigurations in backup vault access policies:
      - No access policy (low signal, but useful governance gap)
      - Wildcard principals in Allow statements ("*" or {"AWS":"*"})
@@ -254,8 +254,8 @@ def _extract_org_ids_from_condition(condition: Any) -> List[str]:
 class AwsBackupVaultsAuditChecker:
     """
     One checker module, two check_id outputs:
-      - aws.backup.vaults.no_lifecycle
-      - aws.backup.vaults.access_policy_misconfig
+      - aws.backup.vaults.no.lifecycle
+      - aws.backup.vaults.access.policy.misconfig
     """
 
     checker_id = "aws.backup.vaults.audit"
@@ -321,7 +321,7 @@ class AwsBackupVaultsAuditChecker:
         """
         Vault Lock / retention guardrails.
 
-        Uses canonical check_id 'aws.backup.vaults.no_lifecycle'.
+        Uses canonical check_id 'aws.backup.vaults.no.lifecycle'.
         """
         vault_name = str(vault.get("BackupVaultName") or "unknown")
         vault_arn = str(vault.get("BackupVaultArn") or "")
@@ -412,7 +412,7 @@ class AwsBackupVaultsAuditChecker:
             cost_suffix = f" Observed recovery point storage estimate: {est_cost_str}/month."
 
         yield FindingDraft(
-            check_id="aws.backup.vaults.no_lifecycle",
+            check_id="aws.backup.vaults.no.lifecycle",
             check_name="AWS Backup vault retention guardrails",
             category="backup.governance",
             status="fail",
@@ -518,7 +518,7 @@ class AwsBackupVaultsAuditChecker:
             if code in {"ResourceNotFoundException", "ResourceNotFound"}:
                 # No access policy exists
                 yield FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="governance",
                     status="fail",
@@ -551,7 +551,7 @@ class AwsBackupVaultsAuditChecker:
 
         if not policy_str:
             yield FindingDraft(
-                check_id="aws.backup.vaults.access_policy_misconfig",
+                check_id="aws.backup.vaults.access.policy.misconfig",
                 check_name="AWS Backup vault access policy misconfiguration",
                 category="governance",
                 status="fail",
@@ -579,7 +579,7 @@ class AwsBackupVaultsAuditChecker:
             policy = json.loads(policy_str)
         except json.JSONDecodeError:
             yield FindingDraft(
-                check_id="aws.backup.vaults.access_policy_misconfig",
+                check_id="aws.backup.vaults.access.policy.misconfig",
                 check_name="AWS Backup vault access policy misconfiguration",
                 category="governance",
                 status="fail",
@@ -631,7 +631,7 @@ class AwsBackupVaultsAuditChecker:
             # --- 0) NotPrincipal: we don't fully interpret it; surface as info to avoid silent misses.
             if not_principal is not None:
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="governance",
                     status="info",
@@ -683,7 +683,7 @@ class AwsBackupVaultsAuditChecker:
                         sev = Severity(level="medium", score=65)
 
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
@@ -736,7 +736,7 @@ class AwsBackupVaultsAuditChecker:
                     title = "Backup vault access policy grants broad sensitive permissions cross-account"
 
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
@@ -777,7 +777,7 @@ class AwsBackupVaultsAuditChecker:
             if has_sensitive and principals:
                 matched = _matched_sensitive_actions(actions)
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
@@ -905,7 +905,7 @@ class AwsBackupVaultsAuditChecker:
     def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
         code = exc.response.get("Error", {}).get("Code", "ClientError")
         return FindingDraft(
-            check_id="aws.backup.access_error",
+            check_id="aws.backup.access.error",
             check_name="AWS Backup access error",
             category="inventory",
             status="info",

@@ -115,7 +115,7 @@ def test_lifecycle_missing_emits_when_policy_not_found(monkeypatch: pytest.Monke
     checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.efs.filesystems.lifecycle_missing" for f in findings)
+    assert any(f.check_id == "aws.efs.filesystems.lifecycle.missing" for f in findings)
 
 
 def test_unused_emits_when_low_io_and_no_connections(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +172,7 @@ def test_provisioned_throughput_underutilized_emits(monkeypatch: pytest.MonkeyPa
     checker = EFSFileSystemsChecker(account_id="111111111111", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.efs.filesystems.provisioned_throughput_underutilized" for f in findings)
+    assert any(f.check_id == "aws.efs.filesystems.provisioned.throughput.underutilized" for f in findings)
 
 
 def test_backup_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,7 +191,7 @@ def test_backup_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.efs.filesystems.backup_disabled" for f in findings)
+    assert any(f.check_id == "aws.efs.filesystems.backup.disabled" for f in findings)
 
 
 def test_unencrypted_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,7 +227,7 @@ def test_access_error_emits_when_list_filesystems_is_malformed() -> None:
     checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.efs.filesystems.access_error"
+    assert findings[0].check_id == "aws.efs.filesystems.access.error"
 
 
 def test_metrics_malformed_values_fallback_to_best_effort(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,4 +241,4 @@ def test_metrics_malformed_values_fallback_to_best_effort(monkeypatch: pytest.Mo
 
     checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
     findings = list(checker.run(ctx))
-    assert any(f.check_id == "aws.efs.filesystems.lifecycle_missing" for f in findings)
+    assert any(f.check_id == "aws.efs.filesystems.lifecycle.missing" for f in findings)

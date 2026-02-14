@@ -327,7 +327,7 @@ class EBSStorageChecker(Checker):
 
     def _access_error(self, ctx: RunContext, *, region: str, operation: str, exc: Exception) -> FindingDraft:
         """Emit an informational finding when required permissions/APIs are missing."""
-        check_id = "aws.ec2.ebs.access_error"
+        check_id = "aws.ec2.ebs.access.error"
         return FindingDraft(
             check_id=check_id,
             check_name="EBS inventory access error",
@@ -460,7 +460,7 @@ class EBSStorageChecker(Checker):
                                             pricing_notes_out = pricing_notes
                                             pricing_hint = "(PricingService)"
 
-                                        check_id = "aws.ec2.ebs.unattached_volume"
+                                        check_id = "aws.ec2.ebs.unattached.volume"
                                         yield FindingDraft(
                                             check_id=check_id,
                                             check_name="Unattached EBS volume",
@@ -520,7 +520,7 @@ class EBSStorageChecker(Checker):
                                     pricing_notes_out = f"gp2: {gp2_notes}; gp3: {gp3_notes}"
                                     pricing_hint = "(PricingService)"
 
-                                check_id = "aws.ec2.ebs.gp2_to_gp3"
+                                check_id = "aws.ec2.ebs.gp2.to.gp3"
                                 yield FindingDraft(
                                     check_id=check_id,
                                     check_name="gp2 to gp3 migration opportunity",
@@ -568,7 +568,7 @@ class EBSStorageChecker(Checker):
                     # -------------------------
                     if emitted_vol_unencrypted < cfg.max_findings_per_type:
                         if vol.get("Encrypted") is not True:
-                            check_id = "aws.ec2.ebs.volume_unencrypted"
+                            check_id = "aws.ec2.ebs.volume.unencrypted"
                             yield FindingDraft(
                                 check_id=check_id,
                                 check_name="Unencrypted EBS volume",
@@ -677,7 +677,7 @@ class EBSStorageChecker(Checker):
                                 else Severity(level="medium", score=620)
                             )
 
-                            check_id = "aws.ec2.ebs.old_snapshot"
+                            check_id = "aws.ec2.ebs.old.snapshot"
                             yield FindingDraft(
                                 check_id=check_id,
                                 check_name="Old EBS snapshot (not referenced by AMI)",
@@ -735,7 +735,7 @@ class EBSStorageChecker(Checker):
                     # -------------------------
                     if emitted_snap_unencrypted < cfg.max_findings_per_type:
                         if snap.get("Encrypted") is not True:
-                            check_id = "aws.ec2.ebs.snapshot_unencrypted"
+                            check_id = "aws.ec2.ebs.snapshot.unencrypted"
                             yield FindingDraft(
                                 check_id=check_id,
                                 check_name="Unencrypted EBS snapshot",

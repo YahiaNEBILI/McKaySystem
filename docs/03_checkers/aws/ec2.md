@@ -17,14 +17,14 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 ## Check IDs emitted
 
 - `aws.ec2.instances`
-- `aws.ec2.instances.old_generation`
-- `aws.ec2.instances.security.admin_ports_open_world`
-- `aws.ec2.instances.security.imdsv1_allowed`
-- `aws.ec2.instances.stopped_long`
-- `aws.ec2.instances.t_credit_issues`
+- `aws.ec2.instances.old.generation`
+- `aws.ec2.instances.security.admin.ports.open.world`
+- `aws.ec2.instances.security.imdsv1.allowed`
+- `aws.ec2.instances.stopped.long`
+- `aws.ec2.instances.t.credit.issues`
 - `aws.ec2.instances.tags.missing`
 - `aws.ec2.instances.underutilized`
-- `aws.ec2.security_groups.unused`
+- `aws.ec2.security.groups.unused`
 
 ## Notes / limitations
 

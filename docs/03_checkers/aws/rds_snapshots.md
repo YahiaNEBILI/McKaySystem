@@ -16,9 +16,9 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.rds.snapshots.access_error`
+- `aws.rds.snapshots.access.error`
 - `aws.rds.snapshots.cleanup`
-- `aws.rds.snapshots.manual_old`
+- `aws.rds.snapshots.manual.old`
 - `aws.rds.snapshots.orphaned`
 
 ## Notes / limitations

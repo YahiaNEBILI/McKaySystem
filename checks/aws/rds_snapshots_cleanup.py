@@ -345,7 +345,7 @@ class RDSSnapshotsCleanupChecker:
     def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
         code = exc.response.get("Error", {}).get("Code", "ClientError")
         return FindingDraft(
-            check_id="aws.rds.snapshots.access_error",
+            check_id="aws.rds.snapshots.access.error",
             check_name="RDS snapshots access error",
             category="inventory",
             status="info",
@@ -405,7 +405,7 @@ class RDSSnapshotsCleanupChecker:
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         return FindingDraft(
-            check_id="aws.rds.snapshots.manual_old",
+            check_id="aws.rds.snapshots.manual.old",
             check_name="Old manual RDS snapshot",
             category="waste",
             status="fail",

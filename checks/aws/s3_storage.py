@@ -7,10 +7,10 @@ extends it into a real S3 storage checker with additional governance and cost
 signals.
 
 Emitted check_ids:
-  - aws.s3.governance.lifecycle_missing
-  - aws.s3.governance.encryption_missing
-  - aws.s3.governance.public_access_block_missing
-  - aws.s3.cost.bucket_storage_estimate
+  - aws.s3.governance.lifecycle.missing
+  - aws.s3.governance.encryption.missing
+  - aws.s3.governance.public.access.block.missing
+  - aws.s3.cost.bucket.storage.estimate
 """
 
 from __future__ import annotations
@@ -75,10 +75,10 @@ class S3StorageChecker:
     is_regional = False
 
     # check ids
-    _CID_LIFECYCLE = "aws.s3.governance.lifecycle_missing"
-    _CID_ENCRYPTION = "aws.s3.governance.encryption_missing"
-    _CID_PAB = "aws.s3.governance.public_access_block_missing"
-    _CID_COST = "aws.s3.cost.bucket_storage_estimate"
+    _CID_LIFECYCLE = "aws.s3.governance.lifecycle.missing"
+    _CID_ENCRYPTION = "aws.s3.governance.encryption.missing"
+    _CID_PAB = "aws.s3.governance.public.access.block.missing"
+    _CID_COST = "aws.s3.cost.bucket.storage.estimate"
 
     def __init__(
         self,

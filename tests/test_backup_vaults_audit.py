@@ -180,7 +180,7 @@ def test_vault_lock_missing_fields_emits_no_lifecycle():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_missing"
     assert f.scope.resource_id == "vault-a"
 
@@ -268,7 +268,7 @@ def test_vault_lock_disabled_zero_zero_emits_missing():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_missing"
     assert f.scope.resource_id == "vault-a2"
 
@@ -289,7 +289,7 @@ def test_vault_lock_no_max_emits_indefinite_retention():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_no_max"
     assert f.severity.level in ("medium", "high")
 
@@ -326,7 +326,7 @@ def test_vault_lock_no_max_attaches_cost_estimate_with_pricing_service():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_no_max"
 
     # Expected: 10 * 0.05 + 5 * 0.01 = 0.50 + 0.05 = 0.55
@@ -388,7 +388,7 @@ def test_vault_lock_out_of_standard_emits_low():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_out_of_standard"
     assert f.severity.level == "low"
 
@@ -416,7 +416,7 @@ def test_access_policy_notprincipal_emits_info():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.status == "info"
     assert f.issue_key["rule"] == "uses_notprincipal"
 
@@ -437,7 +437,7 @@ def test_access_policy_missing_emits_low_misconfig():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "no_access_policy"
     assert f.severity.level == "low"
 
@@ -464,7 +464,7 @@ def test_access_policy_wildcard_principal_emits_high():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "wildcard_principal"
     assert f.severity.level == "high"
     assert (f.dimensions.get("has_org_condition") or "false") == "false"
@@ -499,7 +499,7 @@ def test_access_policy_wildcard_principal_with_org_condition_downgrades():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "wildcard_principal"
     assert f.severity.level in ("medium", "high")  # your checker downgrades to medium
     assert (f.dimensions.get("has_org_condition") or "false") == "true"
@@ -534,7 +534,7 @@ def test_access_policy_cross_account_not_allowlisted_emits_fail():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "cross_account_access"
     assert "333333333333" in (f.dimensions.get("cross_account_ids") or "")
 
@@ -583,7 +583,7 @@ def test_list_vaults_access_error_emits_single_info_and_stops():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.backup.access_error"
+    assert findings[0].check_id == "aws.backup.access.error"
     assert findings[0].status == "info"
 
 
@@ -605,5 +605,5 @@ def test_describe_vault_access_error_emits_single_info_and_stops():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.backup.access_error"
+    assert findings[0].check_id == "aws.backup.access.error"
     assert findings[0].status == "info"

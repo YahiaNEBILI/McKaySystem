@@ -167,9 +167,9 @@ def test_emits_lifecycle_encryption_and_pab_failures() -> None:
 
     assert check_ids == sorted(
         [
-            "aws.s3.governance.encryption_missing",
-            "aws.s3.governance.lifecycle_missing",
-            "aws.s3.governance.public_access_block_missing",
+            "aws.s3.governance.encryption.missing",
+            "aws.s3.governance.lifecycle.missing",
+            "aws.s3.governance.public.access.block.missing",
         ]
     )
 
@@ -223,7 +223,7 @@ def test_cost_estimate_uses_pricing_service_when_available() -> None:
     ctx = _FakeCtx(services=_FakeServices(s3=s3, cloudwatch=cw, pricing=pricing))
 
     findings = list(checker.run(ctx))
-    cost = [f for f in findings if f.check_id == "aws.s3.cost.bucket_storage_estimate"]
+    cost = [f for f in findings if f.check_id == "aws.s3.cost.bucket.storage.estimate"]
     assert len(cost) == 1
 
     f = cost[0]

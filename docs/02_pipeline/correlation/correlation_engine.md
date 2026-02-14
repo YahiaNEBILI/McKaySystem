@@ -76,11 +76,11 @@ Example:
 
 ```
 Raw findings:
-  - aws.backup.vaults.no_lifecycle
-  - aws.backup.recovery_points.stale
+  - aws.backup.vaults.no.lifecycle
+  - aws.backup.recovery.points.stale
 
 Correlated finding:
-  - aws.backup.correlation.vault_risk
+  - aws.backup.correlation.vault.risk
 ```
 
 This preserves:
@@ -150,11 +150,11 @@ This separation allows:
 Example:
 ```python
 CorrelationRule(
-  rule_id="aws.backup.correlation.vault_risk",
+  rule_id="aws.backup.correlation.vault.risk",
   name="AWS Backup vault risk (correlated)",
   required_check_ids=[
-    "aws.backup.vaults.no_lifecycle",
-    "aws.backup.recovery_points.stale",
+    "aws.backup.vaults.no.lifecycle",
+    "aws.backup.recovery.points.stale",
   ],
   sql=load_rule_sql("aws_backup_vault_risk.sql"),
 )

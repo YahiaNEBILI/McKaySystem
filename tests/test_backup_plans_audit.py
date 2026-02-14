@@ -165,8 +165,8 @@ def test_plan_without_selections_emits_finding():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    assert any(f.check_id == "aws.backup.plans.no_selections" for f in findings)
-    f = [x for x in findings if x.check_id == "aws.backup.plans.no_selections"][0]
+    assert any(f.check_id == "aws.backup.plans.no.selections" for f in findings)
+    f = [x for x in findings if x.check_id == "aws.backup.plans.no.selections"][0]
     assert f.issue_key["plan_id"] == "p-1"
     assert f.status == "fail"
 
@@ -187,7 +187,7 @@ def test_plan_with_selections_is_ok_no_finding():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    assert not any(f.check_id == "aws.backup.plans.no_selections" for f in findings)
+    assert not any(f.check_id == "aws.backup.plans.no.selections" for f in findings)
 
 
 # -------------------------
@@ -218,8 +218,8 @@ def test_rule_missing_lifecycle_emits_finding():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    assert any(f.check_id == "aws.backup.rules.no_lifecycle" for f in findings)
-    f = [x for x in findings if x.check_id == "aws.backup.rules.no_lifecycle"][0]
+    assert any(f.check_id == "aws.backup.rules.no.lifecycle" for f in findings)
+    f = [x for x in findings if x.check_id == "aws.backup.rules.no.lifecycle"][0]
     assert f.issue_key["plan_id"] == "p-3"
     assert f.issue_key["rule_name"] == "daily"
 
@@ -248,7 +248,7 @@ def test_rule_with_delete_after_is_ok():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    assert not any(f.check_id == "aws.backup.rules.no_lifecycle" for f in findings)
+    assert not any(f.check_id == "aws.backup.rules.no.lifecycle" for f in findings)
 
 
 # -------------------------
@@ -286,7 +286,7 @@ def test_stale_recovery_point_emits_finding_and_estimates_cost():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    stale = [x for x in findings if x.check_id == "aws.backup.recovery_points.stale"]
+    stale = [x for x in findings if x.check_id == "aws.backup.recovery.points.stale"]
     assert len(stale) == 1
 
     f = stale[0]
@@ -319,7 +319,7 @@ def test_recovery_point_recent_is_not_emitted():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    assert not any(f.check_id == "aws.backup.recovery_points.stale" for f in findings)
+    assert not any(f.check_id == "aws.backup.recovery.points.stale" for f in findings)
 
 
 def test_recovery_point_deleting_soon_is_skipped():
@@ -349,7 +349,7 @@ def test_recovery_point_deleting_soon_is_skipped():
     ctx = _FakeCtx(services=_FakeServices(backup=backup))
 
     findings = list(checker.run(ctx))
-    assert not any(f.check_id == "aws.backup.recovery_points.stale" for f in findings)
+    assert not any(f.check_id == "aws.backup.recovery.points.stale" for f in findings)
 
 
 # -------------------------
@@ -363,7 +363,7 @@ def test_access_error_on_list_backup_plans_emits_single_info_and_stops():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.backup.access_error"
+    assert findings[0].check_id == "aws.backup.access.error"
     assert findings[0].status == "info"
 
 
@@ -391,5 +391,5 @@ def test_access_error_on_get_backup_plan_emits_access_error():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.backup.access_error"
+    assert findings[0].check_id == "aws.backup.access.error"
     assert findings[0].status == "info"

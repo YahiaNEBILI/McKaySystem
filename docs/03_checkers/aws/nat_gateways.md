@@ -17,11 +17,11 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 ## Check IDs emitted
 
 - `aws.ec2.nat.gateways`
-- `aws.ec2.nat_gateways.access_error`
-- `aws.ec2.nat_gateways.cross_az`
-- `aws.ec2.nat_gateways.high_data_processing`
-- `aws.ec2.nat_gateways.idle`
-- `aws.ec2.nat_gateways.orphaned`
+- `aws.ec2.nat.gateways.access.error`
+- `aws.ec2.nat.gateways.cross.az`
+- `aws.ec2.nat.gateways.high.data.processing`
+- `aws.ec2.nat.gateways.idle`
+- `aws.ec2.nat.gateways.orphaned`
 
 ## Notes / limitations
 

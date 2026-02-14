@@ -16,11 +16,11 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.ec2.ebs.gp2_to_gp3`
-- `aws.ec2.ebs.old_snapshot`
-- `aws.ec2.ebs.snapshot_unencrypted`
-- `aws.ec2.ebs.unattached_volume`
-- `aws.ec2.ebs.volume_unencrypted`
+- `aws.ec2.ebs.gp2.to.gp3`
+- `aws.ec2.ebs.old.snapshot`
+- `aws.ec2.ebs.snapshot.unencrypted`
+- `aws.ec2.ebs.unattached.volume`
+- `aws.ec2.ebs.volume.unencrypted`
 
 ## Notes / limitations
 

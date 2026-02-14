@@ -330,7 +330,7 @@ class ElbV2LoadBalancersChecker:
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code") or "")
             yield FindingDraft(
-                check_id="aws.elbv2.load_balancers.access_error",
+                check_id="aws.elbv2.load.balancers.access.error",
                 check_name=self._CHECK_NAME,
                 category="governance",
                 status="unknown",
@@ -338,7 +338,7 @@ class ElbV2LoadBalancersChecker:
                 title="Unable to list load balancers",
                 scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
                 message=f"Unable to list ELBv2 load balancers ({code or type(exc).__name__}).",
-                issue_key={"check_id": "aws.elbv2.load_balancers.access_error", "region": region},
+                issue_key={"check_id": "aws.elbv2.load.balancers.access.error", "region": region},
             )
             return
 
@@ -358,7 +358,7 @@ class ElbV2LoadBalancersChecker:
                 if _is_access_denied(exc) and "elbv2:DescribeTags" not in iam_denied:
                     iam_denied.add("elbv2:DescribeTags")
                     yield FindingDraft(
-                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_id="aws.elbv2.load.balancers.missing.permission",
                         check_name=self._CHECK_NAME,
                         category="governance",
                         status="info",
@@ -367,7 +367,7 @@ class ElbV2LoadBalancersChecker:
                         scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
                         message="Access denied on elbv2:DescribeTags. Suppression tags may not be applied.",
                         recommendation="Grant elasticloadbalancing:DescribeTags to the scanner role.",
-                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "DescribeTags", "region": region},
+                        issue_key={"check_id": "aws.elbv2.load.balancers.missing.permission", "op": "DescribeTags", "region": region},
                     )
                     continue
                 raise
@@ -417,7 +417,7 @@ class ElbV2LoadBalancersChecker:
                 if _is_access_denied(exc) and "cloudwatch:GetMetricData" not in iam_denied:
                     iam_denied.add("cloudwatch:GetMetricData")
                     yield FindingDraft(
-                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_id="aws.elbv2.load.balancers.missing.permission",
                         check_name=self._CHECK_NAME,
                         category="governance",
                         status="info",
@@ -426,7 +426,7 @@ class ElbV2LoadBalancersChecker:
                         scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
                         message="Access denied on cloudwatch:GetMetricData. Idle detection will be skipped.",
                         recommendation="Grant cloudwatch:GetMetricData to the scanner role.",
-                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "GetMetricData", "region": region},
+                        issue_key={"check_id": "aws.elbv2.load.balancers.missing.permission", "op": "GetMetricData", "region": region},
                     )
                 else:
                     raise
@@ -443,7 +443,7 @@ class ElbV2LoadBalancersChecker:
                 if _is_access_denied(exc) and "cloudwatch:GetMetricData" not in iam_denied:
                     iam_denied.add("cloudwatch:GetMetricData")
                     yield FindingDraft(
-                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_id="aws.elbv2.load.balancers.missing.permission",
                         check_name=self._CHECK_NAME,
                         category="governance",
                         status="info",
@@ -452,7 +452,7 @@ class ElbV2LoadBalancersChecker:
                         scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
                         message="Access denied on cloudwatch:GetMetricData. Idle detection will be skipped.",
                         recommendation="Grant cloudwatch:GetMetricData to the scanner role.",
-                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "GetMetricData", "region": region},
+                        issue_key={"check_id": "aws.elbv2.load.balancers.missing.permission", "op": "GetMetricData", "region": region},
                     )
                 else:
                     raise
@@ -483,7 +483,7 @@ class ElbV2LoadBalancersChecker:
                 if _is_access_denied(exc) and "elbv2:DescribeListeners" not in iam_denied:
                     iam_denied.add("elbv2:DescribeListeners")
                     yield FindingDraft(
-                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_id="aws.elbv2.load.balancers.missing.permission",
                         check_name=self._CHECK_NAME,
                         category="governance",
                         status="info",
@@ -492,7 +492,7 @@ class ElbV2LoadBalancersChecker:
                         scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
                         message="Access denied on elbv2:DescribeListeners. Listener-based checks may be incomplete.",
                         recommendation="Grant elasticloadbalancing:DescribeListeners to the scanner role.",
-                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "DescribeListeners", "region": region},
+                        issue_key={"check_id": "aws.elbv2.load.balancers.missing.permission", "op": "DescribeListeners", "region": region},
                     )
                     listeners = []
                 else:
@@ -519,7 +519,7 @@ class ElbV2LoadBalancersChecker:
                 if _is_access_denied(exc) and "elbv2:DescribeTargetGroups" not in iam_denied:
                     iam_denied.add("elbv2:DescribeTargetGroups")
                     yield FindingDraft(
-                        check_id="aws.elbv2.load_balancers.missing_permission",
+                        check_id="aws.elbv2.load.balancers.missing.permission",
                         check_name=self._CHECK_NAME,
                         category="governance",
                         status="info",
@@ -528,7 +528,7 @@ class ElbV2LoadBalancersChecker:
                         scope=build_scope(ctx, account=self._account, region=region, service="elbv2"),
                         message="Access denied on elbv2:DescribeTargetGroups. Target-group checks may be incomplete.",
                         recommendation="Grant elasticloadbalancing:DescribeTargetGroups to the scanner role.",
-                        issue_key={"check_id": "aws.elbv2.load_balancers.missing_permission", "op": "DescribeTargetGroups", "region": region},
+                        issue_key={"check_id": "aws.elbv2.load.balancers.missing.permission", "op": "DescribeTargetGroups", "region": region},
                     )
                     tgs = []
                 else:
@@ -586,7 +586,7 @@ class ElbV2LoadBalancersChecker:
                 if emitted["orphan_no_listeners"] < cfg.max_findings_per_type:
                     emitted["orphan_no_listeners"] += 1
                     yield FindingDraft(
-                        check_id="aws.elbv2.load_balancers.no_listeners",
+                        check_id="aws.elbv2.load.balancers.no.listeners",
                         check_name=self._CHECK_NAME,
                         category="cost",
                         status="fail",
@@ -602,7 +602,7 @@ class ElbV2LoadBalancersChecker:
                         estimate_confidence=pricing_conf,
                         estimate_notes=pricing_notes,
                         tags=tags,
-                        issue_key={"check_id": "aws.elbv2.load_balancers.no_listeners", "lb_arn": arn},
+                        issue_key={"check_id": "aws.elbv2.load.balancers.no.listeners", "lb_arn": arn},
                         dimensions={"lb_type": lb_type, "scheme": scheme},
                     )
                 continue
@@ -622,7 +622,7 @@ class ElbV2LoadBalancersChecker:
                 emitted["idle"] += 1
                 metric = "RequestCount" if lb_type == "application" else "NewFlowCount"
                 yield FindingDraft(
-                    check_id="aws.elbv2.load_balancers.idle",
+                    check_id="aws.elbv2.load.balancers.idle",
                     check_name=self._CHECK_NAME,
                     category="cost",
                     status="fail",
@@ -638,7 +638,7 @@ class ElbV2LoadBalancersChecker:
                     estimate_confidence=pricing_conf,
                     estimate_notes=pricing_notes,
                     tags=tags,
-                    issue_key={"check_id": "aws.elbv2.load_balancers.idle", "lb_arn": arn},
+                    issue_key={"check_id": "aws.elbv2.load.balancers.idle", "lb_arn": arn},
                     dimensions={"lb_type": lb_type, "scheme": scheme},
                 )
 
@@ -677,7 +677,7 @@ class ElbV2LoadBalancersChecker:
                     if _is_access_denied(exc) and "elbv2:DescribeTargetHealth" not in iam_denied:
                         iam_denied.add("elbv2:DescribeTargetHealth")
                         yield FindingDraft(
-                            check_id="aws.elbv2.load_balancers.missing_permission",
+                            check_id="aws.elbv2.load.balancers.missing.permission",
                             check_name=self._CHECK_NAME,
                             category="governance",
                             status="info",
@@ -690,7 +690,7 @@ class ElbV2LoadBalancersChecker:
                             ),
                             recommendation="Grant elasticloadbalancing:DescribeTargetHealth to the scanner role.",
                             issue_key={
-                                "check_id": "aws.elbv2.load_balancers.missing_permission",
+                                "check_id": "aws.elbv2.load.balancers.missing.permission",
                                 "op": "DescribeTargetHealth",
                                 "region": region,
                             },
@@ -711,7 +711,7 @@ class ElbV2LoadBalancersChecker:
             if not any_targets and emitted["orphan_no_targets"] < cfg.max_findings_per_type:
                 emitted["orphan_no_targets"] += 1
                 yield FindingDraft(
-                    check_id="aws.elbv2.load_balancers.no_registered_targets",
+                    check_id="aws.elbv2.load.balancers.no.registered.targets",
                     check_name=self._CHECK_NAME,
                     category="cost",
                     status="fail",
@@ -727,14 +727,14 @@ class ElbV2LoadBalancersChecker:
                     estimate_confidence=pricing_conf,
                     estimate_notes=pricing_notes,
                     tags=tags,
-                    issue_key={"check_id": "aws.elbv2.load_balancers.no_registered_targets", "lb_arn": arn},
+                    issue_key={"check_id": "aws.elbv2.load.balancers.no.registered.targets", "lb_arn": arn},
                     dimensions={"lb_type": lb_type, "scheme": scheme},
                 )
 
             if any_targets and not any_healthy and emitted["no_healthy_targets"] < cfg.max_findings_per_type:
                 emitted["no_healthy_targets"] += 1
                 yield FindingDraft(
-                    check_id="aws.elbv2.load_balancers.no_healthy_targets",
+                    check_id="aws.elbv2.load.balancers.no.healthy.targets",
                     check_name=self._CHECK_NAME,
                     category="governance",
                     status="fail",
@@ -747,7 +747,7 @@ class ElbV2LoadBalancersChecker:
                     ),
                     recommendation="Investigate target group health checks, security groups, and target configuration.",
                     tags=tags,
-                    issue_key={"check_id": "aws.elbv2.load_balancers.no_healthy_targets", "lb_arn": arn},
+                    issue_key={"check_id": "aws.elbv2.load.balancers.no.healthy.targets", "lb_arn": arn},
                     dimensions={"lb_type": lb_type, "scheme": scheme},
                 )
 

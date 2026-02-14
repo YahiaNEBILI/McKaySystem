@@ -661,7 +661,7 @@ class FSxFileSystemsChecker(Checker):
             # -----------------------------
             missing = [k for k in cfg.required_tag_keys if not (tags.get(k, "") or "").strip()]
             if missing:
-                check_id = "aws.fsx.filesystems.missing_required_tags"
+                check_id = "aws.fsx.filesystems.missing.required.tags"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -685,7 +685,7 @@ class FSxFileSystemsChecker(Checker):
             # -----------------------------
             active, evidence = _activity_signal(ctx, fs_id=fs_id, days=cfg.unused_lookback_days)
             if not active:
-                check_id = "aws.fsx.filesystems.possible_unused"
+                check_id = "aws.fsx.filesystems.possible.unused"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     conf = 60 if bool(evidence.get("any_metric_seen")) else 35
@@ -716,7 +716,7 @@ class FSxFileSystemsChecker(Checker):
                 p95_util, util_dbg = _p95_utilization_pct(ctx, fs_id=fs_id, days=cfg.throughput_lookback_days)
 
                 if p95_util is not None and p95_util < cfg.underutilized_p95_util_threshold_pct:
-                    check_id = "aws.fsx.filesystems.underutilized_throughput"
+                    check_id = "aws.fsx.filesystems.underutilized.throughput"
                     if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                         emitted[check_id] = emitted.get(check_id, 0) + 1
                         yield FindingDraft(
@@ -749,7 +749,7 @@ class FSxFileSystemsChecker(Checker):
             # 2b) large and inactive storage (heuristic)
             # -----------------------------
             if storage_gib is not None and storage_gib >= cfg.large_storage_gib_threshold and not active:
-                check_id = "aws.fsx.filesystems.large_and_inactive"
+                check_id = "aws.fsx.filesystems.large.and.inactive"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -776,7 +776,7 @@ class FSxFileSystemsChecker(Checker):
             # 3) Multi-AZ in nonprod (Windows/ONTAP)
             # -----------------------------
             if dep and "MULTI_AZ" in dep.upper() and _is_nonprod(tags) and fs_type in ("WINDOWS", "ONTAP"):
-                check_id = "aws.fsx.filesystems.multi_az_in_nonprod"
+                check_id = "aws.fsx.filesystems.multi.az.in.nonprod"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -848,7 +848,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Backups disabled
         if backup_days == 0:
-            check_id = "aws.fsx.windows.backups_disabled"
+            check_id = "aws.fsx.windows.backups.disabled"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -870,7 +870,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Backup retention low
         if backup_days is not None and backup_days > 0 and backup_days < cfg.windows_backup_low_retention_days:
-            check_id = "aws.fsx.windows.backup_retention_low"
+            check_id = "aws.fsx.windows.backup.retention.low"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -892,7 +892,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Copy tags to backups disabled
         if copy_tags is False:
-            check_id = "aws.fsx.windows.copy_tags_to_backups_disabled"
+            check_id = "aws.fsx.windows.copy.tags.to.backups.disabled"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -914,7 +914,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Maintenance window missing / business hours (best-effort)
         if not maint:
-            check_id = "aws.fsx.windows.maintenance_window_missing"
+            check_id = "aws.fsx.windows.maintenance.window.missing"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -944,7 +944,7 @@ class FSxFileSystemsChecker(Checker):
                 hour = None
 
             if hour is not None and 8 <= hour <= 18 and not _is_nonprod(tags):
-                check_id = "aws.fsx.windows.maintenance_window_business_hours"
+                check_id = "aws.fsx.windows.maintenance.window.business.hours"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -979,7 +979,7 @@ class FSxFileSystemsChecker(Checker):
                 # storage_gib is Optional[int]; we must guard it for type-checkers and runtime safety.
                 if storage_gib is None or storage_gib <= 0:
                     # Cannot compute a meaningful SSD→HDD delta without storage capacity
-                    check_id = "aws.fsx.windows.storage_type_mismatch"
+                    check_id = "aws.fsx.windows.storage.type.mismatch"
                     if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                         emitted[check_id] = emitted.get(check_id, 0) + 1
                         yield FindingDraft(
@@ -1025,7 +1025,7 @@ class FSxFileSystemsChecker(Checker):
 
                 savings = max(0.0, ssd_cost - hdd_cost)
 
-                check_id = "aws.fsx.windows.storage_type_mismatch"
+                check_id = "aws.fsx.windows.storage.type.mismatch"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(

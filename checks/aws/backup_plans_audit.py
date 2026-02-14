@@ -6,16 +6,16 @@ Infra-native FinOps checker for AWS Backup configuration hygiene and retention r
 
 It emits findings for three issue types (distinct check_id values):
 
-1) aws.backup.plans.no_selections
+1) aws.backup.plans.no.selections
    Backup plans that have zero selections (i.e., no resources are included),
    so the plan effectively backs up nothing.
 
-2) aws.backup.rules.no_lifecycle
+2) aws.backup.rules.no.lifecycle
    Backup plan rules with no lifecycle configuration (neither cold-storage
    transition nor delete-after retention). These rules can retain recovery
    points indefinitely by default, often unintentionally.
 
-3) aws.backup.recovery_points.stale
+3) aws.backup.recovery.points.stale
    Recovery points older than a configurable threshold (default: 90 days)
    that are not near an automatic delete date and are likely ready to prune.
 
@@ -200,7 +200,7 @@ class AwsBackupPlansAuditChecker:
                 continue
 
             yield FindingDraft(
-                check_id="aws.backup.plans.no_selections",
+                check_id="aws.backup.plans.no.selections",
                 check_name="Backup plans without selections",
                 category="governance",
                 status="fail",
@@ -242,7 +242,7 @@ class AwsBackupPlansAuditChecker:
                 # Treat None/0 as "not set"
                 if (move_days in (None, 0)) and (delete_days in (None, 0)):
                     yield FindingDraft(
-                        check_id="aws.backup.rules.no_lifecycle",
+                        check_id="aws.backup.rules.no.lifecycle",
                         check_name="Backup rules missing lifecycle",
                         category="governance",
                         status="fail",
@@ -330,7 +330,7 @@ class AwsBackupPlansAuditChecker:
                 resource_arn = str(rp.get("ResourceArn") or "")
 
                 yield FindingDraft(
-                    check_id="aws.backup.recovery_points.stale",
+                    check_id="aws.backup.recovery.points.stale",
                     check_name="Stale AWS Backup recovery points",
                     category="waste",
                     status="fail",
@@ -372,7 +372,7 @@ class AwsBackupPlansAuditChecker:
     def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
         code = exc.response.get("Error", {}).get("Code", "ClientError")
         return FindingDraft(
-            check_id="aws.backup.access_error",
+            check_id="aws.backup.access.error",
             check_name="AWS Backup access error",
             category="inventory",
             status="info",

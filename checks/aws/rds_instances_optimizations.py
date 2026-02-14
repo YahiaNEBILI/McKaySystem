@@ -696,7 +696,7 @@ class RDSInstancesOptimizationsChecker:
             )
             running_monthly = (float(hourly_run) * _hours_per_month()) if hourly_run is not None else None
             yield FindingDraft(
-                check_id="aws.rds.instances.stopped_storage",
+                check_id="aws.rds.instances.stopped.storage",
                 check_name="RDS stopped instances still incur storage cost",
                 category="cost",
                 sub_category="waste",
@@ -810,7 +810,7 @@ class RDSInstancesOptimizationsChecker:
                 )
 
             yield FindingDraft(
-                check_id="aws.rds.multi_az.non_prod",
+                check_id="aws.rds.multi.az.non.prod",
                 check_name="RDS Multi-AZ enabled on non-production",
                 category="cost",
                 sub_category="configuration",
@@ -831,7 +831,7 @@ class RDSInstancesOptimizationsChecker:
         fam = _family_from_instance_class(instance_class)
         if fam in _OLD_FAMILIES:
             yield FindingDraft(
-                check_id="aws.rds.instance_family.old_generation",
+                check_id="aws.rds.instance.family.old.generation",
                 check_name="RDS old-generation instance family",
                 category="cost",
                 sub_category="modernization",
@@ -856,7 +856,7 @@ class RDSInstancesOptimizationsChecker:
         if _engine_needs_upgrade(engine=engine, engine_version=engine_version, mysql_blocked_prefixes=self._mysql_blocked_prefixes, 
                                  postgres_min_version=self._postgres_min_version, mariadb_min_version=self._mariadb_min_version):
             yield FindingDraft(
-                check_id="aws.rds.engine.needs_upgrade",
+                check_id="aws.rds.engine.needs.upgrade",
                 check_name="RDS engine version needs upgrade",
                 category="governance",
                 sub_category="lifecycle",
@@ -907,7 +907,7 @@ class RDSInstancesOptimizationsChecker:
                         est_notes = f"Estimated on-demand instance cost * {hrs:.1f}h/mo. {notes}"
 
                     yield FindingDraft(
-                        check_id="aws.rds.read_replica.unused",
+                        check_id="aws.rds.read.replica.unused",
                         check_name="RDS unused read replica",
                         category="cost",
                         sub_category="waste",
@@ -1029,7 +1029,7 @@ class RDSInstancesOptimizationsChecker:
         )
         
         return FindingDraft(
-            check_id="aws.rds.instances.access_error",
+            check_id="aws.rds.instances.access.error",
             check_name="RDS access error",
             category="governance",
             status="info",

@@ -163,7 +163,7 @@ def test_old_manual_db_snapshot_emits_manual_old():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.rds.snapshots.manual_old"
+    assert findings[0].check_id == "aws.rds.snapshots.manual.old"
 
 
 def test_automated_snapshot_never_emits_manual_old():
@@ -215,7 +215,7 @@ def test_access_error_emits_single_info_and_stops():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.rds.snapshots.access_error"
+    assert findings[0].check_id == "aws.rds.snapshots.access.error"
     assert findings[0].status == "info"
 
 
@@ -242,7 +242,7 @@ def test_cluster_snapshot_cost_unknown_when_no_allocated_storage():
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.rds.snapshots.manual_old"
+    assert f.check_id == "aws.rds.snapshots.manual.old"
     assert f.estimated_monthly_cost is None
     assert f.estimate_confidence == 10
 
@@ -318,7 +318,7 @@ def test_manual_old_but_cross_region():
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.rds.snapshots.manual_old"
+    assert findings[0].check_id == "aws.rds.snapshots.manual.old"
 
 
 def test_snapshot_missing_create_time():

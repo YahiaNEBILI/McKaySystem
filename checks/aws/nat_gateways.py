@@ -723,7 +723,7 @@ class NatGatewaysChecker:
 
     def _access_error(self, ctx: RunContext, region: str, operation: str, exc: ClientError) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.access_error",
+            check_id="aws.ec2.nat.gateways.access.error",
             check_name="EC2 NAT Gateways access error",
             category="governance",
             status="unknown",
@@ -742,7 +742,7 @@ class NatGatewaysChecker:
 
     def _cloudwatch_error(self, ctx: RunContext, region: str, operation: str, exc: Exception) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.cloudwatch_error",
+            check_id="aws.ec2.nat.gateways.cloudwatch.error",
             check_name="NAT Gateways CloudWatch error",
             category="governance",
             status="unknown",
@@ -769,7 +769,7 @@ class NatGatewaysChecker:
         message: str,
     ) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.missing_permission",
+            check_id="aws.ec2.nat.gateways.missing.permission",
             check_name="NAT Gateways missing permission",
             category="governance",
             status="info",
@@ -808,7 +808,7 @@ class NatGatewaysChecker:
         pricing_notes: str,
     ) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.orphaned",
+            check_id="aws.ec2.nat.gateways.orphaned",
             check_name="Orphaned NAT Gateway",
             category="cost",
             status="fail",
@@ -855,7 +855,7 @@ class NatGatewaysChecker:
     ) -> FindingDraft:
         daily_gib = gb_from_bytes(p95_daily_bytes)
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.idle",
+            check_id="aws.ec2.nat.gateways.idle",
             check_name="Idle NAT Gateway",
             category="cost",
             status="fail",
@@ -900,7 +900,7 @@ class NatGatewaysChecker:
         pricing_notes: str,
     ) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.high_data_processing",
+            check_id="aws.ec2.nat.gateways.high.data.processing",
             check_name="High NAT Gateway data processing",
             category="cost",
             status="fail",
@@ -943,7 +943,7 @@ class NatGatewaysChecker:
     ) -> FindingDraft:
         sample = ", ".join([f"{sid}({az})" for sid, az in sorted(list(pairs))[:5]])
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.cross_az",
+            check_id="aws.ec2.nat.gateways.cross.az",
             check_name="Cross-AZ NAT Gateway routing",
             category="cost",
             status="fail",
