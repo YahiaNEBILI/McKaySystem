@@ -4,7 +4,8 @@ set -euo pipefail
 REPO_ROOT="${1:-.}"
 cd "$REPO_ROOT"
 
-git sparse-checkout init --cone
+# Use non-cone mode because we intentionally include specific root files.
+git sparse-checkout init --no-cone
 git sparse-checkout set \
   apps/worker \
   apps/backend \
