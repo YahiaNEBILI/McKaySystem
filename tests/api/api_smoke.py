@@ -223,7 +223,7 @@ def _assert(cond: bool, msg: str) -> None:
 def _collect_fps(payload: Dict[str, Any], *, only_effective_state: Optional[str] = None) -> set[str]:
     out: set[str] = set()
     for x in (payload.get("items") or []):
-        fp = str((x or {}).get("fingerprint") or "").strip()
+        fp = str((x or {}).get("fingerprint") or "")
         if not fp:
             continue
         if only_effective_state is not None:
@@ -269,10 +269,14 @@ def _wait_until_fp_not_in_state(
         time.sleep(sleep_s_f)
     details = []
     for item in (last_payload.get("items") or []):
-        if str((item or {}).get("fingerprint") or "").strip() == fp:
+        item_fp = str((item or {}).get("fingerprint") or "")
+        if item_fp == fp or item_fp.strip() == fp.strip():
             details.append(
                 {
-                    "fingerprint": fp,
+                    "expected_fingerprint": fp,
+                    "expected_fingerprint_len": len(fp),
+                    "observed_fingerprint": item_fp,
+                    "observed_fingerprint_len": len(item_fp),
                     "state": item.get("state"),
                     "effective_state": item.get("effective_state"),
                     "group_key": item.get("group_key"),
@@ -371,8 +375,8 @@ def run_smoke(cfg: Cfg) -> None:
             print("  -", x)
         return
 
-    fp = str((open_items[0] or {}).get("fingerprint") or "").strip()
-    _assert(bool(fp), "open finding has no fingerprint")
+    fp = str((open_items[0] or {}).get("fingerprint") or "")
+    _assert(bool(fp.strip()), "open finding has no fingerprint")
     ok.append("Select open finding fingerprint")
 
     print("SMOKE using fingerprint:", fp)

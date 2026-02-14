@@ -1261,8 +1261,8 @@ def api_lifecycle_ignore() -> Any:
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace = _require_scope_from_json(payload)
-        fingerprint = str(payload.get("fingerprint") or "").strip()
-        if not fingerprint:
+        fingerprint = str(payload.get("fingerprint") or "")
+        if not fingerprint.strip():
             raise ValueError("fingerprint is required")
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
@@ -1302,8 +1302,8 @@ def api_lifecycle_resolve() -> Any:
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace = _require_scope_from_json(payload)
-        fingerprint = str(payload.get("fingerprint") or "").strip()
-        if not fingerprint:
+        fingerprint = str(payload.get("fingerprint") or "")
+        if not fingerprint.strip():
             raise ValueError("fingerprint is required")
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
@@ -1343,8 +1343,8 @@ def api_lifecycle_snooze() -> Any:
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace = _require_scope_from_json(payload)
-        fingerprint = str(payload.get("fingerprint") or "").strip()
-        if not fingerprint:
+        fingerprint = str(payload.get("fingerprint") or "")
+        if not fingerprint.strip():
             raise ValueError("fingerprint is required")
         snooze_until_raw = payload.get("snooze_until")
         if not snooze_until_raw:

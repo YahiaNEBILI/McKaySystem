@@ -11,11 +11,14 @@ import apps.flask_api.flask_app as flask_app
 class _DummyConn:
     """Minimal context manager returned by db_conn during unit tests."""
 
-    def __enter__(self) -> object:
-        return object()
+    def __enter__(self) -> "_DummyConn":
+        return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
         return False
+
+    def commit(self) -> None:
+        return
 
 
 def _disable_runtime_guards(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -100,3 +103,44 @@ def test_api_findings_sets_no_cache_headers(monkeypatch) -> None:  # type: ignor
     assert resp.headers.get("Pragma") == "no-cache"
     assert resp.headers.get("Expires") == "0"
     assert "authorization" in str(resp.headers.get("Vary") or "").lower()
+
+
+def test_lifecycle_ignore_preserves_exact_fingerprint(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Lifecycle endpoints should use the fingerprint exactly as provided by clients."""
+    _disable_runtime_guards(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def _fake_upsert_state(
+        _conn: object,
+        *,
+        tenant_id: str,
+        workspace: str,
+        fingerprint: str,
+        state: str,
+        snooze_until: Any,
+        reason: Any,
+        updated_by: Any,
+    ) -> None:
+        captured["tenant_id"] = tenant_id
+        captured["workspace"] = workspace
+        captured["fingerprint"] = fingerprint
+        captured["state"] = state
+
+    monkeypatch.setattr(flask_app, "_upsert_state", _fake_upsert_state)
+    monkeypatch.setattr(flask_app, "_audit_lifecycle", lambda *args, **kwargs: None)
+
+    client = flask_app.app.test_client()
+    body = {
+        "tenant_id": "acme",
+        "workspace": "prod",
+        "fingerprint": "  fp-with-padding  ",
+        "reason": "test",
+        "updated_by": "tester",
+    }
+    resp = client.post("/api/lifecycle/ignore", json=body)
+
+    assert resp.status_code == 200
+    assert captured["tenant_id"] == "acme"
+    assert captured["workspace"] == "prod"
+    assert captured["fingerprint"] == "  fp-with-padding  "
+    assert captured["state"] == "ignored"
