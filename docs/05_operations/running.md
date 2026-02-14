@@ -31,3 +31,19 @@ See:
 - If you override `--out`, correlated/enriched defaults are derived next to that directory unless
   `--correlation-out` is provided.
 
+---
+
+## Database migrations
+
+Run migrations before ingesting into a fresh or upgraded DB:
+
+```
+python db_migrate.py
+```
+
+Or via the CLI:
+
+```
+mckay migrate
+```
+

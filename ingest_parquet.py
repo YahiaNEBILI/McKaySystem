@@ -20,9 +20,11 @@ import pyarrow.dataset as ds
 
 from db import execute, execute_many, fetch_one
 from pipeline.run_manifest import find_manifest, load_manifest
+from version import SCHEMA_VERSION
 
 
 def _env_bool(name: str) -> bool:
+    """Read a boolean env var."""
     v = os.getenv(name)
     if not v:
         return False
@@ -30,6 +32,7 @@ def _env_bool(name: str) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an integer env var with a default."""
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
@@ -40,6 +43,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
+    """Parse a datetime from common inputs, returning UTC-aware."""
     if isinstance(value, datetime):
         dt = value
     else:
@@ -57,6 +61,7 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 
 
 def _json_default(obj: Any) -> Any:
+    """JSON serializer for datetime/Decimal values."""
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     if isinstance(obj, Decimal):
@@ -104,6 +109,7 @@ _CATEGORY_BY_PREFIX: list[tuple[str, str]] = [
 
 
 def _derive_category(check_id: Optional[str]) -> str:
+    """Infer a coarse category from check_id prefix."""
     if not check_id:
         return "other"
     for prefix, cat in _CATEGORY_BY_PREFIX:
@@ -124,6 +130,7 @@ _ID_PATTERNS = [
 
 
 def _normalize_title(title: Optional[str]) -> str:
+    """Normalize titles for grouping (mask IDs and digits)."""
     t = (title or "").strip().lower()
     if not t:
         return ""
@@ -135,6 +142,7 @@ def _normalize_title(title: Optional[str]) -> str:
 
 
 def _derive_group_key(check_id: Optional[str], category: str, title: Optional[str]) -> Optional[str]:
+    """Build a stable group key from check_id/category/title."""
     base = f"{(check_id or '').strip()}|{category}|{_normalize_title(title)}".strip("|")
     if not base:
         return None
@@ -144,6 +152,7 @@ def _derive_group_key(check_id: Optional[str], category: str, title: Optional[st
 
 
 def _scope_get(scope: Any, key: str) -> Optional[str]:
+    """Safe access to a scope mapping field."""
     if isinstance(scope, Mapping):
         v = scope.get(key)
         return str(v).strip() if v is not None else None
@@ -157,6 +166,7 @@ def _guess_fields_from_record(
     Optional[float], Optional[str], Optional[str],
     str, Optional[str],
 ]:
+    """Extract DB fields from a Parquet record with best-effort fallbacks."""
     check_id = rec.get("check_id")
     if check_id is not None:
         check_id = str(check_id).strip() or None
@@ -192,6 +202,7 @@ def _guess_fields_from_record(
 
 
 def _glob_has_files(path: str | Path) -> bool:
+    """Return True if the path contains any parquet files."""
     base = Path(path)
     if not base.exists():
         return False
@@ -199,6 +210,7 @@ def _glob_has_files(path: str | Path) -> bool:
 
 
 def _list_parquet_files(path: str | Path) -> List[Path]:
+    """List parquet files under a dataset directory."""
     base = Path(path)
     if not base.exists():
         return []
@@ -206,6 +218,7 @@ def _list_parquet_files(path: str | Path) -> List[Path]:
 
 
 def _dataset_candidates(manifest) -> List[tuple[str, str]]:
+    """Return candidate dataset paths in priority order."""
     candidates: List[tuple[str, str]] = []
     if manifest.out_enriched:
         candidates.append((manifest.out_enriched, "enriched"))
@@ -224,6 +237,7 @@ class DbApi:
 
 
 def _default_db_api() -> DbApi:
+    """Return the default DB API backed by db.py helpers."""
     return DbApi(execute=execute, execute_many=execute_many, fetch_one=fetch_one)
 
 
@@ -245,11 +259,25 @@ def ingest_from_manifest(
     batch_size: Optional[int] = None,
     parquet_batch_size: Optional[int] = None,
 ) -> IngestStats:
+    """Ingest a Parquet dataset described by a run_manifest.json."""
     api = db_api or _default_db_api()
     batch_size = batch_size or _env_int("INGEST_BATCH_SIZE", 2000)
     parquet_batch_size = parquet_batch_size or _env_int("PARQUET_BATCH_SIZE", 10_000)
 
     manifest = load_manifest(manifest_path)
+    expected_schema = int(SCHEMA_VERSION)
+    if manifest.schema_version is not None:
+        try:
+            manifest_ver = int(manifest.schema_version)
+        except (TypeError, ValueError):
+            raise SystemExit(f"Invalid schema_version in manifest: {manifest.schema_version!r}") from None
+
+        if manifest_ver != expected_schema and not _env_bool("ALLOW_SCHEMA_MISMATCH"):
+            raise SystemExit(
+                f"Schema mismatch: manifest={manifest_ver} expected={expected_schema}. "
+                "Run `mckay migrate` (or `python db_migrate.py`) to update the DB, "
+                "or set ALLOW_SCHEMA_MISMATCH=1 to override."
+            )
 
     # Fail fast on mismatch: prevents ingesting with the wrong tenant/workspace.
     env_tenant = (os.getenv("TENANT_ID") or "").strip()
@@ -356,6 +384,7 @@ def ingest_from_manifest(
     total_latest = 0
 
     def _flush_presence() -> None:
+        """Flush buffered presence rows to the DB."""
         nonlocal total_presence
         if not presence_rows:
             return
@@ -372,6 +401,7 @@ def ingest_from_manifest(
         presence_rows.clear()
 
     def _flush_latest() -> None:
+        """Flush buffered latest rows to the DB."""
         nonlocal total_latest
         if not latest_rows:
             return
@@ -513,6 +543,7 @@ def ingest_from_manifest(
 
 
 def _find_manifest_path(arg: Optional[str]) -> Path:
+    """Resolve the manifest path from args, env, or cwd."""
     if arg:
         p = Path(arg).resolve()
         if not p.exists():
@@ -534,6 +565,7 @@ def _find_manifest_path(arg: Optional[str]) -> Path:
 
 
 def main(argv: Optional[List[str]] = None) -> None:
+    """CLI entrypoint."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Ingest findings from Parquet into Postgres.")

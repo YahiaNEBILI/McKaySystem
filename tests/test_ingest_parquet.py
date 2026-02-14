@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Integration-style tests for Parquet ingestion."""
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
@@ -11,6 +13,7 @@ from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 
 
 def _wire_record() -> dict:
+    """Return a minimal wire-format record for tests."""
     return {
         "tenant_id": "acme",
         "workspace_id": "prod",
@@ -71,6 +74,7 @@ def _wire_record() -> dict:
 
 
 class _FakeDb:
+    """Capture DB calls for ingest tests."""
     def __init__(self) -> None:
         self.executes: List[Tuple[str, Optional[Sequence[Any]]]] = []
         self.execute_many_calls: List[Tuple[str, List[Sequence[Any]]]] = []

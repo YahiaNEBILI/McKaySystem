@@ -7,6 +7,7 @@ mckay run-all --tenant engie --workspace noprod --out data/finops_findings --db-
 mckay run --tenant engie --workspace noprod --out data/finops_findings
 mckay export
 mckay ingest --db-url "postgresql://..."
+mckay migrate
 """
 
 from __future__ import annotations
@@ -148,6 +149,26 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     _run_cmd(cmd, cwd=root, env=env)
 
 
+def cmd_migrate(args: argparse.Namespace) -> None:
+    root = _repo_root()
+    if not _module_exists("db_migrate") and not (root / "db_migrate.py").exists():
+        raise SystemExit(
+            "db_migrate module not found. Run from the project directory or ensure db_migrate.py is installed."
+        )
+
+    env = None
+    if args.db_url:
+        env = dict(os.environ)
+        env["DB_URL"] = args.db_url
+
+    cmd = [_python(), "-m", "db_migrate"]
+    if args.dry_run:
+        cmd.append("--dry-run")
+    if args.migrations_dir:
+        cmd.extend(["--migrations-dir", str(args.migrations_dir)])
+    _run_cmd(cmd, cwd=root, env=env)
+
+
 def cmd_run_all(args: argparse.Namespace) -> None:
     cmd_run(args)
 
@@ -191,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.add_argument("--manifest", default=None, help="Path to run_manifest.json (optional).")
     sp.set_defaults(func=cmd_ingest)
+    sp = sub.add_parser("migrate", help="Apply database migrations.")
+    sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
+    sp.add_argument("--dry-run", action="store_true", help="Show pending migrations without applying.")
+    sp.add_argument("--migrations-dir", default=None, help="Path to migrations directory (optional).")
+    sp.set_defaults(func=cmd_migrate)
     sp = sub.add_parser("run-all", help="Run -> ingest -> (optional) export.")
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var).")
