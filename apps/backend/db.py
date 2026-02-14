@@ -83,12 +83,19 @@ def db_conn() -> Iterator[Any]:
     IMPORTANT:
     - Reuses connections (pool) instead of reconnecting on every query.
     - Callers should NOT close the connection; it is returned to the pool.
+    - Always ends any open transaction before returning the connection to pool.
     """
     pool = _get_pool()
     conn = pool.getconn()
     try:
         yield conn
     finally:
+        # Prevent "idle in transaction" pooled connections from reusing stale
+        # snapshots across requests (critical for API read-after-write behavior).
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         try:
             pool.putconn(conn)
         except Exception:
