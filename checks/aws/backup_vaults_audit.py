@@ -384,7 +384,7 @@ class AwsBackupVaultsAuditChecker:
             try:
                 est_cost_rounded = money(float(est_cost))
                 est_cost_str = f"${est_cost_rounded:,.2f}"
-            except Exception:
+            except (TypeError, ValueError, OverflowError):
                 est_cost_str = ""
 
         # Severity mapping: out_of_standard is low, everything else medium
@@ -864,7 +864,7 @@ class AwsBackupVaultsAuditChecker:
                 size_bytes = rp.get("BackupSizeInBytes")
                 try:
                     b = int(size_bytes or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     b = 0
                 if b <= 0:
                     continue
@@ -874,7 +874,7 @@ class AwsBackupVaultsAuditChecker:
                     total_warm_bytes += b
         except ClientError:
             return None, "Unable to enumerate recovery points", 0
-        except Exception:  # pragma: no cover
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
             return None, "Unable to enumerate recovery points", 0
 
         gb_warm = float(total_warm_bytes) / (1024.0**3)

@@ -210,3 +210,35 @@ def test_unencrypted_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     findings = list(checker.run(ctx))
 
     assert any(f.check_id == "aws.efs.filesystems.unencrypted" for f in findings)
+
+
+def test_access_error_emits_when_list_filesystems_is_malformed() -> None:
+    class BrokenEFS:
+        def __init__(self) -> None:
+            self.meta = SimpleNamespace(region_name="eu-west-1")
+
+        def get_paginator(self, _op_name: str) -> Any:
+            raise TypeError("broken paginator")
+
+    ctx = cast(
+        RunContext,
+        SimpleNamespace(cloud="aws", services=SimpleNamespace(efs=BrokenEFS(), cloudwatch=None)),
+    )
+    checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    assert findings[0].check_id == "aws.efs.filesystems.access_error"
+
+
+def test_metrics_malformed_values_fallback_to_best_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.efs_filesystems as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc))
+
+    efs = FakeEFS(region="eu-west-1", file_systems=[_fs()], lifecycle_policy_not_found={"fs-1"})
+    cw = FakeCloudWatch(values_by_id={"m0r": ["bad"], "m0w": [0.0], "m0c": [0.0], "m0p": [0.0]})
+    ctx = _mk_ctx(efs=efs, cloudwatch=cw)
+
+    checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
+    findings = list(checker.run(ctx))
+    assert any(f.check_id == "aws.efs.filesystems.lifecycle_missing" for f in findings)

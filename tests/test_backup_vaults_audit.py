@@ -338,6 +338,40 @@ def test_vault_lock_no_max_attaches_cost_estimate_with_pricing_service():
     assert "PricingService" in (f.estimate_notes or "")
 
 
+def test_vault_lock_no_max_ignores_malformed_recovery_point_size():
+    """Malformed BackupSizeInBytes should be ignored (not crash), valid points still counted."""
+    checker = _mk_checker()
+
+    vaults = [
+        {"BackupVaultName": "vault-bad-size", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-bad-size"}
+    ]
+    describe = {
+        "vault-bad-size": {"BackupVaultName": "vault-bad-size", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
+    }
+    gib = 1024 ** 3
+    recovery_points_by_vault = {
+        "vault-bad-size": [
+            {"StorageClass": "WARM", "BackupSizeInBytes": "invalid-size"},
+            {"StorageClass": "WARM", "BackupSizeInBytes": 2 * gib},
+        ]
+    }
+
+    backup = _FakeBackupClient(
+        region="eu-west-1",
+        vaults=vaults,
+        describe_by_name=describe,
+        policy_by_name={"vault-bad-size": {}},
+        recovery_points_by_vault=recovery_points_by_vault,
+    )
+    ctx = _FakeCtx(services=_FakeServices(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01)))
+
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.issue_key["rule"] == "vault_lock_no_max"
+    assert float(f.estimated_monthly_cost or 0.0) == 0.10
+
+
 def test_vault_lock_out_of_standard_emits_low():
     """Configured Vault Lock that violates expected min/max -> emit low severity out_of_standard finding."""
     checker = _mk_checker(expected_min=14, expected_max=90)

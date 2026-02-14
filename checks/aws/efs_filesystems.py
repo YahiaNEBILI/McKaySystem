@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from checks.aws._common import (
     AwsAccountContext,
@@ -107,7 +107,7 @@ def _extract_client_error_code(err: Exception) -> str:
     if isinstance(err, ClientError):
         try:
             return str(err.response.get("Error", {}).get("Code", ""))
-        except Exception:  # pragma: no cover
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
             return ""
     return ""
 
@@ -255,7 +255,7 @@ class EFSFileSystemsChecker(Checker):
 
         try:
             file_systems = self._list_file_systems(efs)
-        except Exception as exc:  # pylint: disable=broad-except
+        except (ClientError, BotoCoreError, AttributeError, TypeError, ValueError) as exc:
             code = _extract_client_error_code(exc)
             yield FindingDraft(
                 check_id="aws.efs.filesystems.access_error",
@@ -297,7 +297,7 @@ class EFSFileSystemsChecker(Checker):
                     daily_period=86400,
                     p95_period=int(cfg.percent_io_limit_period_seconds),
                 )
-            except Exception:
+            except (ClientError, BotoCoreError, AttributeError, TypeError, ValueError):
                 # Best-effort: metrics unavailable -> skip cost signals that depend on them
                 metrics = {fs_id: {"read": [], "write": [], "conn": [], "p95": []} for fs_id in fs_ids}
 

@@ -5,12 +5,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 from botocore.exceptions import ClientError
 
-from checks.aws.rds_snapshots_cleanup import AwsAccountContext, RDSSnapshotsCleanupChecker
+from checks.aws.rds_snapshots_cleanup import (
+    AwsAccountContext,
+    RDSSnapshotsCleanupChecker,
+    _resolve_rds_snapshot_storage_price_usd_per_gb_month,
+)
 
 
 # -------------------------
@@ -66,6 +71,7 @@ class _FakeRdsClient:
 @dataclass
 class _FakeServices:
     rds: Any
+    pricing: Any = None
 
 
 @dataclass
@@ -336,3 +342,37 @@ def test_snapshot_missing_create_time():
     ctx = _FakeCtx(services=_FakeServices(rds=rds))
 
     assert list(checker.run(ctx)) == []
+
+
+def test_pricing_helper_falls_back_when_service_raises_type_error() -> None:
+    class _BadPricing:
+        def rds_backup_storage_gb_month(self, *, region: str) -> Any:
+            _ = region
+            raise TypeError("bad pricing payload")
+
+    ctx = _FakeCtx(services=_FakeServices(rds=None, pricing=_BadPricing()))
+    price, notes, confidence = _resolve_rds_snapshot_storage_price_usd_per_gb_month(
+        ctx,
+        "eu-west-1",
+        default_price=0.095,
+    )
+    assert price == 0.095
+    assert confidence == 30
+    assert "using default price" in notes
+
+
+def test_pricing_helper_falls_back_when_quote_is_malformed() -> None:
+    class _MalformedPricing:
+        def rds_backup_storage_gb_month(self, *, region: str) -> Any:
+            _ = region
+            return SimpleNamespace(unit_price_usd="not-a-number", source="catalog", as_of=object(), unit="GB-Mo")
+
+    ctx = _FakeCtx(services=_FakeServices(rds=None, pricing=_MalformedPricing()))
+    price, notes, confidence = _resolve_rds_snapshot_storage_price_usd_per_gb_month(
+        ctx,
+        "eu-west-1",
+        default_price=0.095,
+    )
+    assert price == 0.095
+    assert confidence == 30
+    assert "using default price" in notes

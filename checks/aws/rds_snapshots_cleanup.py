@@ -94,16 +94,24 @@ def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
 
     try:
         quote = pricing.rds_backup_storage_gb_month(region=region)
-    except Exception:
+    except (AttributeError, TypeError, ValueError, ClientError):
         quote = None
 
     if quote is None:
         return (default_price, "Pricing lookup failed/unknown; using default price.", 30)
 
+    try:
+        price = float(getattr(quote, "unit_price_usd"))
+    except (AttributeError, TypeError, ValueError):
+        return (default_price, "Pricing lookup failed/unknown; using default price.", 30)
+    source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+    as_of = getattr(quote, "as_of", None)
+    unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+    as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
     return (
-        float(quote.unit_price_usd),
-        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-        60 if quote.source == "cache" else 70,
+        price,
+        f"PricingService {source} as_of={as_of_txt} unit={unit}",
+        60 if source == "cache" else 70,
     )
 
 
