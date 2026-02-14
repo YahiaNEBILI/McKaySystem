@@ -12,6 +12,7 @@ Last reviewed: 2026-02-01
 - **Checkers contract**: `03_checkers/checker_contract.md`
 - **Finding schema**: `04_schemas/finding_schema.md`
 - **Operations**: `05_operations/running.md`
+- **API**: `06_api/api_reference.md`
 
 ## Structure
 
@@ -21,3 +22,6 @@ Last reviewed: 2026-02-01
 - `03_checkers/` — checker contract + service pages
 - `04_schemas/` — canonical schema + IDs/fingerprint
 - `05_operations/` — running, permissions, troubleshooting
+- `06_api/` — API reference and smoke testing
+
+
