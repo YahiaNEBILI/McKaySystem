@@ -16,7 +16,7 @@ from tests.correlation._harness import make_ctx, run_correlation_and_read_rows, 
 def _drafts_fixture() -> list[FindingDraft]:
     return [
         FindingDraft(
-            check_id="aws.backup.vaults_audit",
+            check_id="aws.backup.vaults.audit",
             check_name="AWS Backup vaults audit",
             category="backup",
             status="fail",
@@ -34,7 +34,7 @@ def _drafts_fixture() -> list[FindingDraft]:
             message="Vault a has no lock",
         ),
         FindingDraft(
-            check_id="aws.backup.plans_audit",
+            check_id="aws.backup.governance.plans.audit",
             check_name="AWS Backup plans audit",
             category="backup",
             status="fail",

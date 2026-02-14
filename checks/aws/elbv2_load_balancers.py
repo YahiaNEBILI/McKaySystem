@@ -280,7 +280,7 @@ class _ElbCloudWatch:
 class ElbV2LoadBalancersChecker:
     """ALB/NLB (ELBv2) checker."""
 
-    checker_id = "aws.elbv2.load_balancers"
+    checker_id = "aws.elbv2.load.balancers"
 
     _CHECK_NAME = "ALB/NLB load balancers"
 

@@ -249,7 +249,7 @@ def _safe_str(value: Any) -> str:
 class CloudWatchMetricsLogsCostChecker(Checker):
     """CloudWatch Logs retention + custom metrics + alarms count signals."""
 
-    checker_id = "aws.cloudwatch.metrics_logs_cost"
+    checker_id = "aws.cloudwatch.metrics.logs.cost"
 
     def __init__(
         self,

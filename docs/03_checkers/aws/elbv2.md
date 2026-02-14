@@ -16,7 +16,7 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.elbv2.load_balancers`
+- `aws.elbv2.load.balancers`
 - `aws.elbv2.load_balancers.access_error`
 - `aws.elbv2.load_balancers.idle`
 - `aws.elbv2.load_balancers.no_healthy_targets`

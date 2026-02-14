@@ -345,7 +345,7 @@ class _NatCloudWatchMetrics:
 class NatGatewaysChecker:
     """Detect idle, orphaned, and costly NAT Gateways."""
 
-    checker_id = "aws.ec2.nat_gateways"
+    checker_id = "aws.ec2.nat.gateways"
 
     def __init__(
         self,

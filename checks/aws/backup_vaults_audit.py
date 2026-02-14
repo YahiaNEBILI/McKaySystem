@@ -321,8 +321,7 @@ class AwsBackupVaultsAuditChecker:
         """
         Vault Lock / retention guardrails.
 
-        Keeps legacy check_id 'aws.backup.vaults.no_lifecycle' to avoid regressions,
-        but sets issue_key['rule'] to match existing test expectations.
+        Uses canonical check_id 'aws.backup.vaults.no_lifecycle'.
         """
         vault_name = str(vault.get("BackupVaultName") or "unknown")
         vault_arn = str(vault.get("BackupVaultArn") or "")

@@ -17,7 +17,7 @@ from tests.correlation._harness import make_ctx, read_parquet_rows_duckdb, write
 def _drafts_fixture() -> list[FindingDraft]:
     return [
         FindingDraft(
-            check_id="aws.backup.vaults_audit",
+            check_id="aws.backup.vaults.audit",
             check_name="AWS Backup vaults audit",
             category="backup",
             status="fail",
@@ -35,7 +35,7 @@ def _drafts_fixture() -> list[FindingDraft]:
             message="Vault a has no lock",
         ),
         FindingDraft(
-            check_id="aws.backup.plans_audit",
+            check_id="aws.backup.governance.plans.audit",
             check_name="AWS Backup plans audit",
             category="backup",
             status="fail",
@@ -53,7 +53,7 @@ def _drafts_fixture() -> list[FindingDraft]:
             message="Plan p1 missing required tag",
         ),
         FindingDraft(
-            check_id="aws.ebs.storage",
+            check_id="aws.ec2.ebs.storage",
             check_name="EBS storage checks",
             category="storage",
             status="fail",

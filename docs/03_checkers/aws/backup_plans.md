@@ -17,7 +17,7 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 ## Check IDs emitted
 
 - `aws.backup.access_error`
-- `aws.backup.governance.plans_audit`
+- `aws.backup.governance.plans.audit`
 - `aws.backup.plans.no_selections`
 - `aws.backup.recovery_points.stale`
 - `aws.backup.rules.no_lifecycle`

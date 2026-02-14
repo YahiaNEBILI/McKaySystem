@@ -318,7 +318,7 @@ def _money_val(val: float) -> float:
 
 
 class EBSStorageChecker(Checker):
-    checker_id = "checks.aws.ebs_storage"
+    checker_id = "aws.ec2.ebs.storage"
 
     def __init__(self, *, account_id: str, cfg: Optional[EBSStorageConfig] = None) -> None:
         self._account_id = str(account_id)

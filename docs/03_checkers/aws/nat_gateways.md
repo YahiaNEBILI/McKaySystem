@@ -16,7 +16,7 @@ Use it as an index; detailed semantics are in code and in the checker contract.
 
 ## Check IDs emitted
 
-- `aws.ec2.nat_gateways`
+- `aws.ec2.nat.gateways`
 - `aws.ec2.nat_gateways.access_error`
 - `aws.ec2.nat_gateways.cross_az`
 - `aws.ec2.nat_gateways.high_data_processing`

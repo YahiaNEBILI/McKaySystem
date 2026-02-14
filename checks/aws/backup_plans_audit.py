@@ -134,7 +134,7 @@ class AwsBackupPlansAuditChecker:
     One checker, three issue types (distinct check_id values).
     """
 
-    checker_id = "aws.backup.governance.plans_audit"
+    checker_id = "aws.backup.governance.plans.audit"
 
     def __init__(
         self,

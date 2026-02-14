@@ -512,7 +512,7 @@ def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Option
 
 
 class FSxFileSystemsChecker(Checker):
-    checker_id = "checks.aws.fsx_filesystems"
+    checker_id = "aws.fsx.filesystems"
 
     def __init__(self, *, account_id: str, cfg: Optional[FSxFileSystemsConfig] = None) -> None:
         self._account_id = str(account_id)
