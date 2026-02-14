@@ -18,27 +18,11 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install
+      - name: Install (project + dev extras)
         shell: bash
         run: |
           python -m pip install --upgrade pip
-
-          # Install project (editable if possible)
-          if [ -f pyproject.toml ]; then
-            pip install -e .
-          elif [ -f setup.py ]; then
-            pip install -e .
-          fi
-
-          # Dev/test deps (if present)
-          if [ -f requirements-dev.txt ]; then
-            pip install -r requirements-dev.txt
-          elif [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-
-          # Always ensure test runner is available
-          pip install pytest
+          pip install -e ".[dev]"
 
       - name: Sanity (compile)
         run: |
@@ -46,4 +30,4 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest -q
+          pytest
