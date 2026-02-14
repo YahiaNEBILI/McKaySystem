@@ -22,10 +22,25 @@ from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 import pyarrow.dataset as ds
 
 from apps.backend.db import db_conn, execute, execute_many, fetch_one
+from apps.backend.run_state import (
+    STATE_READY,
+    acquire_run_lock,
+    append_run_event,
+    begin_run_running,
+    default_owner,
+    release_run_lock,
+    transition_run_to_failed,
+    transition_run_to_ready,
+)
 from pipeline.run_manifest import find_manifest, load_manifest
 from version import SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_ttl_seconds() -> int:
+    """Lock TTL for run-scoped ingestion lock."""
+    return _env_int("RUN_LOCK_TTL_SECONDS", 1800)
 
 def _env_bool(name: str) -> bool:
     """Read a boolean env var."""
@@ -512,214 +527,226 @@ def ingest_from_manifest(
             latest_rows=0,
         )
 
-    api.execute(
-        """
-        INSERT INTO runs (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at, engine_version,
-                          raw_present, correlated_present, enriched_present)
-        VALUES (%s, %s, %s, %s, 'ingesting', %s, NULL, %s, %s, %s, %s)
-        ON CONFLICT (tenant_id, workspace, run_id) DO UPDATE SET
-          run_ts = EXCLUDED.run_ts,
-          status = 'ingesting',
-          artifact_prefix = EXCLUDED.artifact_prefix,
-          engine_version = EXCLUDED.engine_version,
-          raw_present = EXCLUDED.raw_present,
-          correlated_present = EXCLUDED.correlated_present,
-          enriched_present = EXCLUDED.enriched_present
-        """,
-        (
-            manifest.tenant_id,
-            manifest.workspace,
-            manifest.run_id,
-            run_ts,
-            dataset_dir,
-            manifest.engine_version,
-            raw_present,
-            correlated_present,
-            enriched_present,
-        ),
-    )
-
-    # Idempotence for presence rows
-    api.execute(
-        "DELETE FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
-        (manifest.tenant_id, manifest.workspace, manifest.run_id),
-    )
-
-    parquet_files = _list_parquet_files_for_paths(dataset_paths)
-    if not parquet_files:
-        raise SystemExit("No parquet files found for manifest datasets.")
-
-    dataset = ds.dataset([str(p) for p in parquet_files], format="parquet", partitioning="hive")
-    schema_names = set(dataset.schema.names)
-
-    filt = None
-    if "tenant_id" in schema_names:
-        filt = ds.field("tenant_id") == manifest.tenant_id
-    if "workspace_id" in schema_names:
-        expr = ds.field("workspace_id") == manifest.workspace
-        filt = expr if filt is None else (filt & expr)
-    if "run_id" in schema_names and manifest.run_id:
-        expr = ds.field("run_id") == manifest.run_id
-        filt = expr if filt is None else (filt & expr)
-
-    scanner = dataset.scanner(filter=filt, batch_size=int(parquet_batch_size))
-
-    presence_rows: List[Sequence[Any]] = []
-    latest_rows: List[Sequence[Any]] = []
-    seen_fingerprints: set[str] = set()
-    total_presence = 0
-    total_latest = 0
-
-    def _flush_presence() -> None:
-        """Flush buffered presence rows to the DB."""
-        nonlocal total_presence
-        if not presence_rows:
-            return
-        api.execute_many(
+    try:
+        api.execute(
             """
-            INSERT INTO finding_presence
-            (tenant_id, workspace, run_id, fingerprint, check_id, service, severity, title,
-            estimated_monthly_savings, region, account_id, detected_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO runs (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at, engine_version,
+                              raw_present, correlated_present, enriched_present)
+            VALUES (%s, %s, %s, %s, 'running', %s, NULL, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, workspace, run_id) DO UPDATE SET
+              run_ts = EXCLUDED.run_ts,
+              status = 'running',
+              artifact_prefix = EXCLUDED.artifact_prefix,
+              engine_version = EXCLUDED.engine_version,
+              raw_present = EXCLUDED.raw_present,
+              correlated_present = EXCLUDED.correlated_present,
+              enriched_present = EXCLUDED.enriched_present,
+              ingested_at = NULL
             """,
-            presence_rows,
+            (
+                manifest.tenant_id,
+                manifest.workspace,
+                manifest.run_id,
+                run_ts,
+                dataset_dir,
+                manifest.engine_version,
+                raw_present,
+                correlated_present,
+                enriched_present,
+            ),
         )
-        total_presence += len(presence_rows)
-        presence_rows.clear()
 
-    def _flush_latest() -> None:
-        """Flush buffered latest rows to the DB."""
-        nonlocal total_latest
-        if not latest_rows:
-            return
-        api.execute_many(
+        # Idempotence for presence rows
+        api.execute(
+            "DELETE FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+            (manifest.tenant_id, manifest.workspace, manifest.run_id),
+        )
+
+        parquet_files = _list_parquet_files_for_paths(dataset_paths)
+        if not parquet_files:
+            raise SystemExit("No parquet files found for manifest datasets.")
+
+        dataset = ds.dataset([str(p) for p in parquet_files], format="parquet", partitioning="hive")
+        schema_names = set(dataset.schema.names)
+
+        filt = None
+        if "tenant_id" in schema_names:
+            filt = ds.field("tenant_id") == manifest.tenant_id
+        if "workspace_id" in schema_names:
+            expr = ds.field("workspace_id") == manifest.workspace
+            filt = expr if filt is None else (filt & expr)
+        if "run_id" in schema_names and manifest.run_id:
+            expr = ds.field("run_id") == manifest.run_id
+            filt = expr if filt is None else (filt & expr)
+
+        scanner = dataset.scanner(filter=filt, batch_size=int(parquet_batch_size))
+
+        presence_rows: List[Sequence[Any]] = []
+        latest_rows: List[Sequence[Any]] = []
+        seen_fingerprints: set[str] = set()
+        total_presence = 0
+        total_latest = 0
+
+        def _flush_presence() -> None:
+            """Flush buffered presence rows to the DB."""
+            nonlocal total_presence
+            if not presence_rows:
+                return
+            api.execute_many(
+                """
+                INSERT INTO finding_presence
+                (tenant_id, workspace, run_id, fingerprint, check_id, service, severity, title,
+                estimated_monthly_savings, region, account_id, detected_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                presence_rows,
+            )
+            total_presence += len(presence_rows)
+            presence_rows.clear()
+
+        def _flush_latest() -> None:
+            """Flush buffered latest rows to the DB."""
+            nonlocal total_latest
+            if not latest_rows:
+                return
+            api.execute_many(
+                """
+                INSERT INTO finding_latest
+                (tenant_id, workspace, fingerprint, run_id,
+                 check_id, service, severity, title,
+                 estimated_monthly_savings, region, account_id,
+                 category, group_key,
+                 payload, detected_at)
+                VALUES
+                (%s,%s,%s,%s,
+                 %s,%s,%s,%s,
+                 %s,%s,%s,
+                 %s,%s,
+                 %s::jsonb,%s)
+                ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
+                  run_id = EXCLUDED.run_id,
+                  check_id = EXCLUDED.check_id,
+                  service = EXCLUDED.service,
+                  severity = EXCLUDED.severity,
+                  title = EXCLUDED.title,
+                  estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
+                  region = EXCLUDED.region,
+                  account_id = EXCLUDED.account_id,
+                  category = EXCLUDED.category,
+                  group_key = EXCLUDED.group_key,
+                  payload = EXCLUDED.payload,
+                  detected_at = EXCLUDED.detected_at
+                """,
+                latest_rows,
+            )
+            total_latest += len(latest_rows)
+            latest_rows.clear()
+
+        for batch in scanner.to_batches():
+            rows = batch.to_pylist()
+            for rec in rows:
+                if not isinstance(rec, dict):
+                    continue
+
+                # Safety guard if filters were not applied.
+                if rec.get("tenant_id") != manifest.tenant_id:
+                    continue
+                if rec.get("workspace_id") and rec.get("workspace_id") != manifest.workspace:
+                    continue
+                if rec.get("run_id") and manifest.run_id and rec.get("run_id") != manifest.run_id:
+                    continue
+
+                fp = str(rec.get("fingerprint") or "").strip()
+                if not fp:
+                    continue
+                if fp in seen_fingerprints:
+                    continue
+                seen_fingerprints.add(fp)
+
+                check_id, service, severity, title, savings_f, region, account_id, category, group_key = (
+                    _guess_fields_from_record(rec)
+                )
+
+                detected_at = _parse_dt(rec.get("run_ts")) or run_ts
+
+                presence_rows.append(
+                    (
+                        manifest.tenant_id,
+                        manifest.workspace,
+                        manifest.run_id,
+                        fp,
+                        check_id,
+                        service,
+                        severity,
+                        title,
+                        savings_f,
+                        region,
+                        account_id,
+                        detected_at,
+                    )
+                )
+
+                payload_json = json.dumps(rec, ensure_ascii=False, separators=(",", ":"), default=_json_default)
+                latest_rows.append(
+                    (
+                        manifest.tenant_id,
+                        manifest.workspace,
+                        fp,
+                        manifest.run_id,
+                        check_id,
+                        service,
+                        severity,
+                        title,
+                        savings_f,
+                        region,
+                        account_id,
+                        category,
+                        group_key,
+                        payload_json,
+                        detected_at,
+                    )
+                )
+
+                if len(presence_rows) >= batch_size:
+                    _flush_presence()
+                if len(latest_rows) >= batch_size:
+                    _flush_latest()
+
+        _flush_presence()
+        _flush_latest()
+
+        _refresh_aggregates_with_api(
+            api,
+            tenant_id=manifest.tenant_id,
+            workspace=manifest.workspace,
+        )
+
+        api.execute(
             """
-            INSERT INTO finding_latest
-            (tenant_id, workspace, fingerprint, run_id,
-             check_id, service, severity, title,
-             estimated_monthly_savings, region, account_id,
-             category, group_key,
-             payload, detected_at)
-            VALUES
-            (%s,%s,%s,%s,
-             %s,%s,%s,%s,
-             %s,%s,%s,
-             %s,%s,
-             %s::jsonb,%s)
-            ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
-              run_id = EXCLUDED.run_id,
-              check_id = EXCLUDED.check_id,
-              service = EXCLUDED.service,
-              severity = EXCLUDED.severity,
-              title = EXCLUDED.title,
-              estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
-              region = EXCLUDED.region,
-              account_id = EXCLUDED.account_id,
-              category = EXCLUDED.category,
-              group_key = EXCLUDED.group_key,
-              payload = EXCLUDED.payload,
-              detected_at = EXCLUDED.detected_at
+            UPDATE runs
+            SET status='ready', ingested_at=NOW(),
+                raw_present=%s, correlated_present=%s, enriched_present=%s
+            WHERE tenant_id=%s AND workspace=%s AND run_id=%s
             """,
-            latest_rows,
+            (
+                raw_present,
+                correlated_present,
+                enriched_present,
+                manifest.tenant_id,
+                manifest.workspace,
+                manifest.run_id,
+            ),
         )
-        total_latest += len(latest_rows)
-        latest_rows.clear()
-
-    for batch in scanner.to_batches():
-        rows = batch.to_pylist()
-        for rec in rows:
-            if not isinstance(rec, dict):
-                continue
-
-            # Safety guard if filters were not applied.
-            if rec.get("tenant_id") != manifest.tenant_id:
-                continue
-            if rec.get("workspace_id") and rec.get("workspace_id") != manifest.workspace:
-                continue
-            if rec.get("run_id") and manifest.run_id and rec.get("run_id") != manifest.run_id:
-                continue
-
-            fp = str(rec.get("fingerprint") or "").strip()
-            if not fp:
-                continue
-            if fp in seen_fingerprints:
-                continue
-            seen_fingerprints.add(fp)
-
-            check_id, service, severity, title, savings_f, region, account_id, category, group_key = (
-                _guess_fields_from_record(rec)
-            )
-
-            detected_at = _parse_dt(rec.get("run_ts")) or run_ts
-
-            presence_rows.append(
-                (
-                    manifest.tenant_id,
-                    manifest.workspace,
-                    manifest.run_id,
-                    fp,
-                    check_id,
-                    service,
-                    severity,
-                    title,
-                    savings_f,
-                    region,
-                    account_id,
-                    detected_at,
-                )
-            )
-
-            payload_json = json.dumps(rec, ensure_ascii=False, separators=(",", ":"), default=_json_default)
-            latest_rows.append(
-                (
-                    manifest.tenant_id,
-                    manifest.workspace,
-                    fp,
-                    manifest.run_id,
-                    check_id,
-                    service,
-                    severity,
-                    title,
-                    savings_f,
-                    region,
-                    account_id,
-                    category,
-                    group_key,
-                    payload_json,
-                    detected_at,
-                )
-            )
-
-            if len(presence_rows) >= batch_size:
-                _flush_presence()
-            if len(latest_rows) >= batch_size:
-                _flush_latest()
-
-    _flush_presence()
-    _flush_latest()
-
-    _refresh_aggregates_with_api(
-        api,
-        tenant_id=manifest.tenant_id,
-        workspace=manifest.workspace,
-    )
-
-    api.execute(
-        """
-        UPDATE runs
-        SET status='ready', ingested_at=NOW(),
-            raw_present=%s, correlated_present=%s, enriched_present=%s
-        WHERE tenant_id=%s AND workspace=%s AND run_id=%s
-        """,
-        (
-            raw_present,
-            correlated_present,
-            enriched_present,
-            manifest.tenant_id,
-            manifest.workspace,
-            manifest.run_id,
-        ),
-    )
+    except Exception:
+        api.execute(
+            """
+            UPDATE runs
+            SET status='failed'
+            WHERE tenant_id=%s AND workspace=%s AND run_id=%s
+            """,
+            (manifest.tenant_id, manifest.workspace, manifest.run_id),
+        )
+        raise
 
     print(
         f"OK: ingested {total_presence} items from {dataset_dir} as run "
@@ -806,57 +833,80 @@ def _ingest_with_copy(
 
     total_presence = 0
     total_latest = 0
+    lock_owner = default_owner("ingest_parquet")
+    lock_token: Optional[str] = None
 
     with db_conn() as conn:
         try:
+            lock = acquire_run_lock(
+                conn,
+                tenant_id=manifest.tenant_id,
+                workspace=manifest.workspace,
+                run_id=manifest.run_id,
+                owner=lock_owner,
+                ttl_seconds=_lock_ttl_seconds(),
+            )
+            if lock is None:
+                raise SystemExit(
+                    "Run is already being ingested (active lock). "
+                    f"tenant={manifest.tenant_id} workspace={manifest.workspace} run_id={manifest.run_id}"
+                )
+            lock_token = lock.token
+            append_run_event(
+                conn,
+                tenant_id=manifest.tenant_id,
+                workspace=manifest.workspace,
+                run_id=manifest.run_id,
+                event_type="run.lock.acquired",
+                actor=lock_owner,
+                payload={"expires_at": lock.expires_at.isoformat()},
+            )
+
+            state = begin_run_running(
+                conn,
+                tenant_id=manifest.tenant_id,
+                workspace=manifest.workspace,
+                run_id=manifest.run_id,
+                run_ts=run_ts,
+                artifact_prefix=dataset_dir,
+                engine_version=manifest.engine_version,
+                raw_present=raw_present,
+                correlated_present=correlated_present,
+                enriched_present=enriched_present,
+                actor=lock_owner,
+            )
+            if state == STATE_READY:
+                released = release_run_lock(
+                    conn,
+                    tenant_id=manifest.tenant_id,
+                    workspace=manifest.workspace,
+                    run_id=manifest.run_id,
+                    lock_token=lock_token,
+                )
+                if released:
+                    append_run_event(
+                        conn,
+                        tenant_id=manifest.tenant_id,
+                        workspace=manifest.workspace,
+                        run_id=manifest.run_id,
+                        event_type="run.lock.released",
+                        actor=lock_owner,
+                    )
+                conn.commit()
+                print(
+                    f"SKIP: run already ingested: {manifest.tenant_id}/{manifest.workspace}/{manifest.run_id}"
+                )
+                return IngestStats(
+                    dataset_used=dataset_label,
+                    dataset_dir=dataset_dir,
+                    raw_present=raw_present,
+                    correlated_present=correlated_present,
+                    enriched_present=enriched_present,
+                    presence_rows=0,
+                    latest_rows=0,
+                )
+
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT status FROM runs WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
-                    (manifest.tenant_id, manifest.workspace, manifest.run_id),
-                )
-                existing = cur.fetchone()
-                if existing and existing[0] == "ready":
-                    conn.rollback()
-                    print(
-                        f"SKIP: run already ingested: {manifest.tenant_id}/{manifest.workspace}/{manifest.run_id}"
-                    )
-                    return IngestStats(
-                        dataset_used=dataset_label,
-                        dataset_dir=dataset_dir,
-                        raw_present=raw_present,
-                        correlated_present=correlated_present,
-                        enriched_present=enriched_present,
-                        presence_rows=0,
-                        latest_rows=0,
-                    )
-
-                cur.execute(
-                    """
-                    INSERT INTO runs (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at,
-                                      engine_version, raw_present, correlated_present, enriched_present)
-                    VALUES (%s, %s, %s, %s, 'ingesting', %s, NULL, %s, %s, %s, %s)
-                    ON CONFLICT (tenant_id, workspace, run_id) DO UPDATE SET
-                      run_ts = EXCLUDED.run_ts,
-                      status = 'ingesting',
-                      artifact_prefix = EXCLUDED.artifact_prefix,
-                      engine_version = EXCLUDED.engine_version,
-                      raw_present = EXCLUDED.raw_present,
-                      correlated_present = EXCLUDED.correlated_present,
-                      enriched_present = EXCLUDED.enriched_present
-                    """,
-                    (
-                        manifest.tenant_id,
-                        manifest.workspace,
-                        manifest.run_id,
-                        run_ts,
-                        dataset_dir,
-                        manifest.engine_version,
-                        raw_present,
-                        correlated_present,
-                        enriched_present,
-                    ),
-                )
-
                 cur.execute(
                     "DELETE FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
                     (manifest.tenant_id, manifest.workspace, manifest.run_id),
@@ -1013,29 +1063,77 @@ def _ingest_with_copy(
                     workspace=manifest.workspace,
                 )
 
-                cur.execute(
-                    """
-                    UPDATE runs
-                    SET status='ready', ingested_at=NOW(),
-                        raw_present=%s, correlated_present=%s, enriched_present=%s
-                    WHERE tenant_id=%s AND workspace=%s AND run_id=%s
-                    """,
-                    (
-                        raw_present,
-                        correlated_present,
-                        enriched_present,
-                        manifest.tenant_id,
-                        manifest.workspace,
-                        manifest.run_id,
-                    ),
+                transition_run_to_ready(
+                    conn,
+                    tenant_id=manifest.tenant_id,
+                    workspace=manifest.workspace,
+                    run_id=manifest.run_id,
+                    actor=lock_owner,
+                    raw_present=raw_present,
+                    correlated_present=correlated_present,
+                    enriched_present=enriched_present,
                 )
+                if lock_token:
+                    released = release_run_lock(
+                        conn,
+                        tenant_id=manifest.tenant_id,
+                        workspace=manifest.workspace,
+                        run_id=manifest.run_id,
+                        lock_token=lock_token,
+                    )
+                    if released:
+                        append_run_event(
+                            conn,
+                            tenant_id=manifest.tenant_id,
+                            workspace=manifest.workspace,
+                            run_id=manifest.run_id,
+                            event_type="run.lock.released",
+                            actor=lock_owner,
+                        )
+                        lock_token = None
 
             conn.commit()
-        except Exception:
+        except Exception as exc:
             try:
                 conn.rollback()
             except Exception as rb_exc:
                 logger.warning("Rollback failed after COPY ingest error: %s", rb_exc)
+            try:
+                transition_run_to_failed(
+                    conn,
+                    tenant_id=manifest.tenant_id,
+                    workspace=manifest.workspace,
+                    run_id=manifest.run_id,
+                    run_ts=run_ts,
+                    artifact_prefix=dataset_dir,
+                    engine_version=manifest.engine_version,
+                    actor=lock_owner,
+                    reason=str(exc),
+                )
+                if lock_token:
+                    released = release_run_lock(
+                        conn,
+                        tenant_id=manifest.tenant_id,
+                        workspace=manifest.workspace,
+                        run_id=manifest.run_id,
+                        lock_token=lock_token,
+                    )
+                    if released:
+                        append_run_event(
+                            conn,
+                            tenant_id=manifest.tenant_id,
+                            workspace=manifest.workspace,
+                            run_id=manifest.run_id,
+                            event_type="run.lock.released",
+                            actor=lock_owner,
+                        )
+                conn.commit()
+            except Exception as state_exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.warning("Failed to persist failed run state: %s", state_exc)
             raise
 
     print(

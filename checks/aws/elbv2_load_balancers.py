@@ -38,6 +38,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from checks.aws._common import (
     AwsAccountContext,
     build_scope,
+    get_logger,
     is_suppressed,
     money,
     normalize_tags,
@@ -275,6 +276,8 @@ class _ElbCloudWatch:
 # -----------------------------
 # Checker
 # -----------------------------
+# Logger for this module
+_LOGGER = get_logger("elbv2_load_balancers")
 
 
 class ElbV2LoadBalancersChecker:
@@ -300,6 +303,7 @@ class ElbV2LoadBalancersChecker:
         self._cfg = cfg or ElbV2LoadBalancersConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting ELBv2 load balancers check")
         cfg = self._cfg
 
         services = getattr(ctx, "services", None)
@@ -314,6 +318,7 @@ class ElbV2LoadBalancersChecker:
         region = safe_region_from_client(elbv2) or str(getattr(services, "region", "") or "")
         if not region:
             region = "unknown"
+        _LOGGER.debug("ELBv2 check running", extra={"region": region})
 
         # Inventory
         try:
@@ -344,6 +349,7 @@ class ElbV2LoadBalancersChecker:
 
         if not lbs:
             return
+        _LOGGER.info("Listed ELBv2 load balancers", extra={"count": len(lbs), "region": region})
         # Tags (DescribeTags: max 20 ARNs per call)
         lb_arns = [str(lb.get("LoadBalancerArn") or "") for lb in lbs if lb.get("LoadBalancerArn")]
 

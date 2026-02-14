@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from botocore.exceptions import BotoCoreError, ClientError
 
 import checks.aws._common as common
-from checks.aws._common import AwsAccountContext, build_scope
+from checks.aws._common import AwsAccountContext, build_scope, get_logger
 from checks.aws.defaults import (
     CLOUDWATCH_ALARMS_COUNT_WARN_THRESHOLD,
     CLOUDWATCH_FALLBACK_USD_PER_ALARM_MONTH,
@@ -40,6 +40,9 @@ from checks.aws.defaults import (
 )
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
+
+# Logger for this module
+_LOGGER = get_logger("cloudwatch_metrics_logs_cost")
 
 
 # -----------------------------
@@ -261,6 +264,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         self._cfg = cfg or CloudWatchMetricsLogsCostConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting CloudWatch metrics and logs cost check")
         services = getattr(ctx, "services", None)
         if services is None:
             return []
@@ -272,6 +276,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
             or common.safe_region_from_client(logs)
             or common.safe_region_from_client(cw)
         )
+        _LOGGER.debug("CloudWatch check running", extra={"region": region})
 
         findings: List[FindingDraft] = []
 

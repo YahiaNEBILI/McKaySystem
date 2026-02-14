@@ -36,6 +36,7 @@ from botocore.exceptions import ClientError
 from checks.aws._common import (
     build_scope,
     AwsAccountContext,
+    get_logger,
     pricing_location_for_region,
     pricing_on_demand_first_positive,
     pricing_service,
@@ -57,6 +58,9 @@ from checks.aws.defaults import (
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
 from contracts.finops_checker_pattern import Checker
+
+# Logger for this module
+_LOGGER = get_logger("fsx_filesystems")
 
 
 # -----------------------------
@@ -582,11 +586,14 @@ class FSxFileSystemsChecker(Checker):
         return baseline_monthly_cost, throughput_cost, pricing_notes, pricing_conf
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting FSx filesystems check")
         if ctx.services is None or getattr(ctx.services, "fsx", None) is None:
+            _LOGGER.warning("FSx client not available in services")
             return
 
         fsx = ctx.services.fsx
         region = safe_region_from_client(fsx) or "unknown"
+        _LOGGER.debug("FSx check running", extra={"region": region})
         cfg = self._cfg
         now_ts = now_utc()
 
@@ -596,6 +603,8 @@ class FSxFileSystemsChecker(Checker):
 
         if not file_systems:
             return
+
+        _LOGGER.info("Listed FSx filesystems", extra={"count": len(file_systems), "region": region})
 
         # Counters per check_id to enforce max_findings_per_type
         emitted: Dict[str, int] = {}

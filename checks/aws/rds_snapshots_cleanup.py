@@ -64,6 +64,7 @@ from checks.aws._common import (
     build_scope,
     AwsAccountContext,
     arn_region,
+    get_logger,
     is_suppressed,
     money,
     now_utc,
@@ -75,6 +76,9 @@ from checks.aws._common import (
 from checks.aws.defaults import RDS_SNAPSHOTS_GB_MONTH_PRICE_USD, RDS_SNAPSHOTS_STALE_DAYS
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("rds_snapshots_cleanup")
 
 
 SUPPRESS_TAG_KEYS = {"retain", "legal-hold", "backup-policy"}
@@ -139,11 +143,13 @@ class RDSSnapshotsCleanupChecker:
         self._snapshot_gb_month_price_usd = snapshot_gb_month_price_usd
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting RDS snapshots cleanup check")
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
             raise RuntimeError("RDSSnapshotsCleanupChecker requires ctx.services.rds")
 
         rds = ctx.services.rds
         region = safe_region_from_client(rds)
+        _LOGGER.debug("RDS snapshots check running", extra={"region": region})
         cutoff = now_utc() - timedelta(days=self._stale_days)
 
         # Resolve pricing once per run/region (fast + cached).

@@ -41,6 +41,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from checks.aws._common import (
     AwsAccountContext,
     build_scope,
+    get_logger,
     is_suppressed,
     normalize_tags,
     now_utc,
@@ -58,6 +59,9 @@ from checks.aws.defaults import (
 )
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
+
+# Logger for this module
+_LOGGER = get_logger("efs_filesystems")
 
 
 @dataclass(frozen=True)
@@ -250,6 +254,7 @@ class EFSFileSystemsChecker(Checker):
     # -----------------------------
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting EFS filesystems check")
         cfg = self._cfg
         services = getattr(ctx, "services", None)
         if services is None:
@@ -262,6 +267,7 @@ class EFSFileSystemsChecker(Checker):
         cw = getattr(services, "cloudwatch", None)
         region = safe_region_from_client(efs) or safe_region_from_client(getattr(services, "ec2", None))
         region = str(region or "")
+        _LOGGER.debug("EFS check running", extra={"region": region})
 
         try:
             file_systems = self._list_file_systems(efs)
@@ -279,6 +285,8 @@ class EFSFileSystemsChecker(Checker):
                 issue_key={"check_id": "aws.efs.filesystems.access.error", "region": region},
             )
             return
+
+        _LOGGER.info("Listed EFS filesystems", extra={"count": len(file_systems), "region": region})
 
         # Extract ids + tags
         fs_by_id: Dict[str, Dict[str, Any]] = {}

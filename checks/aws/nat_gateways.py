@@ -36,6 +36,7 @@ from checks.aws._common import (
     AwsAccountContext,
     build_scope,
     gb_from_bytes,
+    get_logger,
     is_suppressed,
     money,
     normalize_tags,
@@ -98,6 +99,8 @@ class NatGatewaysConfig:
 
 _FALLBACK_NAT_HOURLY_USD: float = NAT_FALLBACK_HOURLY_USD
 _FALLBACK_NAT_DATA_USD_PER_GB: float = NAT_FALLBACK_DATA_USD_PER_GB
+# Logger for this module
+_LOGGER = get_logger("nat_gateways")
 
 
 def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float, str, int]:
@@ -364,6 +367,7 @@ class NatGatewaysChecker:
         self._cfg = cfg or NatGatewaysConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting NAT gateways check")
         services = getattr(ctx, "services", None)
         if services is None:
             raise RuntimeError("RunContext.services is required")
@@ -371,6 +375,7 @@ class NatGatewaysChecker:
         ec2 = services.ec2
         cw = getattr(ctx.services, "cloudwatch", None)
         region = safe_region_from_client(ec2) or str(getattr(ctx.services, "region", "") or "")
+        _LOGGER.debug("NAT gateways check running", extra={"region": region})
 
         # Inventory NAT gateways
         try:
@@ -388,6 +393,8 @@ class NatGatewaysChecker:
 
         if not nat_gateways:
             return
+
+        _LOGGER.info("Listed NAT gateways", extra={"count": len(nat_gateways), "region": region})
 
         # Normalize & filter to "available" NATs (best-effort)
         nats: List[Dict[str, Any]] = []

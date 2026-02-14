@@ -57,6 +57,7 @@ from botocore.exceptions import ClientError
 from checks.aws._common import (
     AwsAccountContext,
     build_scope,
+    get_logger,
     money,
     paginate_items,
     pricing_first_positive,
@@ -66,6 +67,9 @@ from checks.aws._common import (
 from checks.aws.defaults import BACKUP_VAULTS_COLD_FALLBACK_USD, BACKUP_VAULTS_WARM_FALLBACK_USD
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("backup_vaults_audit")
 
 
 # Actions that are generally high-impact if granted broadly.
@@ -274,17 +278,21 @@ class AwsBackupVaultsAuditChecker:
         self._allowed_cross_account_ids = allowed_cross_account_ids or set()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting AWS Backup vaults audit check")
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupVaultsAuditChecker requires ctx.services.backup")
 
         backup: BaseClient = ctx.services.backup
         region = safe_region_from_client(backup)
+        _LOGGER.debug("Backup vaults check running", extra={"region": region})
 
         try:
             vaults = list(paginate_items(backup, "list_backup_vaults", "BackupVaultList"))
         except ClientError as exc:
             yield self._access_error_finding(ctx, region, "list_backup_vaults", exc)
             return
+
+        _LOGGER.info("Listed Backup vaults", extra={"count": len(vaults), "region": region})
 
         # Per-vault evaluation:
         # 1) Vault Lock / lifecycle guardrail

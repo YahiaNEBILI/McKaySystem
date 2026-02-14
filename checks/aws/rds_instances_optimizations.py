@@ -54,10 +54,14 @@ from checks.aws._common import (
     normalize_tags,
     money,
     safe_region_from_client,
+    get_logger,
 )
 
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("rds_instances_optimizations")
 
 _NONPROD_VALUES = {
     "dev", "test", "nprd", "staging", "nonprod", "non-prod", "sandbox", "qa", "uat"
@@ -563,18 +567,22 @@ class RDSInstancesOptimizationsChecker:
         return storage_metrics, replica_read_iops, replica_connections, None
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting RDS instances optimizations check")
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
             raise RuntimeError("RDSInstancesOptimizationsChecker requires ctx.services.rds")
 
         rds = ctx.services.rds
         cw = getattr(ctx.services, "cloudwatch", None)
         region = safe_region_from_client(rds)
+        _LOGGER.debug("RDS check running", extra={"region": region})
 
         try:
             instances = list(self._list_db_instances(rds))
         except ClientError as exc:
             yield self._access_error(ctx, region, "describe_db_instances", exc)
             return
+
+        _LOGGER.info("Listed RDS instances", extra={"count": len(instances), "region": region})
 
         # Pre-fetch metrics in batches for performance.
         metric_fetcher: Optional[_CloudWatchBatchMetrics] = _CloudWatchBatchMetrics(cw) if cw is not None else None

@@ -40,6 +40,9 @@ from checks.aws.defaults import (
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
 
+# Logger for this module
+_LOGGER = common.get_logger("ebs_storage")
+
 
 
 # -----------------------------
@@ -362,10 +365,13 @@ class EBSStorageChecker(Checker):
         )
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting EBS storage check")
         if ctx.services is None or getattr(ctx.services, "ec2", None) is None:
+            _LOGGER.warning("EC2 client not available in services")
             return
         ec2 = ctx.services.ec2
         region = _region_from_ec2(ec2) or "unknown"
+        _LOGGER.debug("EBS check running", extra={"region": region})
         now_ts = common.now_utc()
         cfg = self._cfg
 

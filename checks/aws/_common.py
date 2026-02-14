@@ -5,6 +5,7 @@ The checker layer tends to repeat a few patterns:
 - apply retention / suppression tag logic
 - normalize timestamps to UTC
 - extract region from boto3 clients or ARNs
+- structured logging for debugging complex scenarios
 
 Keeping these helpers in one place reduces duplication and makes behavior
 consistent across checkers.
@@ -12,11 +13,28 @@ consistent across checkers.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from contracts.finops_checker_pattern import Scope
+
+
+# Logger name prefix for AWS checkers
+_LOGGER_PREFIX = "mckay.checks.aws"
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger for an AWS checker module.
+
+    Args:
+        name: The checker name (e.g., 'ec2_instances', 'ebs_storage').
+
+    Returns:
+        A configured logger instance.
+    """
+    return logging.getLogger(f"{_LOGGER_PREFIX}.{name}")
 
 
 @dataclass(frozen=True)

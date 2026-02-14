@@ -49,7 +49,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from checks.aws._common import AwsAccountContext, build_scope, money, now_utc, safe_region_from_client, utc, normalize_tags
+from checks.aws._common import AwsAccountContext, build_scope, get_logger, money, now_utc, safe_region_from_client, utc, normalize_tags
 from checks.aws.defaults import (
     EC2_MAX_FINDINGS_PER_TYPE,
     EC2_REQUIRED_INSTANCE_TAG_KEYS,
@@ -62,6 +62,9 @@ from checks.aws.defaults import (
 )
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
+
+# Logger for this module
+_LOGGER = get_logger("ec2_instances")
 
 
 # -----------------------------
@@ -403,16 +406,22 @@ class EC2InstancesChecker:
         self._cfg = cfg or EC2InstancesConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting EC2 instances check", extra={"region": "unknown"})
         ec2 = getattr(getattr(ctx, "services", None), "ec2", None)
         if ec2 is None:
+            _LOGGER.warning("EC2 client not available in services")
             return []
 
         region = safe_region_from_client(ec2)
+        _LOGGER.debug("EC2 check running", extra={"region": region})
 
         try:
             instances = list(self._list_instances(ec2))
-        except (BotoCoreError, ClientError):
+        except (BotoCoreError, ClientError) as e:
+            _LOGGER.error("Failed to list EC2 instances", extra={"error": str(e)})
             return []
+
+        _LOGGER.info("Listed EC2 instances", extra={"count": len(instances), "region": region})
 
         by_state = self._group_instances_by_state(instances)
 
@@ -430,6 +439,8 @@ class EC2InstancesChecker:
         findings.extend(self._emit_t_family_credit_issues(ctx, region=region, instances=by_state["running"]))
         findings.extend(self._emit_missing_tags(ctx, region=region, instances=by_state["running"] + by_state["stopped"]))
         findings.extend(self._emit_unused_security_groups(ctx, region=region, sgs=sgs, enis=enis))
+
+        _LOGGER.info("EC2 check complete", extra={"findings_count": len(findings), "region": region})
 
         return findings
 
@@ -453,6 +464,7 @@ class EC2InstancesChecker:
     # -------------------------
 
     def _list_instances(self, ec2: Any) -> Iterator[Mapping[str, Any]]:
+        _LOGGER.debug("Fetching EC2 instances via describe_instances")
         paginator = ec2.get_paginator("describe_instances")
         for page in paginator.paginate():
             for res in page.get("Reservations", []) or []:

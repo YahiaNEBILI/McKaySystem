@@ -26,10 +26,14 @@ from checks.aws._common import (
     build_scope,
     AwsAccountContext,
     now_utc,
+    get_logger,
 )
 from checks.aws.defaults import S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD, S3_METRIC_LOOKBACK_DAYS
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("s3_storage")
 
 
 def _normalize_s3_location_constraint(value: Optional[str]) -> str:
@@ -92,6 +96,7 @@ class S3StorageChecker:
         self._lookback_days = int(metric_lookback_days)
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting S3 storage check")
         if ctx.services is None:
             raise RuntimeError("S3StorageChecker requires ctx.services (AWS clients)")
 
@@ -102,6 +107,9 @@ class S3StorageChecker:
         billing_account_id = self._account.billing_account_id or self._account.account_id
 
         resp = s3.list_buckets()
+        _LOGGER.debug("Listed S3 buckets")
+        bucket_count = len(resp.get("Buckets", []) or [])
+        _LOGGER.info("S3 buckets found", extra={"bucket_count": bucket_count})
         for bucket in resp.get("Buckets", []) or []:
             name = str(bucket.get("Name") or "")
             if not name:

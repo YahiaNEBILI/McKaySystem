@@ -49,6 +49,7 @@ from checks.aws._common import (
     build_scope,
     AwsAccountContext,
     gb_from_bytes,
+    get_logger,
     is_suppressed,
     money,
     now_utc,
@@ -67,6 +68,9 @@ from checks.aws.defaults import (
 )
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("backup_plans_audit")
 
 # Best-effort suppression keys/values (recovery point list responses may not always include tags).
 _SUPPRESS_KEYS = {
@@ -152,11 +156,13 @@ class AwsBackupPlansAuditChecker:
         self._skip_if_deleting_within_days = int(skip_if_deleting_within_days)
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting AWS Backup plans audit check")
         if ctx.services is None or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupPlansAuditChecker requires ctx.services.backup")
 
         backup: BaseClient = ctx.services.backup
         region = safe_region_from_client(backup)
+        _LOGGER.debug("Backup plans check running", extra={"region": region})
 
         # Run sections independently so we can produce a single clear access error per missing permission set.
         try:
