@@ -846,34 +846,49 @@ def _audit_lifecycle(
     }
     _log("INFO", "lifecycle_audit", evt)
 
-    try:
-        execute_conn(
-            conn,
-            """
-            INSERT INTO finding_state_audit
-              (
-                tenant_id, workspace, subject_type, subject_id, action,
-                state, snooze_until, reason, updated_by, created_at
-              )
-            VALUES
-              (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
-            """,
-            (
-                tenant_id,
-                workspace,
-                subject_type,
-                subject_id,
-                action,
-                state,
-                snooze_until,
-                reason,
-                updated_by,
-            ),
-        )
-    except Exception:
+    params = (
+        tenant_id,
+        workspace,
+        subject_type,
+        subject_id,
+        action,
+        state,
+        snooze_until,
+        reason,
+        updated_by,
+    )
+
+    # Never let optional audit writes poison the caller transaction.
+    with conn.cursor() as cur:
         try:
-            execute_conn(
-                conn,
+            cur.execute("SAVEPOINT mckay_audit_1")
+            cur.execute(
+                """
+                INSERT INTO finding_state_audit
+                  (
+                    tenant_id, workspace, subject_type, subject_id, action,
+                    state, snooze_until, reason, updated_by, created_at
+                  )
+                VALUES
+                  (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+                """,
+                params,
+            )
+            cur.execute("RELEASE SAVEPOINT mckay_audit_1")
+            return
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_1")
+            except Exception:
+                pass
+            try:
+                cur.execute("RELEASE SAVEPOINT mckay_audit_1")
+            except Exception:
+                pass
+
+        try:
+            cur.execute("SAVEPOINT mckay_audit_2")
+            cur.execute(
                 """
                 INSERT INTO lifecycle_audit
                   (
@@ -883,19 +898,19 @@ def _audit_lifecycle(
                 VALUES
                   (%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
                 """,
-                (
-                    tenant_id,
-                    workspace,
-                    subject_type,
-                    subject_id,
-                    action,
-                    state,
-                    snooze_until,
-                    reason,
-                    updated_by,
-                ),
+                params,
             )
+            cur.execute("RELEASE SAVEPOINT mckay_audit_2")
+            return
         except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_2")
+            except Exception:
+                pass
+            try:
+                cur.execute("RELEASE SAVEPOINT mckay_audit_2")
+            except Exception:
+                pass
             return
 
 
