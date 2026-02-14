@@ -44,6 +44,15 @@ from checks.aws._common import (
     safe_region_from_client,
     money,
 )
+from checks.aws.defaults import (
+    FSX_LARGE_STORAGE_GIB_THRESHOLD,
+    FSX_MAX_FINDINGS_PER_TYPE,
+    FSX_REQUIRED_TAG_KEYS,
+    FSX_THROUGHPUT_LOOKBACK_DAYS,
+    FSX_UNDERUTILIZED_P95_UTIL_THRESHOLD_PCT,
+    FSX_UNUSED_LOOKBACK_DAYS,
+    FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS,
+)
 
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
@@ -60,23 +69,23 @@ class FSxFileSystemsConfig:
     """Configuration knobs for FSxFileSystemsChecker."""
 
     # "Unused" heuristics
-    unused_lookback_days: int = 14
+    unused_lookback_days: int = FSX_UNUSED_LOOKBACK_DAYS
 
     # Throughput utilization lookback
-    throughput_lookback_days: int = 14
-    underutilized_p95_util_threshold_pct: float = 20.0
+    throughput_lookback_days: int = FSX_THROUGHPUT_LOOKBACK_DAYS
+    underutilized_p95_util_threshold_pct: float = FSX_UNDERUTILIZED_P95_UTIL_THRESHOLD_PCT
 
     # Storage heuristic (GiB)
-    large_storage_gib_threshold: int = 4096
+    large_storage_gib_threshold: int = FSX_LARGE_STORAGE_GIB_THRESHOLD
 
     # Windows backup governance
-    windows_backup_low_retention_days: int = 7
+    windows_backup_low_retention_days: int = FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS
 
     # Governance tags (tags are lowercased by normalize_tags)
-    required_tag_keys: Tuple[str, ...] = ("application", "applicationId", "environment")
+    required_tag_keys: Tuple[str, ...] = FSX_REQUIRED_TAG_KEYS
 
     # Safety valve
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = FSX_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------
@@ -509,6 +518,34 @@ class FSxFileSystemsChecker(Checker):
         self._account_id = str(account_id)
         self._cfg = cfg or FSxFileSystemsConfig()
 
+    @staticmethod
+    def _list_file_systems_best_effort(fsx: Any) -> List[Dict[str, Any]]:
+        file_systems: List[Dict[str, Any]] = []
+        # Prefer paginator for correctness (API is paginated).
+        try:
+            paginator = fsx.get_paginator("describe_file_systems")
+            for page in paginator.paginate():
+                page_fs = page.get("FileSystems", []) or []
+                if isinstance(page_fs, list):
+                    for fs_any in page_fs:
+                        if isinstance(fs_any, dict):
+                            file_systems.append(fs_any)
+            return file_systems
+        except (AttributeError, TypeError, ValueError, ClientError):
+            pass
+
+        # Fallback: single call (older mocks / unusual clients / edge cases).
+        try:
+            resp = fsx.describe_file_systems()
+            page_fs = resp.get("FileSystems", []) or []
+            if isinstance(page_fs, list):
+                for fs_any in page_fs:
+                    if isinstance(fs_any, dict):
+                        file_systems.append(fs_any)
+        except (AttributeError, TypeError, ValueError, ClientError):
+            return []
+        return file_systems
+
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         if ctx.services is None or getattr(ctx.services, "fsx", None) is None:
             return
@@ -520,30 +557,7 @@ class FSxFileSystemsChecker(Checker):
 
         account = AwsAccountContext(account_id=self._account_id)
 
-        file_systems: List[Dict[str, Any]] = []
-
-        # Prefer paginator for correctness (API is paginated).
-        try:
-            paginator = fsx.get_paginator("describe_file_systems")
-            for page in paginator.paginate():
-                page_fs = page.get("FileSystems", []) or []
-                if isinstance(page_fs, list):
-                    for fs_any in page_fs:
-                        if isinstance(fs_any, dict):
-                            file_systems.append(fs_any)
-        except (AttributeError, TypeError, ValueError, ClientError):
-            # Fallback: single call (older mocks / unusual clients / edge cases).
-            try:
-                resp = fsx.describe_file_systems()
-                page_fs = resp.get("FileSystems", []) or []
-                if isinstance(page_fs, list):
-                    for fs_any in page_fs:
-                        if isinstance(fs_any, dict):
-                            file_systems.append(fs_any)
-            except ClientError:
-                return
-            except (AttributeError, TypeError, ValueError):
-                return
+        file_systems = self._list_file_systems_best_effort(fsx)
 
         if not file_systems:
             return

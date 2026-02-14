@@ -50,6 +50,16 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 from botocore.exceptions import BotoCoreError, ClientError
 
 from checks.aws._common import AwsAccountContext, build_scope, money, now_utc, safe_region_from_client, utc, normalize_tags
+from checks.aws.defaults import (
+    EC2_MAX_FINDINGS_PER_TYPE,
+    EC2_REQUIRED_INSTANCE_TAG_KEYS,
+    EC2_STOPPED_LONG_AGE_DAYS,
+    EC2_T_CREDIT_BALANCE_MIN_THRESHOLD,
+    EC2_T_CREDIT_LOOKBACK_DAYS,
+    EC2_UNDERUTILIZED_CPU_AVG_THRESHOLD,
+    EC2_UNDERUTILIZED_LOOKBACK_DAYS,
+    EC2_UNDERUTILIZED_NET_AVG_KIB_PER_HOUR_THRESHOLD,
+)
 from checks.registry import register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
 
@@ -63,21 +73,21 @@ from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
 class EC2InstancesConfig:
     """Configuration knobs for :class:`EC2InstancesChecker`."""
 
-    underutilized_lookback_days: int = 14
-    underutilized_cpu_avg_threshold: float = 10.0
-    underutilized_net_avg_kib_per_hour_threshold: float = 512.0  # ~12 MiB/day
+    underutilized_lookback_days: int = EC2_UNDERUTILIZED_LOOKBACK_DAYS
+    underutilized_cpu_avg_threshold: float = EC2_UNDERUTILIZED_CPU_AVG_THRESHOLD
+    underutilized_net_avg_kib_per_hour_threshold: float = EC2_UNDERUTILIZED_NET_AVG_KIB_PER_HOUR_THRESHOLD  # ~12 MiB/day
 
-    stopped_long_age_days: int = 30
+    stopped_long_age_days: int = EC2_STOPPED_LONG_AGE_DAYS
 
     # Safety valve for environments with millions of resources.
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = EC2_MAX_FINDINGS_PER_TYPE
 
     # CPU credit signals (T-family)
-    t_credit_lookback_days: int = 7
-    t_credit_balance_min_threshold: float = 20.0
+    t_credit_lookback_days: int = EC2_T_CREDIT_LOOKBACK_DAYS
+    t_credit_balance_min_threshold: float = EC2_T_CREDIT_BALANCE_MIN_THRESHOLD
 
     # Tag governance
-    required_instance_tag_keys: Tuple[str, ...] = ("ApplicationId", "Environment", "Application")
+    required_instance_tag_keys: Tuple[str, ...] = EC2_REQUIRED_INSTANCE_TAG_KEYS
 
 # -----------------------------
 # Pricing helpers
@@ -404,18 +414,10 @@ class EC2InstancesChecker:
         except (BotoCoreError, ClientError):
             return []
 
-        by_state: Dict[str, List[Mapping[str, Any]]] = {"running": [], "stopped": []}
-        for ins in instances:
-            state = str(((ins.get("State") or {}) if isinstance(ins, Mapping) else {}).get("Name") or "").lower()
-            if state in by_state:
-                by_state[state].append(ins)
+        by_state = self._group_instances_by_state(instances)
 
         # NEW: load security inventory once (best-effort)
-        try:
-            sgs = list(self._list_security_groups(ec2))
-            enis = list(self._list_network_interfaces(ec2))
-        except (BotoCoreError, ClientError):
-            sgs, enis = [], []
+        sgs, enis = self._load_security_inventory(ec2)
 
         sg_by_id: Dict[str, Mapping[str, Any]] = {str(sg.get("GroupId") or ""): sg for sg in sgs if sg.get("GroupId")}
 
@@ -430,6 +432,21 @@ class EC2InstancesChecker:
         findings.extend(self._emit_unused_security_groups(ctx, region=region, sgs=sgs, enis=enis))
 
         return findings
+
+    @staticmethod
+    def _group_instances_by_state(instances: Sequence[Mapping[str, Any]]) -> Dict[str, List[Mapping[str, Any]]]:
+        grouped: Dict[str, List[Mapping[str, Any]]] = {"running": [], "stopped": []}
+        for ins in instances:
+            state = str(((ins.get("State") or {}) if isinstance(ins, Mapping) else {}).get("Name") or "").lower()
+            if state in grouped:
+                grouped[state].append(ins)
+        return grouped
+
+    def _load_security_inventory(self, ec2: Any) -> Tuple[List[Mapping[str, Any]], List[Mapping[str, Any]]]:
+        try:
+            return list(self._list_security_groups(ec2)), list(self._list_network_interfaces(ec2))
+        except (BotoCoreError, ClientError):
+            return [], []
 
     # -------------------------
     # Instance listing
