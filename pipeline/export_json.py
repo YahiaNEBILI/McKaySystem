@@ -57,9 +57,6 @@ class ExportConfig:
     # Optional: also export correlated-only JSON
     export_correlated: bool = True
 
-    # Optional: export a full findings JSON (no LIMIT) for ingestion
-    export_full: bool = False
-
 
 class FinOpsJsonExporter:
     """
@@ -201,71 +198,6 @@ class FinOpsJsonExporter:
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         self._write_json("findings.json", _rows_to_jsonable(cols, rows))
-
-    def export_findings_full(self) -> None:
-        """
-        Export the full (unbounded) findings list for ingestion.
-        Uses streaming fetchmany to avoid loading everything in memory.
-        """
-        sql = """
-        WITH findings_all AS (
-            SELECT * FROM read_parquet(?, union_by_name=true)
-        )
-        SELECT
-            tenant_id,
-            workspace_id,
-            finding_id,
-            fingerprint,
-            run_id,
-            run_ts,
-            check_id,
-            check_name,
-            category,
-            status,
-            severity.level AS severity_level,
-            severity.score AS severity_score,
-            scope.cloud AS cloud,
-            scope.account_id AS account_id,
-            scope.region AS region,
-            scope.service AS service,
-            scope.resource_type AS resource_type,
-            scope.resource_id AS resource_id,
-            title,
-            message,
-            recommendation,
-            estimated.monthly_cost AS est_monthly_cost,
-            estimated.monthly_savings AS est_monthly_savings,
-            estimated.confidence AS est_confidence,
-            actual.cost_30d AS actual_cost_30d,
-            actual.attribution.method AS attribution_method,
-            tags,
-            source.source_ref AS source_ref
-        FROM findings_all
-        WHERE tenant_id = ?
-        ORDER BY run_ts DESC;
-        """
-        cur = self.con.execute(sql, [self._files, self.cfg.tenant_id])
-        cols = [d[0] for d in cur.description]
-
-        out_dir = Path(self.cfg.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / "findings_full.json"
-
-        with path.open("w", encoding="utf-8") as f:
-            f.write("[\n")
-            first = True
-            while True:
-                rows = cur.fetchmany(10_000)
-                if not rows:
-                    break
-                batch = _rows_to_jsonable(cols, rows)
-                for rec in batch:
-                    if not first:
-                        f.write(",\n")
-                    json.dump(rec, f, ensure_ascii=False, default=_json_default)
-                    first = False
-            f.write("\n]\n")
-        print(f"[OK] wrote {path}")
 
     def export_summary(self) -> None:
         sql = """
@@ -421,8 +353,6 @@ class FinOpsJsonExporter:
 def run_export(cfg: ExportConfig) -> None:
     exporter = FinOpsJsonExporter(cfg)
     try:
-        if cfg.export_full:
-            exporter.export_findings_full()
         exporter.export_findings()
         exporter.export_summary()
         exporter.export_top_savings()

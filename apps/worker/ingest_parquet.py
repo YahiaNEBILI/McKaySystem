@@ -79,6 +79,14 @@ def _parse_dt(value: Any) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _manifest_run_ts(manifest_run_ts: str) -> datetime:
+    """Parse and validate run_ts from manifest (required, deterministic)."""
+    run_ts = _parse_dt(manifest_run_ts)
+    if run_ts is None:
+        raise SystemExit(f"Invalid run_ts in manifest: {manifest_run_ts!r}")
+    return run_ts
+
+
 def _json_default(obj: Any) -> Any:
     """JSON serializer for datetime/Decimal values."""
     if isinstance(obj, (datetime, date)):
@@ -509,7 +517,7 @@ def ingest_from_manifest(
             parquet_batch_size=parquet_batch_size,
         )
 
-    run_ts = _parse_dt(manifest.run_ts) or datetime.now(timezone.utc)
+    run_ts = _manifest_run_ts(manifest.run_ts)
 
     existing = api.fetch_one(
         "SELECT status FROM runs WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
@@ -795,7 +803,7 @@ def _ingest_with_copy(
     parquet_batch_size: int,
 ) -> IngestStats:
     """Ingest using COPY into temp tables for scale."""
-    run_ts = _parse_dt(manifest.run_ts) or datetime.now(timezone.utc)
+    run_ts = _manifest_run_ts(manifest.run_ts)
 
     parquet_files = _list_parquet_files_for_paths(dataset_paths)
     if not parquet_files:

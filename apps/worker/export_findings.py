@@ -16,13 +16,12 @@ Notes
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 
 from infra.pipeline_paths import PipelinePaths
 from pipeline.export_json import ExportConfig, run_export
-import json
-
 from pipeline.run_manifest import find_manifest, load_manifest
 
 
@@ -42,11 +41,6 @@ def main() -> None:
         "--tenant-id",
         default=None,
         help="Tenant id to filter the export (or set TENANT_ID).",
-    )
-    parser.add_argument(
-        "--no-full",
-        action="store_true",
-        help="Skip findings_full.json export (full, unbounded).",
     )
     args = parser.parse_args()
 
@@ -87,7 +81,6 @@ def main() -> None:
         findings_globs=globs,
         tenant_id=tenant_id,
         out_dir=out_dir,
-        export_full=not args.no_full,
     )
     run_export(cfg)
 

@@ -213,6 +213,44 @@ def test_ingest_parquet_merges_raw_and_correlated_from_manifest(tmp_path: Path) 
     assert latest_count == 3
 
 
+def test_ingest_parquet_rejects_invalid_manifest_run_ts(tmp_path: Path) -> None:
+    base_dir = tmp_path / "finops_findings"
+    wire = build_ids_and_validate(_wire_record(), issue_key={"policy": "bad-ts"})
+
+    writer = FindingsParquetWriter(
+        ParquetWriterConfig(
+            base_dir=str(base_dir),
+            drop_invalid_on_cast=False,
+            max_rows_per_file=10,
+            max_buffered_rows=10,
+        )
+    )
+    writer.extend([wire])
+    writer.close()
+
+    manifest = RunManifest(
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-1",
+        run_ts="not-an-iso-timestamp",
+        engine_name="finopsanalyzer",
+        engine_version="0.1.0",
+        rulepack_version="0.1.0",
+        schema_version=1,
+        out_raw=str(base_dir),
+    )
+    manifest_path = write_manifest(base_dir, manifest)
+
+    fake = _FakeDb()
+    with pytest.raises(SystemExit, match="Invalid run_ts in manifest"):
+        ingest_from_manifest(
+            manifest_path,
+            db_api=DbApi(execute=fake.execute, execute_many=fake.execute_many, fetch_one=fake.fetch_one),
+            batch_size=1,
+            parquet_batch_size=1,
+        )
+
+
 def test_ingest_parquet_copy_integration(tmp_path: Path) -> None:
     if not os.getenv("DB_URL") or not os.getenv("RUN_DB_TESTS"):
         pytest.skip("Set DB_URL and RUN_DB_TESTS=1 to enable integration test.")
