@@ -145,6 +145,74 @@ def test_ingest_parquet_from_manifest(tmp_path: Path) -> None:
     assert latest_count == 2
 
 
+def test_ingest_parquet_merges_raw_and_correlated_from_manifest(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "finops_findings_raw"
+    corr_dir = tmp_path / "finops_findings_correlated"
+
+    raw1 = build_ids_and_validate(_wire_record(), issue_key={"policy": "raw-1"})
+    raw2 = build_ids_and_validate(_wire_record(), issue_key={"policy": "raw-2"})
+
+    corr_rec = _wire_record()
+    corr_rec["check_id"] = "aws.correlation.cost.meta"
+    corr_rec["title"] = "Correlated optimization finding"
+    corr = build_ids_and_validate(corr_rec, issue_key={"policy": "corr-1"})
+
+    raw_writer = FindingsParquetWriter(
+        ParquetWriterConfig(
+            base_dir=str(raw_dir),
+            drop_invalid_on_cast=False,
+            max_rows_per_file=10,
+            max_buffered_rows=10,
+        )
+    )
+    raw_writer.extend([raw1, raw2])
+    raw_writer.close()
+
+    corr_writer = FindingsParquetWriter(
+        ParquetWriterConfig(
+            base_dir=str(corr_dir),
+            drop_invalid_on_cast=False,
+            max_rows_per_file=10,
+            max_buffered_rows=10,
+        )
+    )
+    corr_writer.extend([corr])
+    corr_writer.close()
+
+    manifest = RunManifest(
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-1",
+        run_ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        engine_name="finopsanalyzer",
+        engine_version="0.1.0",
+        rulepack_version="0.1.0",
+        schema_version=1,
+        out_raw=str(raw_dir),
+        out_correlated=str(corr_dir),
+    )
+    manifest_path = write_manifest(raw_dir, manifest)
+
+    fake = _FakeDb()
+    stats = ingest_from_manifest(
+        manifest_path,
+        db_api=DbApi(execute=fake.execute, execute_many=fake.execute_many, fetch_one=fake.fetch_one),
+        batch_size=1,
+        parquet_batch_size=1,
+    )
+
+    presence_count = sum(len(rows) for sql, rows in fake.execute_many_calls if "finding_presence" in sql)
+    latest_count = sum(len(rows) for sql, rows in fake.execute_many_calls if "finding_latest" in sql)
+
+    assert stats.dataset_used == "raw+correlated"
+    assert stats.raw_present is True
+    assert stats.correlated_present is True
+    assert stats.presence_rows == 3
+    assert stats.latest_rows == 3
+    assert presence_count == 3
+    assert latest_count == 3
+
+
 def test_ingest_parquet_copy_integration(tmp_path: Path) -> None:
     if not os.getenv("DB_URL") or not os.getenv("RUN_DB_TESTS"):
         pytest.skip("Set DB_URL and RUN_DB_TESTS=1 to enable integration test.")

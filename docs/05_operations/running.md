@@ -28,6 +28,9 @@ See:
 
 - `python -m apps.worker.export_findings` writes `findings.json` (UI) and optionally `findings_full.json` (legacy/diagnostic).
 - `python -m apps.worker.ingest_parquet` ingests directly from Parquet using `run_manifest.json` (preferred path).
+- Ingest selection rule:
+  - use `out_enriched` when present
+  - otherwise ingest the union of `out_raw` + `out_correlated` when both exist
 - If you override `--out`, correlated/enriched defaults are derived next to that directory unless
   `--correlation-out` is provided.
 

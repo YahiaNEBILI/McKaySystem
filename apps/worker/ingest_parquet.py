@@ -258,16 +258,46 @@ def _copy_rows(cur, table: str, columns: Sequence[str], rows: List[Sequence[Any]
     return len(rows)
 
 
-def _dataset_candidates(manifest) -> List[tuple[str, str]]:
-    """Return candidate dataset paths in priority order."""
-    candidates: List[tuple[str, str]] = []
+def _selected_dataset_paths(manifest) -> tuple[List[str], str]:
+    """Resolve dataset paths to ingest.
+
+    Rules:
+    - If enriched exists, ingest enriched only (already includes merged findings).
+    - Otherwise ingest raw and correlated together when available.
+    """
+    if manifest.out_enriched and _glob_has_files(manifest.out_enriched):
+        return [manifest.out_enriched], "enriched"
+
+    selected: List[str] = []
+    labels: List[str] = []
+    if manifest.out_raw and _glob_has_files(manifest.out_raw):
+        selected.append(manifest.out_raw)
+        labels.append("raw")
+    if manifest.out_correlated and _glob_has_files(manifest.out_correlated):
+        selected.append(manifest.out_correlated)
+        labels.append("correlated")
+
+    if selected:
+        return selected, "+".join(labels)
+
+    # Fall back to configured paths for a clearer error message upstream.
+    fallback: List[str] = []
     if manifest.out_enriched:
-        candidates.append((manifest.out_enriched, "enriched"))
-    if manifest.out_correlated:
-        candidates.append((manifest.out_correlated, "correlated"))
+        fallback.append(manifest.out_enriched)
     if manifest.out_raw:
-        candidates.append((manifest.out_raw, "raw"))
-    return candidates
+        fallback.append(manifest.out_raw)
+    if manifest.out_correlated:
+        fallback.append(manifest.out_correlated)
+    return fallback, "none"
+
+
+def _list_parquet_files_for_paths(paths: Sequence[str]) -> List[Path]:
+    """List parquet files across multiple dataset roots."""
+    files: List[Path] = []
+    for path in paths:
+        files.extend(_list_parquet_files(path))
+    # Deterministic and de-duplicated
+    return sorted({p.resolve() for p in files})
 
 
 @dataclass(frozen=True)
@@ -440,22 +470,11 @@ def ingest_from_manifest(
     if env_ws and env_ws != manifest.workspace:
         raise SystemExit(f"WORKSPACE mismatch: env={env_ws!r} manifest={manifest.workspace!r}")
 
-    # Determine which dataset to ingest (prefer enriched -> correlated -> raw).
-    dataset_dir = ""
-    dataset_label = ""
-    for path, label in _dataset_candidates(manifest):
-        if path and _glob_has_files(path):
-            dataset_dir = path
-            dataset_label = label
-            break
-    if not dataset_dir:
-        # If no files found, but paths exist, pick the first present path for a clearer error.
-        for path, label in _dataset_candidates(manifest):
-            if path:
-                dataset_dir = path
-                dataset_label = label
-                break
+    # Determine datasets to ingest (enriched only, or raw+correlated union).
+    dataset_paths, dataset_label = _selected_dataset_paths(manifest)
+    if not dataset_paths:
         raise SystemExit("No parquet files found for manifest datasets.")
+    dataset_dir = ";".join(dataset_paths)
 
     raw_present = bool(manifest.out_raw and _glob_has_files(manifest.out_raw))
     correlated_present = bool(manifest.out_correlated and _glob_has_files(manifest.out_correlated))
@@ -465,6 +484,7 @@ def ingest_from_manifest(
     if use_copy:
         return _ingest_with_copy(
             manifest=manifest,
+            dataset_paths=dataset_paths,
             dataset_dir=dataset_dir,
             dataset_label=dataset_label,
             raw_present=raw_present,
@@ -525,11 +545,11 @@ def ingest_from_manifest(
         (manifest.tenant_id, manifest.workspace, manifest.run_id),
     )
 
-    parquet_files = _list_parquet_files(dataset_dir)
+    parquet_files = _list_parquet_files_for_paths(dataset_paths)
     if not parquet_files:
         raise SystemExit("No parquet files found for manifest datasets.")
 
-    dataset = ds.dataset(parquet_files, format="parquet", partitioning="hive")
+    dataset = ds.dataset([str(p) for p in parquet_files], format="parquet", partitioning="hive")
     schema_names = set(dataset.schema.names)
 
     filt = None
@@ -546,6 +566,7 @@ def ingest_from_manifest(
 
     presence_rows: List[Sequence[Any]] = []
     latest_rows: List[Sequence[Any]] = []
+    seen_fingerprints: set[str] = set()
     total_presence = 0
     total_latest = 0
 
@@ -621,6 +642,9 @@ def ingest_from_manifest(
             fp = str(rec.get("fingerprint") or "").strip()
             if not fp:
                 continue
+            if fp in seen_fingerprints:
+                continue
+            seen_fingerprints.add(fp)
 
             check_id, service, severity, title, savings_f, region, account_id, category, group_key = (
                 _guess_fields_from_record(rec)
@@ -717,6 +741,7 @@ def ingest_from_manifest(
 def _ingest_with_copy(
     *,
     manifest,
+    dataset_paths: Sequence[str],
     dataset_dir: str,
     dataset_label: str,
     raw_present: bool,
@@ -728,7 +753,7 @@ def _ingest_with_copy(
     """Ingest using COPY into temp tables for scale."""
     run_ts = _parse_dt(manifest.run_ts) or datetime.now(timezone.utc)
 
-    parquet_files = _list_parquet_files(dataset_dir)
+    parquet_files = _list_parquet_files_for_paths(dataset_paths)
     if not parquet_files:
         raise SystemExit("No parquet files found for manifest datasets.")
 
@@ -846,6 +871,7 @@ def _ingest_with_copy(
 
                 presence_rows: List[Sequence[Any]] = []
                 latest_rows: List[Sequence[Any]] = []
+                seen_fingerprints: set[str] = set()
 
                 def _flush_presence_copy() -> None:
                     nonlocal total_presence
@@ -877,6 +903,9 @@ def _ingest_with_copy(
                         fp = str(rec.get("fingerprint") or "").strip()
                         if not fp:
                             continue
+                        if fp in seen_fingerprints:
+                            continue
+                        seen_fingerprints.add(fp)
 
                         check_id, service, severity, title, savings_f, region, account_id, category, group_key = (
                             _guess_fields_from_record(rec)
