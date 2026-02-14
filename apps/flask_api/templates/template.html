@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FinOps Proto</title>
+
+    <!-- Plotly (CDN) -->
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+
+    <style>
+      :root{
+        --bg: #0b1220;
+        --panel: rgba(255,255,255,.06);
+        --panel2: rgba(255,255,255,.09);
+        --text: rgba(255,255,255,.92);
+        --muted: rgba(255,255,255,.66);
+        --border: rgba(255,255,255,.10);
+        --shadow: 0 20px 50px rgba(0,0,0,.35);
+        --radius: 18px;
+        --accent1: rgba(99,102,241,.95);
+        --accent2: rgba(16,185,129,.85);
+      }
+
+      /* Light mode overrides */
+      html[data-theme="light"]{
+        --bg: #f6f7fb;
+        --panel: rgba(0,0,0,.04);
+        --panel2: rgba(0,0,0,.06);
+        --text: rgba(0,0,0,.86);
+        --muted: rgba(0,0,0,.56);
+        --border: rgba(0,0,0,.08);
+        --shadow: 0 18px 45px rgba(0,0,0,.10);
+      }
+
+      *{ box-sizing:border-box; }
+      body{
+        margin:0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+        background:
+          radial-gradient(1200px 700px at 15% 10%, rgba(99,102,241,.18), transparent 55%),
+          radial-gradient(900px 600px at 90% 5%, rgba(16,185,129,.14), transparent 55%),
+          radial-gradient(1000px 700px at 60% 100%, rgba(59,130,246,.12), transparent 55%),
+          var(--bg);
+        color: var(--text);
+      }
+
+      .wrap{ max-width: 1180px; margin: 0 auto; padding: 22px 16px 40px; }
+
+      header{
+        display:flex; align-items:flex-start; justify-content:space-between;
+        gap:12px; margin-bottom: 14px;
+      }
+
+      h1{ margin:0; font-size: 22px; letter-spacing:.2px; }
+      .sub{ color: var(--muted); font-size: 13px; line-height:1.4; margin-top:6px; }
+
+      .topRight{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+      .chip{
+        border: 1px solid var(--border);
+        background: var(--panel);
+        padding: 8px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        color: var(--muted);
+        backdrop-filter: blur(8px);
+      }
+
+      .btn{
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, var(--panel2), var(--panel));
+        color: var(--text);
+        padding: 8px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        cursor:pointer;
+      }
+      .btn:hover{ filter: brightness(1.05); }
+      .btn:active{ transform: translateY(1px); }
+
+      .grid{ display:grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+
+      .card{
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, var(--panel2), var(--panel));
+        border-radius: var(--radius);
+        padding: 14px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(10px);
+        min-width: 0;
+      }
+
+      .card h3{
+        margin:0 0 10px 0;
+        font-size: 14px;
+        color: var(--text);
+        font-weight: 650;
+      }
+
+      .kpi{ grid-column: span 4; min-height: 110px; display:flex; flex-direction:column; justify-content:space-between; }
+      .kpi .label{ color: var(--muted); font-size: 13px; }
+      .kpi .value{ font-size: 30px; font-weight: 750; letter-spacing:.2px; }
+      .kpi .hint{ color: var(--muted); font-size: 12px; }
+
+      .filters{ grid-column: span 12; }
+      .filtersRow{
+        display:grid;
+        grid-template-columns: 1.3fr 1fr 1fr 1fr 1fr 1fr 1fr auto;
+        gap:10px;
+        align-items:end;
+      }
+      .field label{ display:block; color: var(--muted); font-size: 12px; margin-bottom:6px; }
+      .field input, .field select{
+        width:100%;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,.04);
+        color: var(--text);
+        padding: 9px 10px;
+        border-radius: 12px;
+        outline: none;
+      }
+      html[data-theme="light"] .field input, html[data-theme="light"] .field select{ background: rgba(0,0,0,.03); }
+      .field input::placeholder{ color: rgba(255,255,255,.45); }
+      html[data-theme="light"] .field input::placeholder{ color: rgba(0,0,0,.35); }
+
+      .charts{ grid-column: span 8; }
+      .drivers{ grid-column: span 4; }
+      .drivers .row{
+        display:flex; justify-content:space-between; align-items:center;
+        padding: 10px 10px;
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,.06);
+        background: rgba(255,255,255,.03);
+        margin-bottom: 8px;
+      }
+      html[data-theme="light"] .drivers .row{
+        border-color: rgba(0,0,0,.06);
+        background: rgba(0,0,0,.02);
+      }
+
+      .barwrap{
+        height: 8px; border-radius: 999px;
+        background: rgba(255,255,255,.06);
+        border: 1px solid rgba(255,255,255,.08);
+        overflow:hidden;
+      }
+      html[data-theme="light"] .barwrap{
+        background: rgba(0,0,0,.04);
+        border-color: rgba(0,0,0,.06);
+      }
+      .bar{
+        height: 100%; width: 0%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent1), var(--accent2));
+      }
+
+      .recs{ grid-column: span 12; }
+      table{ width:100%; border-collapse: collapse; overflow:hidden; border-radius: 14px; }
+      thead th{
+        text-align:left; font-size: 12px; color: var(--muted);
+        font-weight: 650; padding: 10px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      tbody td{
+        padding: 10px 10px;
+        border-bottom: 1px solid rgba(255,255,255,.06);
+        font-size: 13px;
+        vertical-align: top;
+      }
+      html[data-theme="light"] tbody td{ border-bottom-color: rgba(0,0,0,.06); }
+      tbody tr:hover{ background: rgba(255,255,255,.035); }
+      html[data-theme="light"] tbody tr:hover{ background: rgba(0,0,0,.03); }
+
+      .badge{
+        display:inline-flex; align-items:center; gap:6px;
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,.05);
+        color: var(--text);
+        white-space:nowrap;
+      }
+      html[data-theme="light"] .badge{ background: rgba(0,0,0,.03); }
+      .dot{ width:8px; height:8px; border-radius:999px; background: rgba(255,255,255,.35); }
+      .prio-high .dot{ background: #fb7185; }
+      .prio-medium .dot{ background: #fbbf24; }
+      .prio-low .dot{ background: #34d399; }
+
+      .footer{
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 12px;
+        display:flex;
+        justify-content:space-between;
+        gap:10px;
+        flex-wrap:wrap;
+      }
+
+      @media (max-width: 980px){
+        header{ flex-direction:column; }
+        .topRight{ justify-content:flex-start; }
+        .kpi{ grid-column: span 12; }
+        .charts{ grid-column: span 12; }
+        .drivers{ grid-column: span 12; }
+        .filtersRow{ grid-template-columns: 1fr 1fr; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="wrap">
+      <header>
+        <div>
+          <h1>FinOps Prototype</h1>
+          <div class="sub" id="meta">Chargement…</div>
+        </div>
+        <div class="topRight">
+          <div class="chip" id="chip-period">Période: —</div>
+          <div class="chip" id="chip-currency">Devise: —</div>
+          <div class="chip" id="chip-source">Source: —</div>
+          <button class="btn" id="themeBtn" title="Basculer le thème">🌙 / ☀️</button>
+          <button class="btn" id="refreshBtn" title="Recharger les données">↻ Refresh</button>
+        </div>
+      </header>
+
+      <section class="grid">
+        <div class="card kpi">
+          <div class="label">Coût total (MTD)</div>
+          <div class="value" id="kpi-total">—</div>
+          <div class="hint" id="kpi-total-hint">—</div>
+        </div>
+
+        <div class="card kpi">
+          <div class="label">Savings MTD</div>
+          <div class="value" id="kpi-savings">—</div>
+          <div class="hint">Gains potentiels / réalisés</div>
+        </div>
+
+        <div class="card kpi">
+          <div class="label">Waste estimé</div>
+          <div class="value" id="kpi-waste">—</div>
+          <div class="hint">Estimation (heuristiques)</div>
+        </div>
+
+        <div class="card filters">
+          <h3>Filtres & segmentation</h3>
+          <div class="filtersRow">
+            <div class="field">
+              <label>Recherche</label>
+              <input id="q" placeholder="ex: snapshots, rightsizing, t3…" />
+            </div>
+
+            <div class="field">
+              <label>Service</label>
+              <select id="service"><option value="">Tous</option></select>
+            </div>
+
+            <div class="field">
+              <label>Priority</label>
+              <select id="priority"><option value="">Toutes</option></select>
+            </div>
+
+            <div class="field">
+              <label>Account</label>
+              <select id="account_id"><option value="">Tous</option></select>
+            </div>
+
+            <div class="field">
+              <label>Environment</label>
+              <select id="environment"><option value="">Tous</option></select>
+            </div>
+
+            <div class="field">
+              <label>Cost center</label>
+              <select id="cost_center"><option value="">Tous</option></select>
+            </div>
+
+            <div class="field">
+              <label>Group by</label>
+              <select id="group_by">
+                <option value="service">service</option>
+                <option value="account_id">account</option>
+                <option value="environment">environment</option>
+                <option value="cost_center">cost_center</option>
+              </select>
+            </div>
+
+            <div style="display:flex; gap:10px; align-items:end;">
+              <button class="btn" id="applyBtn">Appliquer</button>
+              <button class="btn" id="resetBtn">Reset</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card charts">
+          <h3>Charts</h3>
+          <div id="chart-cost" style="height:280px;"></div>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top:12px;">
+            <div id="chart-drivers" style="height:260px;"></div>
+            <div id="chart-grouped" style="height:260px;"></div>
+          </div>
+        </div>
+
+        <div class="card drivers">
+          <h3 id="drivers-title">Top drivers</h3>
+          <div id="drivers"></div>
+        </div>
+
+        <div class="card recs">
+          <h3>Recommandations</h3>
+          <table>
+            <thead>
+              <tr>
+                <th style="width:55%">Titre</th>
+                <th>Service</th>
+                <th>Impact / mois</th>
+                <th>Priorité</th>
+                <th>Account</th>
+                <th>Env</th>
+                <th>Cost center</th>
+              </tr>
+            </thead>
+            <tbody id="recs"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="footer">
+        <div>API: <span class="chip" style="padding:2px 8px">/api/dashboard/latest</span></div>
+        <div id="last-refresh">—</div>
+      </div>
+    </div>
+
+    <script>
+      // ---------- Theme ----------
+      function getTheme(){
+        return localStorage.getItem("theme") || "dark";
+      }
+      function setTheme(theme){
+        document.documentElement.setAttribute("data-theme", theme);
+        localStorage.setItem("theme", theme);
+      }
+      function toggleTheme(){
+        const t = document.documentElement.getAttribute("data-theme") || "dark";
+        setTheme(t === "dark" ? "light" : "dark");
+      }
+
+      // ---------- Helpers ----------
+      function safeStr(x){ return (x === null || x === undefined || x === "") ? "—" : String(x); }
+
+      function money(x, currency = "USD") {
+        if (typeof x !== "number" || Number.isNaN(x)) return "—";
+        return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(x);
+      }
+
+      function qsFromUI(){
+        const params = new URLSearchParams();
+        // Tenant/workspace: taken from ?tenant_id=...&workspace=... if present,
+        // otherwise from localStorage, otherwise "default".
+        const urlParams = new URLSearchParams(window.location.search);
+        const tenant = (urlParams.get("tenant_id") || localStorage.getItem("tenant_id") || "default").trim();
+        const ws = (urlParams.get("workspace") || localStorage.getItem("workspace") || "default").trim();
+
+        if (tenant) {
+          params.set("tenant_id", tenant);
+          localStorage.setItem("tenant_id", tenant);
+        }
+        if (ws) {
+          params.set("workspace", ws);
+          localStorage.setItem("workspace", ws);
+        }
+
+        const fields = ["service","priority","account_id","environment","cost_center","q","group_by"];
+        fields.forEach((id) => {
+          const el = document.getElementById(id);
+          const val = (el && el.value) ? el.value.trim() : "";
+          if (val) params.set(id, val);
+        });
+        return params.toString();
+      }
+
+      function setSelectOptions(selectId, values){
+        const sel = document.getElementById(selectId);
+        if (!sel) return;
+        const current = sel.value;
+        // keep first option (Tous/Toutes)
+        while (sel.options.length > 1) sel.remove(1);
+        (values || []).forEach(v => {
+          const opt = document.createElement("option");
+          opt.value = v;
+          opt.textContent = v;
+          sel.appendChild(opt);
+        });
+        // try restore
+        sel.value = current;
+      }
+
+      function applyActiveFilters(active){
+        if (!active) return;
+        ["service","priority","account_id","environment","cost_center","q","group_by"].forEach((k) => {
+          const el = document.getElementById(k);
+          if (el && active[k] !== undefined && active[k] !== null) el.value = active[k];
+        });
+      }
+
+      // ---------- Plotly layout ----------
+      function plotlyLayoutBase(title){
+        const theme = document.documentElement.getAttribute("data-theme") || "dark";
+        const dark = theme === "dark";
+        return {
+          title: { text: title, font: { size: 12 } },
+          margin: { l: 45, r: 15, t: 35, b: 35 },
+          paper_bgcolor: "rgba(0,0,0,0)",
+          plot_bgcolor: "rgba(0,0,0,0)",
+          font: { color: dark ? "rgba(255,255,255,.85)" : "rgba(0,0,0,.78)" },
+          xaxis: { gridcolor: dark ? "rgba(255,255,255,.08)" : "rgba(0,0,0,.08)", zerolinecolor: "rgba(0,0,0,0)" },
+          yaxis: { gridcolor: dark ? "rgba(255,255,255,.08)" : "rgba(0,0,0,.08)", zerolinecolor: "rgba(0,0,0,0)" },
+          showlegend: false
+        };
+      }
+
+      function renderCharts(data){
+        const meta = data.meta || {};
+        const currency = meta.currency || "USD";
+        const mode = data.top_drivers_mode || "impact";
+
+        // 1) Cost timeseries
+        const ts = Array.isArray(data.timeseries) ? data.timeseries : [];
+        const x = ts.map(p => p.date);
+        const y = ts.map(p => Number(p.cost_usd) || 0);
+        const traceCost = {
+          type: "scatter",
+          mode: "lines+markers",
+          x, y,
+          hovertemplate: "%{x}<br>%{y:.2f} " + currency + "<extra></extra>"
+        };
+        Plotly.newPlot("chart-cost", [traceCost], {
+          ...plotlyLayoutBase("Cost over time"),
+          yaxis: { ...plotlyLayoutBase("").yaxis, tickprefix: "", ticksuffix: " " + currency }
+        }, {displayModeBar: false, responsive: true});
+
+        // 2) Drivers donut
+        const drivers = Array.isArray(data.top_drivers) ? data.top_drivers : [];
+        const dLabels = drivers.map(d => d.service);
+        const dValues = drivers.map(d => Number(d.cost_usd) || 0);
+
+        const donutTitle = (mode === "count")
+          ? "Top drivers (by findings count)"
+          : "Top drivers (by estimated impact)";
+
+        const suffix = (mode === "count") ? " findings" : (" " + currency);
+        const traceDonut = {
+          type: "pie",
+          labels: dLabels,
+          values: dValues,
+          hole: 0.55,
+          hovertemplate: "%{label}<br>%{value:.2f}" + suffix + "<extra></extra>"
+        };
+        Plotly.newPlot("chart-drivers", [traceDonut], {
+          ...plotlyLayoutBase(donutTitle),
+          margin: { l: 10, r: 10, t: 35, b: 10 },
+          showlegend: true,
+          legend: { font: { size: 10 } }
+        }, {displayModeBar: false, responsive: true});
+
+        // 3) Grouped recommendations (bar)
+        const grouped = Array.isArray(data.grouped_recommendations) ? data.grouped_recommendations : [];
+        const gX = grouped.map(g => g.key);
+        const gY = grouped.map(g => Number(g.impact_usd_month) || 0);
+        const traceGrouped = {
+          type: "bar",
+          x: gX,
+          y: gY,
+          hovertemplate: "%{x}<br>%{y:.2f} " + currency + "/mois<extra></extra>"
+        };
+        Plotly.newPlot("chart-grouped", [traceGrouped], {
+          ...plotlyLayoutBase("Recommendations impact (group_by)"),
+          xaxis: { ...plotlyLayoutBase("").xaxis, tickangle: -20 },
+          yaxis: { ...plotlyLayoutBase("").yaxis, ticksuffix: " " + currency }
+        }, {displayModeBar: false, responsive: true});
+      }
+
+      function renderDrivers(data){
+        const meta = data.meta || {};
+        const currency = meta.currency || "USD";
+        const mode = data.top_drivers_mode || "impact";
+
+        const title = document.getElementById("drivers-title");
+        if (title) {
+          title.textContent = (mode === "count") ? "Top drivers (by findings)" : "Top drivers (estimated impact)";
+        }
+
+        const driversRoot = document.getElementById("drivers");
+        driversRoot.innerHTML = "";
+        const drivers = Array.isArray(data.top_drivers) ? data.top_drivers : [];
+        const maxCost = drivers.reduce((m, d) => Math.max(m, Number(d.cost_usd) || 0), 0) || 1;
+
+        drivers.forEach((d) => {
+          const cost = Number(d.cost_usd) || 0;
+          const pct = (cost / maxCost) * 100;
+
+          const rightLabel = (mode === "count")
+            ? (String(cost) + " findings")
+            : money(cost, currency);
+
+          const row = document.createElement("div");
+          row.className = "row";
+          row.innerHTML = `
+            <div style="min-width:0; flex:1;">
+              <div style="display:flex; gap:10px; justify-content:space-between; align-items:baseline;">
+                <div style="font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${safeStr(d.service)}</div>
+                <div style="color: var(--muted); font-size: 12px;">${(d.percentage || d.percentage === 0) ? safeStr(d.percentage) + "%" : ""}</div>
+              </div>
+              <div class="barwrap" style="margin-top:6px;"><div class="bar" style="width:${pct.toFixed(1)}%"></div></div>
+            </div>
+            <div style="text-align:right; font-variant-numeric: tabular-nums; font-size:13px;">
+              ${rightLabel}
+            </div>
+          `;
+          driversRoot.appendChild(row);
+        });
+      }
+
+      function renderRecs(data){
+        const meta = data.meta || {};
+        const currency = meta.currency || "USD";
+        const recs = Array.isArray(data.recommendations) ? data.recommendations : [];
+        const recsBody = document.getElementById("recs");
+        recsBody.innerHTML = "";
+
+        recs.forEach((r) => {
+          const prio = (r.priority || "n/a").toLowerCase();
+          const prioClass = prio === "high" ? "prio-high" : prio === "medium" ? "prio-medium" : "prio-low";
+
+          const conf = (r.confidence !== undefined && r.confidence !== null && r.confidence !== "")
+            ? ` • Conf: ${safeStr(r.confidence)}%`
+            : "";
+
+          const region = (r.region ? ` • ${safeStr(r.region)}` : "");
+          const resource = (r.resource_id ? ` • ${safeStr(r.resource_id)}` : "");
+
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>
+              <div style="font-weight:650">${safeStr(r.title)}</div>
+              <div style="color: var(--muted); font-size: 12px; margin-top: 3px;">
+                ${safeStr(r.description || "")}
+                <div style="margin-top:4px; opacity:.95">
+                  ${safeStr(r.check_id || "")}${region}${resource}${conf}
+                </div>
+              </div>
+            </td>
+            <td>${safeStr(r.service)}</td>
+            <td style="white-space:nowrap">${money(Number(r.impact_usd_month) || 0, currency)}</td>
+            <td>
+              <span class="badge ${prioClass}">
+                <span class="dot"></span>
+                ${safeStr(r.priority || "n/a")}
+              </span>
+            </td>
+            <td>${safeStr(r.account_id)}</td>
+            <td>${safeStr(r.environment)}</td>
+            <td>${safeStr(r.cost_center)}</td>
+          `;
+          recsBody.appendChild(tr);
+        });
+      }
+
+      function renderKpis(data){
+        const meta = data.meta || {};
+        const currency = meta.currency || "USD";
+        const k = data.kpis || {};
+
+        document.getElementById("kpi-total").textContent = money(Number(k.total_cost_usd), currency);
+        document.getElementById("kpi-savings").textContent = money(Number(k.month_to_date_savings_usd), currency);
+        document.getElementById("kpi-waste").textContent = money(Number(k.waste_estimate_usd), currency);
+
+        // Make the hint useful even if total_cost_usd is 0 (no CUR yet)
+        const open = Number(k.open_findings || 0);
+        const raw = Number(k.raw_findings || 0);
+        const corr = Number(k.correlated_findings || 0);
+        const cov = (k.estimate_coverage_pct !== undefined && k.estimate_coverage_pct !== null) ? String(k.estimate_coverage_pct) : "—";
+
+        const f = k.forecast_end_of_month_usd;
+        const forecastTxt = (typeof f === "number") ? ("Forecast EOM: " + money(f, currency)) : null;
+
+        const hintParts = [];
+        if (forecastTxt) hintParts.push(forecastTxt);
+        if (open || raw || corr) hintParts.push(`Findings: ${open} (raw ${raw} + corr ${corr})`);
+        hintParts.push(`Estimate coverage: ${cov}%`);
+
+        document.getElementById("kpi-total-hint").textContent = hintParts.join(" • ");
+      }
+
+      function renderMeta(data){
+        const meta = data.meta || {};
+        document.getElementById("meta").textContent =
+          `Generated at: ${safeStr(meta.generated_at)} • period: ${safeStr(meta.period)} • source: ${safeStr(meta.source)}`;
+
+        document.getElementById("chip-period").textContent = `Période: ${safeStr(meta.period)}`;
+        document.getElementById("chip-currency").textContent = `Devise: ${safeStr(meta.currency || "USD")}`;
+        document.getElementById("chip-source").textContent = `Source: ${safeStr(meta.source)}`;
+
+        document.getElementById("last-refresh").textContent =
+          `Dernier refresh: ${new Date().toLocaleString("fr-FR")}`;
+      }
+
+      function fillOptions(data){
+        const opt = data.options || {};
+        setSelectOptions("service", opt.services || []);
+        setSelectOptions("priority", opt.priorities || []);
+        setSelectOptions("account_id", opt.accounts || []);
+        setSelectOptions("environment", opt.environments || []);
+        setSelectOptions("cost_center", opt.cost_centers || []);
+      }
+
+      async function fetchAndRender(){
+        const query = qsFromUI();
+        const url = "/api/dashboard/latest" + (query ? ("?" + query) : "");
+        const res = await fetch(url, { cache: "no-store" });
+        const data = await res.json();
+
+        // (re)populate options and keep filters consistent
+        fillOptions(data);
+        applyActiveFilters(data.active_filters);
+
+        renderMeta(data);
+        renderKpis(data);
+        renderDrivers(data);
+        renderRecs(data);
+        renderCharts(data);
+      }
+
+      function resetUI(){
+        ["service","priority","account_id","environment","cost_center","q"].forEach((id) => {
+          const el = document.getElementById(id);
+          if (el) el.value = "";
+        });
+        document.getElementById("group_by").value = "service";
+      }
+
+      // --------- init ----------
+      (function init(){
+        setTheme(getTheme());
+
+        document.getElementById("themeBtn").addEventListener("click", () => {
+          toggleTheme();
+          // re-render Plotly with new font/grid colors
+          fetchAndRender().catch(() => {});
+        });
+
+        document.getElementById("refreshBtn").addEventListener("click", () => {
+          fetchAndRender().catch(() => {});
+        });
+
+        document.getElementById("applyBtn").addEventListener("click", () => {
+          fetchAndRender().catch(() => {});
+        });
+
+        document.getElementById("resetBtn").addEventListener("click", () => {
+          resetUI();
+          fetchAndRender().catch(() => {});
+        });
+
+        // auto-apply on Enter in search box
+        document.getElementById("q").addEventListener("keydown", (e) => {
+          if (e.key === "Enter") fetchAndRender().catch(() => {});
+        });
+
+        fetchAndRender().catch((e) => {
+          document.getElementById("meta").textContent = "Erreur: " + e;
+        });
+      })();
+    </script>
+  </body>
+</html>

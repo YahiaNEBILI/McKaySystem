@@ -1,18 +1,14 @@
 # tests/stress/test_nat_gateways_stress.py
 
-import time
 import random
+import time
 import tracemalloc
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from checks.aws.nat_gateways import NatGatewaysChecker, NatGatewaysConfig
-from contracts.finops_checker_pattern import RunContext
-from types import SimpleNamespace
-
-from test_nat_gateways import FakeEC2, FakeCloudWatch, FakePricing, _mk_ctx
-
+from tests.test_nat_gateways import FakeCloudWatch, FakeEC2, FakePricing, _mk_ctx
 
 pytestmark = pytest.mark.stress
 
@@ -64,7 +60,7 @@ def test_stress_2000_nat_gateways(monkeypatch: pytest.MonkeyPatch):
     """
 
     # Fix timestamp for determinism
-    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=UTC)
 
     # Monkeypatch now_utc
     import checks.aws.nat_gateways as mod
@@ -162,7 +158,7 @@ def test_cloudwatch_batching_correctness(monkeypatch: pytest.MonkeyPatch):
     GetMetricData calls.
     """
 
-    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=UTC)
     import checks.aws.nat_gateways as mod
     monkeypatch.setattr(mod, "now_utc", lambda: now)
 
@@ -200,7 +196,7 @@ def test_cloudwatch_batching_correctness(monkeypatch: pytest.MonkeyPatch):
 
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
 
-    findings = list(checker.run(ctx))
+    _ = list(checker.run(ctx))
 
     # Your checker uses batch_size=100 → for 1200 NATs, 12 batches per metric.
     # Each metric_name ("BytesOutToDestination" and "BytesInFromDestination")
@@ -223,7 +219,7 @@ def test_extreme_randomized(monkeypatch: pytest.MonkeyPatch):
     Validates checker stability under unexpected patterns.
     """
 
-    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=UTC)
     import checks.aws.nat_gateways as mod
     monkeypatch.setattr(mod, "now_utc", lambda: now)
 

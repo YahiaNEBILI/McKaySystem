@@ -47,3 +47,46 @@ Or via the CLI:
 mckay migrate
 ```
 
+---
+
+## Monorepo workflows
+
+- Backend/API code lives under `apps/flask_api/` (deployment docs: `deploy/backend/`).
+- Worker/scanner code lives in core engine paths (`checks/`, `pipeline/`, etc.; deployment docs: `deploy/worker/`).
+- Enforce root layout policy with:
+
+```
+python tools/repo/check_layout.py
+```
+
+- In CloudShell, reduce checkout size with:
+
+```
+bash tools/cloudshell/sparse_checkout_worker.sh .
+```
+
+Or bootstrap sparse clone from scratch:
+
+```
+bash tools/cloudshell/bootstrap_sparse_clone.sh <repo-url> <target-dir> worker
+```
+
+## Release tracks (Phase 3)
+
+- Backend release checks:
+
+```
+make ci-backend
+```
+
+- Worker release checks:
+
+```
+make ci-worker
+```
+
+- GitHub Actions workflows:
+  - `.github/workflows/backend-ci.yml`
+  - `.github/workflows/worker-ci.yml`
+  - `.github/workflows/main.yml` (shared guardrails)
+
