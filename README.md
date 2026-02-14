@@ -15,9 +15,9 @@ Authoritative design contracts and deep dives live under `docs/`.
 
 ## Getting started
 
-- New here? Read `introduction.md`.
-- Want the detailed architecture? Start with `docs/architecture/architecture.md`
-  and `docs/architecture/pipeline_overview.md`.
+- New here? Read `docs/00_overview/introduction.md`.
+- Want the detailed architecture? Start with `docs/01_architecture/architecture.md`
+  and `docs/02_pipeline/pipeline_overview.md`.
 
 Quick commands:
 
@@ -28,6 +28,8 @@ python runner.py --tenant acme --workspace prod
 python export_findings.py
 ```
 
+Note: `export_findings.py` writes `webapp_data/findings_full.json` (for ingestion) and `findings.json` (UI preview).
+
 ---
 
 ## Documentation map
@@ -36,7 +38,7 @@ Start here depending on your goal:
 
 - **Architecture & mental model**
   - `docs/01_architecture/architecture.md`
-  - `docs/01_architecture/pipeline_overview.md`
+  - `docs/02_pipeline/pipeline_overview.md`
 
 - **Checker philosophy & contracts**
   - `docs/03_checkers/checker_contract.md`

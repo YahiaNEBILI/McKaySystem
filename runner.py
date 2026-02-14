@@ -47,6 +47,7 @@ import pkgutil
 import sys
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import boto3
@@ -66,6 +67,19 @@ logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _clean_path(value: str) -> str:
+    return str(value or "").strip()
+
+
+def _derive_sibling_dir(raw_out_dir: str, sibling_name: str) -> str:
+    if not raw_out_dir:
+        return ""
+    try:
+        return str(Path(raw_out_dir).parent / sibling_name)
+    except Exception:
+        return ""
 
 
 def _has_parquet(globs_list: Sequence[str]) -> bool:
@@ -390,11 +404,22 @@ def main(argv: Sequence[str]) -> int:
     
     setup_logging(extra_fields={"app": "mckay", "component": "runner"})
 
-    paths = PipelinePaths()
+    raw_arg = _clean_path(args.out)
+    corr_arg = _clean_path(args.correlation_out)
+
+    # If raw output is overridden, derive correlated/enriched defaults alongside it
+    derived_corr = _derive_sibling_dir(raw_arg, "finops_findings_correlated") if raw_arg else ""
+    derived_enriched = _derive_sibling_dir(raw_arg, "finops_findings_enriched") if raw_arg else ""
+
+    paths = PipelinePaths.with_overrides(
+        findings_raw_dir=raw_arg or None,
+        findings_correlated_dir=corr_arg or (derived_corr or None),
+        findings_enriched_dir=derived_enriched or None,
+    )
 
     # Centralized defaults (CLI overrides still win)
-    raw_out_dir = args.out.strip() or str(paths.findings_raw_dir())
-    corr_out_dir = args.correlation_out.strip() or str(paths.findings_correlated_dir())
+    raw_out_dir = str(paths.findings_raw_dir())
+    corr_out_dir = str(paths.findings_correlated_dir())
     enriched_out_dir = str(paths.findings_enriched_dir())
 
     run_ts = _utc_now()

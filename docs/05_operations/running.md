@@ -10,6 +10,7 @@ Last reviewed: 2026-02-01
    - tenant_id, workspace
    - output base directory
    - optional flags to enable/disable correlation and CUR enrichment
+3. (Optional) Use `mckay run-all` to run → export → ingest (if `DB_URL` is set).
 
 ## Outputs (high level)
 
@@ -20,3 +21,12 @@ Last reviewed: 2026-02-01
 See:
 - `02_pipeline/pipeline_overview.md`
 - `04_schemas/finding_schema.md`
+
+---
+
+## Export & ingest safety
+
+- `export_findings.py` writes `findings_full.json` by default (unbounded) plus `findings.json` for UI.
+- `ingest_exported_json.py` refuses to ingest `findings.json` unless `ALLOW_PARTIAL_INGEST=1`.
+- If you override `--out`, correlated/enriched defaults are derived next to that directory unless
+  `--correlation-out` is provided.

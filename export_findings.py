@@ -43,6 +43,11 @@ def main() -> None:
         default=None,
         help="Tenant id to filter the export (or set TENANT_ID).",
     )
+    parser.add_argument(
+        "--no-full",
+        action="store_true",
+        help="Skip findings_full.json export (full, unbounded).",
+    )
     args = parser.parse_args()
 
     paths = PipelinePaths()
@@ -78,7 +83,12 @@ def main() -> None:
     if manifest and manifest.export_dir:
         out_dir = str(manifest.export_dir)
 
-    cfg = ExportConfig(findings_globs=globs, tenant_id=tenant_id, out_dir=out_dir)
+    cfg = ExportConfig(
+        findings_globs=globs,
+        tenant_id=tenant_id,
+        out_dir=out_dir,
+        export_full=not args.no_full,
+    )
     run_export(cfg)
 
     # Copy the manifest alongside webapp JSON so downstream consumers can validate.

@@ -6,7 +6,6 @@ Usage
 mckay run-all --tenant engie --workspace noprod --out data/finops_findings --db-url "postgresql://..."
 mckay run --tenant engie --workspace noprod --out data/finops_findings
 mckay export
-mckay zip
 mckay ingest --db-url "postgresql://..."
 """
 
@@ -179,15 +178,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.set_defaults(func=cmd_ingest)
 
-    sp = sub.add_parser("run-all", help="Run → export → zip → (optional) ingest.")
+    sp = sub.add_parser("run-all", help="Run → export → (optional) ingest.")
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var).")
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.add_argument("--skip-export", action="store_true", help="Skip export step.")
-    sp.add_argument("--skip-zip", action="store_true", help="Skip zip step.")
     sp.add_argument("--skip-ingest", action="store_true", help="Skip ingest step.")
-    sp.add_argument("--webapp-dir", default=None, help="Directory to zip. Default: webapp_data")
-    sp.add_argument("--zip-path", default=None, help="Zip output path. Default: webapp_data.zip")
     sp.set_defaults(func=cmd_run_all)
 
     return p

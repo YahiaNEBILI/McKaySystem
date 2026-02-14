@@ -35,6 +35,23 @@ def _norm(s: Any) -> str:
     return str(s).strip()
 
 
+def _env_bool(name: str) -> bool:
+    v = os.getenv(name)
+    if not v:
+        return False
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return default
+
+
 def _to_float(v: Any) -> Optional[float]:
     """Best-effort numeric parsing for savings/cost fields."""
     if v is None:
@@ -254,6 +271,14 @@ def ingest_latest_export() -> None:
             raise SystemExit(f"WORKSPACE mismatch: env={env_ws!r} manifest={m.workspace!r}")
 
     file_path = _pick_latest_json(export_dir)
+    if file_path.name != "findings_full.json":
+        if not _env_bool("ALLOW_PARTIAL_INGEST"):
+            raise SystemExit(
+                "Refusing to ingest a potentially partial export. "
+                f"Found {file_path.name!r}. Generate findings_full.json via export, "
+                "or set ALLOW_PARTIAL_INGEST=1 to override."
+            )
+        print(f"WARN: ingesting partial export file: {file_path.name}")
     payload = _load_json(file_path)
 
     if m:
@@ -299,6 +324,62 @@ def ingest_latest_export() -> None:
 
     presence_rows: List[Sequence[Any]] = []
     latest_rows: List[Sequence[Any]] = []
+    total_presence = 0
+    total_latest = 0
+    batch_size = _env_int("INGEST_BATCH_SIZE", 2000)
+
+    def _flush_presence() -> None:
+        nonlocal total_presence
+        if not presence_rows:
+            return
+        execute_many(
+            """
+            INSERT INTO finding_presence
+            (tenant_id, workspace, run_id, fingerprint, check_id, service, severity, title,
+            estimated_monthly_savings, region, account_id, detected_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            presence_rows,
+        )
+        total_presence += len(presence_rows)
+        presence_rows.clear()
+
+    def _flush_latest() -> None:
+        nonlocal total_latest
+        if not latest_rows:
+            return
+        execute_many(
+            """
+            INSERT INTO finding_latest
+            (tenant_id, workspace, fingerprint, run_id,
+             check_id, service, severity, title,
+             estimated_monthly_savings, region, account_id,
+             category, group_key,
+             payload, detected_at)
+            VALUES
+            (%s,%s,%s,%s,
+             %s,%s,%s,%s,
+             %s,%s,%s,
+             %s,%s,
+             %s::jsonb,%s)
+            ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
+              run_id = EXCLUDED.run_id,
+              check_id = EXCLUDED.check_id,
+              service = EXCLUDED.service,
+              severity = EXCLUDED.severity,
+              title = EXCLUDED.title,
+              estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
+              region = EXCLUDED.region,
+              account_id = EXCLUDED.account_id,
+              category = EXCLUDED.category,
+              group_key = EXCLUDED.group_key,
+              payload = EXCLUDED.payload,
+              detected_at = EXCLUDED.detected_at
+            """,
+            latest_rows,
+        )
+        total_latest += len(latest_rows)
+        latest_rows.clear()
 
     for it in items:
         if not isinstance(it, dict):
@@ -350,49 +431,13 @@ def ingest_latest_export() -> None:
             )
         )
 
-    if presence_rows:
-        execute_many(
-            """
-            INSERT INTO finding_presence
-            (tenant_id, workspace, run_id, fingerprint, check_id, service, severity, title,
-            estimated_monthly_savings, region, account_id, detected_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """,
-            presence_rows,
-        )
+        if len(presence_rows) >= batch_size:
+            _flush_presence()
+        if len(latest_rows) >= batch_size:
+            _flush_latest()
 
-    # Upsert full payload into finding_latest (one row per fingerprint for latest snapshot)
-    if latest_rows:
-        execute_many(
-            """
-            INSERT INTO finding_latest
-            (tenant_id, workspace, fingerprint, run_id,
-             check_id, service, severity, title,
-             estimated_monthly_savings, region, account_id,
-             category, group_key,
-             payload, detected_at)
-            VALUES
-            (%s,%s,%s,%s,
-             %s,%s,%s,%s,
-             %s,%s,%s,
-             %s,%s,
-             %s::jsonb,%s)
-            ON CONFLICT (tenant_id, workspace, fingerprint) DO UPDATE SET
-              run_id = EXCLUDED.run_id,
-              check_id = EXCLUDED.check_id,
-              service = EXCLUDED.service,
-              severity = EXCLUDED.severity,
-              title = EXCLUDED.title,
-              estimated_monthly_savings = EXCLUDED.estimated_monthly_savings,
-              region = EXCLUDED.region,
-              account_id = EXCLUDED.account_id,
-              category = EXCLUDED.category,
-              group_key = EXCLUDED.group_key,
-              payload = EXCLUDED.payload,
-              detected_at = EXCLUDED.detected_at
-            """,
-            latest_rows,
-        )
+    _flush_presence()
+    _flush_latest()
 
     execute(
         "UPDATE runs SET status='ready', ingested_at=NOW() WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
@@ -400,8 +445,8 @@ def ingest_latest_export() -> None:
     )
 
     print(
-        f"OK: ingested {len(presence_rows)} items from {file_path.name} as run {tenant_id}/{workspace}/{run_id} "
-        f"(presence={len(presence_rows)}, latest={len(latest_rows)})"
+        f"OK: ingested {total_presence} items from {file_path.name} as run {tenant_id}/{workspace}/{run_id} "
+        f"(presence={total_presence}, latest={total_latest})"
     )
 
 
