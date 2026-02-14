@@ -60,6 +60,7 @@ py-modules = [
   "db",
   "export_findings",
   "ingest_exported_json",
+  "ingest_parquet",
   "version",
 ]
 

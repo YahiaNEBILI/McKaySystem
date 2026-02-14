@@ -114,9 +114,9 @@ def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argu
 
 def cmd_ingest(args: argparse.Namespace) -> None:
     root = _repo_root()
-    if not _module_exists("ingest_exported_json") and not (root / "ingest_exported_json.py").exists():
+    if not _module_exists("ingest_parquet") and not (root / "ingest_parquet.py").exists():
         raise SystemExit(
-            "ingest_exported_json module not found. Run from the project directory or ensure ingest_exported_json.py is installed."
+            "ingest_parquet module not found. Run from the project directory or ensure ingest_parquet.py is installed."
         )
 
     db_url = args.db_url or _env_default("DB_URL")
@@ -135,24 +135,38 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     env["TENANT_ID"] = tenant
     env["WORKSPACE"] = workspace
 
-    _run_cmd([_python(), "-m", "ingest_exported_json"], cwd=root, env=env)
+    cmd = [_python(), "-m", "ingest_parquet"]
+    manifest_arg = getattr(args, "manifest", None)
+    if manifest_arg:
+        cmd.extend(["--manifest", str(manifest_arg)])
+    else:
+        out_dir = getattr(args, "out", None)
+        if out_dir:
+            mpath = Path(out_dir) / "run_manifest.json"
+            if mpath.exists():
+                cmd.extend(["--manifest", str(mpath)])
+    _run_cmd(cmd, cwd=root, env=env)
 
 
 def cmd_run_all(args: argparse.Namespace) -> None:
     cmd_run(args)
 
-    if not args.skip_export:
-        cmd_export(args)
-
     if args.skip_ingest:
+        if not args.skip_export:
+            cmd_export(args)
         return
 
     db_url = args.db_url or _env_default("DB_URL")
     if not db_url:
         print("DB_URL not set and --db-url not provided → skipping ingest.")
+        if not args.skip_export:
+            cmd_export(args)
         return
 
     cmd_ingest(args)
+
+    if not args.skip_export:
+        cmd_export(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,13 +186,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory used by runner (or OUT_DIR env var).")
     sp.set_defaults(func=cmd_export)
-
-    sp = sub.add_parser("ingest", help="Ingest exported JSON into DB (calls ingest_exported_json).")
+    sp = sub.add_parser("ingest", help="Ingest parquet datasets into DB (calls ingest_parquet).")
     add_tenant_workspace(sp)
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
+    sp.add_argument("--manifest", default=None, help="Path to run_manifest.json (optional).")
     sp.set_defaults(func=cmd_ingest)
-
-    sp = sub.add_parser("run-all", help="Run → export → (optional) ingest.")
+    sp = sub.add_parser("run-all", help="Run -> ingest -> (optional) export.")
     add_tenant_workspace(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var).")
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
@@ -197,3 +210,6 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

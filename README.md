@@ -28,7 +28,7 @@ python runner.py --tenant acme --workspace prod
 python export_findings.py
 ```
 
-Note: `export_findings.py` writes `webapp_data/findings_full.json` (for ingestion) and `findings.json` (UI preview).
+Note: `export_findings.py` writes `webapp_data/findings.json` for the UI. DB ingestion reads Parquet via `run_manifest.json`.
 
 ---
 
@@ -338,3 +338,4 @@ data/finops_findings_enriched/**/*.parquet
 - Modular pipeline → Iceberg / Trino ready
 
 ---
+
