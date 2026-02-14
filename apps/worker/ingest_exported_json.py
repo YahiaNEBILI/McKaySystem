@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 
-from db import execute, execute_many, fetch_one
+from apps.backend.db import execute, execute_many, fetch_one
 from pipeline.run_manifest import load_manifest, manifest_path
 
 

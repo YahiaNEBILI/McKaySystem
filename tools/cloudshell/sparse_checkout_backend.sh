@@ -15,8 +15,6 @@ git sparse-checkout set \
   README.md \
   pyproject.toml \
   pytest.ini \
-  db.py \
-  db_migrate.py \
   version.py \
   __init__.py
 

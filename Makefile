@@ -25,7 +25,7 @@ api-dev:
 	python -m flask --app apps/flask_api/flask_app.py run --host 0.0.0.0 --port 5000
 
 migrate:
-	python db_migrate.py
+	python -m apps.backend.db_migrate
 
 worker-run:
 	python -m apps.worker.runner --tenant "$(TENANT)" --workspace "$(WORKSPACE)" --out "$(OUT)"

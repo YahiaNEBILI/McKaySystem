@@ -5,6 +5,7 @@ This repository has two deployment units:
 1. Backend API
 Path/docs:
 - `apps/flask_api/`
+- `apps/backend/`
 - `deploy/backend/README.md`
 
 2. Worker runtime (scanner/pipeline)

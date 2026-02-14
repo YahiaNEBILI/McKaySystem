@@ -29,10 +29,10 @@ python -m apps.worker.export_findings
 ```
 
 Note: `python -m apps.worker.export_findings` writes `webapp_data/findings.json` for the UI. DB ingestion reads Parquet via `run_manifest.json`.
-Migrations: run `python db_migrate.py` (or `mckay migrate`) before first ingest.
+Migrations: run `python -m apps.backend.db_migrate` (or `mckay migrate`) before first ingest.
 
 Monorepo separation:
-- Backend/API: `apps/flask_api/` (deployment docs: `deploy/backend/`)
+- Backend/API: `apps/flask_api/` + `apps/backend/` (deployment docs: `deploy/backend/`)
 - Worker/Scanner: `apps/worker/` + engine paths (deployment docs: `deploy/worker/`)
 - Layout guard: `python tools/repo/check_layout.py`
 - Release tracks:

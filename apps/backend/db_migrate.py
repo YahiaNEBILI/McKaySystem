@@ -2,9 +2,9 @@
 Minimal migration runner for the Postgres schema.
 
 Usage:
-  python db_migrate.py
-  python db_migrate.py --dry-run
-  python db_migrate.py --migrations-dir migrations
+  python -m apps.backend.db_migrate
+  python -m apps.backend.db_migrate --dry-run
+  python -m apps.backend.db_migrate --migrations-dir migrations
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, List, Set
 
-from db import db_conn
+from apps.backend.db import db_conn
 
 
 def _ensure_migrations_table(conn) -> None:
@@ -241,7 +241,7 @@ def ensure_schema_current(*, migrations_dir: Path) -> None:
         pending_csv = ", ".join(pending)
         raise RuntimeError(
             f"Database schema is out of date. Pending migrations: {pending_csv}. "
-            "Run `mckay migrate` (or `python db_migrate.py`) before ingest/API startup."
+            "Run `mckay migrate` (or `python -m apps.backend.db_migrate`) before ingest/API startup."
         )
 
 
@@ -285,7 +285,7 @@ def main(argv: List[str] | None = None) -> None:
     )
     parser.add_argument(
         "--migrations-dir",
-        default=str(Path(__file__).parent / "migrations"),
+        default=str(Path(__file__).resolve().parents[2] / "migrations"),
         help="Path to migrations directory (default: ./migrations).",
     )
     args = parser.parse_args(argv)

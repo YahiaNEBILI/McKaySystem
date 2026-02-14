@@ -57,8 +57,6 @@ exclude = ["tests*", "docs*", "data*", "webapp_data*", "build*", "dist*"]
 
 [tool.setuptools]
 py-modules = [
-  "db",
-  "db_migrate",
   "version",
 ]
 

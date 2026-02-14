@@ -142,9 +142,10 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 def cmd_migrate(args: argparse.Namespace) -> None:
     root = _repo_root()
-    if not (root / "db_migrate.py").exists():
+    migrate_module = "apps.backend.db_migrate"
+    if not (root / "apps/backend/db_migrate.py").exists():
         raise SystemExit(
-            "db_migrate module not found. Run from the project directory."
+            f"{migrate_module} module not found. Run from the project directory."
         )
 
     env = None
@@ -152,7 +153,7 @@ def cmd_migrate(args: argparse.Namespace) -> None:
         env = dict(os.environ)
         env["DB_URL"] = args.db_url
 
-    cmd = [_python(), "-m", "db_migrate"]
+    cmd = [_python(), "-m", migrate_module]
     if args.dry_run:
         cmd.append("--dry-run")
     if args.migrations_dir:

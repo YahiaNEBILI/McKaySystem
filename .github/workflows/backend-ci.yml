@@ -4,8 +4,7 @@ on:
   push:
     paths:
       - "apps/flask_api/**"
-      - "db.py"
-      - "db_migrate.py"
+      - "apps/backend/**"
       - "migrations/**"
       - "tests/api/**"
       - "tests/test_db_migrate.py"
@@ -19,8 +18,7 @@ on:
   pull_request:
     paths:
       - "apps/flask_api/**"
-      - "db.py"
-      - "db_migrate.py"
+      - "apps/backend/**"
       - "migrations/**"
       - "tests/api/**"
       - "tests/test_db_migrate.py"

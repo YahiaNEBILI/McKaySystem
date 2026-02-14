@@ -17,8 +17,6 @@ ROOT_ALLOWED = {
     "apps",
     "checks",
     "contracts",
-    "db.py",
-    "db_migrate.py",
     "deploy",
     "docs",
     "infra",

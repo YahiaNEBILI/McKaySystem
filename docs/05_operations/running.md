@@ -38,7 +38,7 @@ See:
 Run migrations before ingesting into a fresh or upgraded DB:
 
 ```
-python db_migrate.py
+python -m apps.backend.db_migrate
 ```
 
 Or via the CLI:
@@ -51,7 +51,7 @@ mckay migrate
 
 ## Monorepo workflows
 
-- Backend/API code lives under `apps/flask_api/` (deployment docs: `deploy/backend/`).
+- Backend/API code lives under `apps/flask_api/` and `apps/backend/` (deployment docs: `deploy/backend/`).
 - Worker/scanner code lives in core engine paths (`checks/`, `pipeline/`, etc.; deployment docs: `deploy/worker/`).
 - Enforce root layout policy with:
 

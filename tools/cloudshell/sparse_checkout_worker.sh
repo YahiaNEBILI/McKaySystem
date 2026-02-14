@@ -7,6 +7,7 @@ cd "$REPO_ROOT"
 git sparse-checkout init --cone
 git sparse-checkout set \
   apps/worker \
+  apps/backend \
   checks \
   contracts \
   docs \
@@ -20,8 +21,6 @@ git sparse-checkout set \
   README.md \
   pyproject.toml \
   pytest.ini \
-  db.py \
-  db_migrate.py \
   version.py \
   __init__.py
 

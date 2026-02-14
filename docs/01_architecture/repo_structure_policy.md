@@ -12,7 +12,9 @@ This policy keeps the monorepo operable while hosting:
 ## Boundaries
 
 ### Backend
-- Owned path: `apps/flask_api/`
+- Owned paths:
+  - `apps/flask_api/`
+  - `apps/backend/`
 - Deployment docs: `deploy/backend/`
 - Must not contain cloud-scanner execution logic.
 
@@ -25,7 +27,6 @@ This policy keeps the monorepo operable while hosting:
 ## Root-Level Rules
 
 Root should only contain:
-- DB and project entrypoints (`db_migrate.py`, `db.py`)
 - project metadata/config (`pyproject.toml`, `pytest.ini`, `README.md`, `LICENSE`)
 - top-level owned directories (`apps/`, `docs/`, `checks/`, `pipeline/`, etc.)
 

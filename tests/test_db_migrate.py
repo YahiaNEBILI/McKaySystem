@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import db_migrate
+from apps.backend import db_migrate
 
 
 def test_split_sql_handles_single_quotes() -> None:

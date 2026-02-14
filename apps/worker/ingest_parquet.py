@@ -21,7 +21,7 @@ from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
 import pyarrow.dataset as ds
 
-from db import db_conn, execute, execute_many, fetch_one
+from apps.backend.db import db_conn, execute, execute_many, fetch_one
 from pipeline.run_manifest import find_manifest, load_manifest
 from version import SCHEMA_VERSION
 
@@ -278,13 +278,13 @@ class DbApi:
 
 
 def _default_db_api() -> DbApi:
-    """Return the default DB API backed by db.py helpers."""
+    """Return the default DB API backed by apps.backend.db helpers."""
     return DbApi(execute=execute, execute_many=execute_many, fetch_one=fetch_one)
 
 
 def _ensure_db_schema_current() -> None:
     """Fail fast if the database schema is behind local migrations."""
-    from db_migrate import ensure_schema_current
+    from apps.backend.db_migrate import ensure_schema_current
 
     migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
     ensure_schema_current(migrations_dir=migrations_dir)
@@ -428,7 +428,7 @@ def ingest_from_manifest(
         if manifest_ver != expected_schema and not _env_bool("ALLOW_SCHEMA_MISMATCH"):
             raise SystemExit(
                 f"Schema mismatch: manifest={manifest_ver} expected={expected_schema}. "
-                "Run `mckay migrate` (or `python db_migrate.py`) to update the DB, "
+                "Run `mckay migrate` (or `python -m apps.backend.db_migrate`) to update the DB, "
                 "or set ALLOW_SCHEMA_MISMATCH=1 to override."
             )
 

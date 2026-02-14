@@ -14,7 +14,7 @@ Core concepts
 
 Env
 ---
-- DB_URL (required) used by db.py
+- DB_URL (required) used by apps.backend.db
 
 Run
 ---
@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, Response, abort, jsonify, request
 
-from db import (
+from apps.backend.db import (
     db_conn,
     execute_conn,
     fetch_one_dict_conn,
@@ -236,7 +236,7 @@ def _ensure_schema_gate() -> None:
     with _schema_gate_lock:
         if _schema_gate_checked:
             return
-        from db_migrate import ensure_schema_current
+        from apps.backend.db_migrate import ensure_schema_current
 
         ensure_schema_current(migrations_dir=_schema_migrations_dir())
         _schema_gate_checked = True
