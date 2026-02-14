@@ -40,8 +40,8 @@ from werkzeug.exceptions import BadRequest
 from apps.backend.db import (
     db_conn,
     execute_conn,
-    fetch_one_dict_conn,
     fetch_all_dict_conn,
+    fetch_one_dict_conn,
 )
 
 app = Flask(__name__)
@@ -454,6 +454,35 @@ def _parse_iso8601_dt(value: Optional[str], *, field_name: str = "timestamp") ->
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
+
+_MISSING = object()
+
+
+def _coerce_optional_text(value: Any) -> Optional[str]:
+    """Normalize optional API text values to trimmed strings or None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _payload_optional_text(payload: Dict[str, Any], key: str) -> Any:
+    """Return normalized payload value for a key or _MISSING when absent."""
+    if key not in payload:
+        return _MISSING
+    return _coerce_optional_text(payload.get(key))
+
+
+def _coerce_positive_int(value: Any, *, field_name: str) -> int:
+    """Parse a required positive integer field from JSON payload data."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+    if n <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return n
+
 # --------------------
 # Health / meta routes
 # --------------------
@@ -640,8 +669,12 @@ def api_findings() -> Any:
         severities = _parse_csv_list(_q("severity"))
         services = _parse_csv_list(_q("service"))
         check_ids = _parse_csv_list(_q("check_id"))
+        categories = _parse_csv_list(_q("category"))
         regions = _parse_csv_list(_q("region"))
         account_ids = _parse_csv_list(_q("account_id"))
+        team_ids = _parse_csv_list(_q("team_id"))
+        owner_emails = _parse_csv_list(_q("owner_email"))
+        sla_statuses = _parse_csv_list(_q("sla_status"))
         query_str = _q("q")  # substring match on title
 
         order = (_q("order", "savings_desc") or "savings_desc").lower()
@@ -661,8 +694,12 @@ def api_findings() -> Any:
         _add_any("severity", severities)
         _add_any("service", services)
         _add_any("check_id", check_ids)
+        _add_any("category", categories)
         _add_any("region", regions)
         _add_any("account_id", account_ids)
+        _add_any("team_id", team_ids)
+        _add_any("owner_email", owner_emails)
+        _add_any("sla_status", sla_statuses)
 
         if query_str:
             where.append("title ILIKE %s")
@@ -682,6 +719,12 @@ def api_findings() -> Any:
               category, group_key,
               detected_at,
               state, snooze_until, reason, effective_state,
+              first_detected_at, first_opened_at,
+              owner_id, owner_email, owner_name, team_id,
+              sla_deadline, sla_paused_at, sla_total_paused_seconds,
+              sla_breached_at, sla_extended_count,
+              age_days_open, age_days_detected,
+              sla_status, sla_days_remaining,
               payload
             FROM finding_current
             WHERE {' AND '.join(where)}
@@ -702,6 +745,199 @@ def api_findings() -> Any:
             {
                 "tenant_id": tenant_id,
                 "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.get("/api/findings/sla/breached")
+def api_findings_sla_breached() -> Any:
+    """List findings currently in breached SLA state."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        severities = _parse_csv_list(_q("severity"))
+        services = _parse_csv_list(_q("service"))
+        check_ids = _parse_csv_list(_q("check_id"))
+        categories = _parse_csv_list(_q("category"))
+        regions = _parse_csv_list(_q("region"))
+        account_ids = _parse_csv_list(_q("account_id"))
+        team_ids = _parse_csv_list(_q("team_id"))
+        owner_emails = _parse_csv_list(_q("owner_email"))
+        query_str = _q("q")
+
+        where = ["tenant_id = %s", "workspace = %s", "sla_status = 'breached'"]
+        params: List[Any] = [tenant_id, workspace]
+
+        def _add_any(field: str, values: Optional[List[str]]) -> None:
+            if not values:
+                return
+            where.append(f"{field} = ANY(%s)")
+            params.append(values)
+
+        _add_any("severity", severities)
+        _add_any("service", services)
+        _add_any("check_id", check_ids)
+        _add_any("category", categories)
+        _add_any("region", regions)
+        _add_any("account_id", account_ids)
+        _add_any("team_id", team_ids)
+        _add_any("owner_email", owner_emails)
+
+        if query_str:
+            where.append("title ILIKE %s")
+            params.append(f"%{query_str}%")
+
+        sql = f"""
+            SELECT
+              tenant_id, workspace, fingerprint, run_id,
+              check_id, service, severity, title,
+              estimated_monthly_savings, region, account_id,
+              category, group_key,
+              detected_at,
+              state, snooze_until, reason, effective_state,
+              first_detected_at, first_opened_at,
+              owner_id, owner_email, owner_name, team_id,
+              sla_deadline, sla_paused_at, sla_total_paused_seconds,
+              sla_extension_seconds, sla_breached_at, sla_extended_count,
+              age_days_open, age_days_detected,
+              sla_status, sla_days_remaining,
+              payload
+            FROM finding_current
+            WHERE {' AND '.join(where)}
+            ORDER BY sla_deadline ASC NULLS LAST, detected_at DESC
+            LIMIT %s OFFSET %s
+        """
+        params2 = params + [limit, offset]
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(conn, sql, params2)
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.get("/api/findings/aging")
+def api_findings_aging() -> Any:
+    """List findings filtered by aging clock (open or detected age)."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        age_basis = (_q("age_basis", "open") or "open").strip().lower()
+        if age_basis not in {"open", "detected"}:
+            raise ValueError("age_basis must be 'open' or 'detected'")
+        age_col = "age_days_open" if age_basis == "open" else "age_days_detected"
+
+        min_days = _parse_int(_q("min_days"), default=0, min_v=0, max_v=36500)
+        max_days_raw = _q("max_days")
+        max_days: Optional[int] = None
+        if max_days_raw is not None and max_days_raw != "":
+            max_days = _parse_int(max_days_raw, default=0, min_v=0, max_v=36500)
+            if max_days < min_days:
+                raise ValueError("max_days must be >= min_days")
+
+        effective_states = _parse_csv_list(_q("state"))
+        severities = _parse_csv_list(_q("severity"))
+        services = _parse_csv_list(_q("service"))
+        check_ids = _parse_csv_list(_q("check_id"))
+        categories = _parse_csv_list(_q("category"))
+        regions = _parse_csv_list(_q("region"))
+        account_ids = _parse_csv_list(_q("account_id"))
+        team_ids = _parse_csv_list(_q("team_id"))
+        owner_emails = _parse_csv_list(_q("owner_email"))
+        sla_statuses = _parse_csv_list(_q("sla_status"))
+        query_str = _q("q")
+
+        where = ["tenant_id = %s", "workspace = %s", f"{age_col} IS NOT NULL", f"{age_col} >= %s"]
+        params: List[Any] = [tenant_id, workspace, min_days]
+
+        if max_days is not None:
+            where.append(f"{age_col} <= %s")
+            params.append(max_days)
+
+        def _add_any(field: str, values: Optional[List[str]]) -> None:
+            if not values:
+                return
+            where.append(f"{field} = ANY(%s)")
+            params.append(values)
+
+        _add_any("effective_state", effective_states)
+        _add_any("severity", severities)
+        _add_any("service", services)
+        _add_any("check_id", check_ids)
+        _add_any("category", categories)
+        _add_any("region", regions)
+        _add_any("account_id", account_ids)
+        _add_any("team_id", team_ids)
+        _add_any("owner_email", owner_emails)
+        _add_any("sla_status", sla_statuses)
+
+        if query_str:
+            where.append("title ILIKE %s")
+            params.append(f"%{query_str}%")
+
+        sql = f"""
+            SELECT
+              tenant_id, workspace, fingerprint, run_id,
+              check_id, service, severity, title,
+              estimated_monthly_savings, region, account_id,
+              category, group_key,
+              detected_at,
+              state, snooze_until, reason, effective_state,
+              first_detected_at, first_opened_at,
+              owner_id, owner_email, owner_name, team_id,
+              sla_deadline, sla_paused_at, sla_total_paused_seconds,
+              sla_extension_seconds, sla_breached_at, sla_extended_count,
+              age_days_open, age_days_detected,
+              {age_col} AS age_days,
+              sla_status, sla_days_remaining,
+              payload
+            FROM finding_current
+            WHERE {' AND '.join(where)}
+            ORDER BY {age_col} DESC, detected_at DESC
+            LIMIT %s OFFSET %s
+        """
+        params2 = params + [limit, offset]
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(conn, sql, params2)
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "age_basis": age_basis,
+                "min_days": min_days,
+                "max_days": max_days,
                 "limit": limit,
                 "offset": offset,
                 "total": int((count_row or {}).get("n") or 0),
@@ -836,9 +1072,939 @@ def api_facets() -> Any:
         return jsonify({"error": str(exc)}), 400
 
 
+@app.get("/api/audit")
+def api_audit() -> Any:
+    """Query append-only governance audit events."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        where = ["tenant_id = %s", "workspace = %s"]
+        params: List[Any] = [tenant_id, workspace]
+
+        entity_type = _coerce_optional_text(_q("entity_type"))
+        entity_id = _coerce_optional_text(_q("entity_id"))
+        fingerprint = _coerce_optional_text(_q("fingerprint"))
+        event_type = _coerce_optional_text(_q("event_type"))
+        event_category = _coerce_optional_text(_q("event_category"))
+        actor_email = _coerce_optional_text(_q("actor_email"))
+        correlation_id = _coerce_optional_text(_q("correlation_id"))
+
+        if entity_type:
+            where.append("entity_type = %s")
+            params.append(entity_type)
+        if entity_id:
+            where.append("entity_id = %s")
+            params.append(entity_id)
+        if fingerprint:
+            where.append("fingerprint = %s")
+            params.append(fingerprint)
+        if event_type:
+            where.append("event_type = %s")
+            params.append(event_type)
+        if event_category:
+            where.append("event_category = %s")
+            params.append(event_category)
+        if actor_email:
+            where.append("actor_email = %s")
+            params.append(actor_email)
+        if correlation_id:
+            where.append("correlation_id = %s")
+            params.append(correlation_id)
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  id,
+                  tenant_id,
+                  workspace,
+                  entity_type,
+                  entity_id,
+                  fingerprint,
+                  event_type,
+                  event_category,
+                  previous_value,
+                  new_value,
+                  actor_id,
+                  actor_email,
+                  actor_name,
+                  source,
+                  ip_address,
+                  user_agent,
+                  run_id,
+                  correlation_id,
+                  created_at
+                FROM audit_log
+                WHERE {' AND '.join(where)}
+                ORDER BY id DESC
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*)::bigint AS n FROM audit_log WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+# --------------------
+# Governance: Teams
+# --------------------
+
+
+@app.get("/api/teams")
+def api_teams() -> Any:
+    """List teams in tenant/workspace scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        query_str = _q("q")
+
+        where = ["t.tenant_id = %s", "t.workspace = %s"]
+        params: List[Any] = [tenant_id, workspace]
+        if query_str:
+            where.append("(t.team_id ILIKE %s OR t.name ILIKE %s)")
+            params.extend([f"%{query_str}%", f"%{query_str}%"])
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  t.tenant_id,
+                  t.workspace,
+                  t.team_id,
+                  t.name,
+                  t.description,
+                  t.parent_team_id,
+                  t.created_at,
+                  t.updated_at,
+                  COUNT(tm.user_id)::bigint AS member_count
+                FROM teams t
+                LEFT JOIN team_members tm
+                  ON tm.tenant_id = t.tenant_id
+                  AND tm.workspace = t.workspace
+                  AND tm.team_id = t.team_id
+                WHERE {' AND '.join(where)}
+                GROUP BY
+                  t.tenant_id,
+                  t.workspace,
+                  t.team_id,
+                  t.name,
+                  t.description,
+                  t.parent_team_id,
+                  t.created_at,
+                  t.updated_at
+                ORDER BY t.name ASC, t.team_id ASC
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*)::bigint AS n FROM teams t WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.post("/api/teams")
+def api_create_team() -> Any:
+    """Create a team in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        team_id = _coerce_optional_text(payload.get("team_id"))
+        name = _coerce_optional_text(payload.get("name"))
+        description_v = _payload_optional_text(payload, "description")
+        parent_team_id_v = _payload_optional_text(payload, "parent_team_id")
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+
+        if not team_id:
+            raise ValueError("team_id is required")
+        if not name:
+            raise ValueError("name is required")
+
+        description = None if description_v is _MISSING else description_v
+        parent_team_id = None if parent_team_id_v is _MISSING else parent_team_id_v
+
+        if parent_team_id == team_id:
+            raise ValueError("parent_team_id cannot equal team_id")
+
+        with db_conn() as conn:
+            if parent_team_id is not None and not _team_exists(
+                conn, tenant_id=tenant_id, workspace=workspace, team_id=parent_team_id
+            ):
+                return _err("not_found", f"parent team not found: {parent_team_id}", status=404)
+            if _team_exists(conn, tenant_id=tenant_id, workspace=workspace, team_id=team_id):
+                return _err("conflict", f"team already exists: {team_id}", status=409)
+
+            execute_conn(
+                conn,
+                """
+                INSERT INTO teams
+                  (tenant_id, workspace, team_id, name, description, parent_team_id, created_at, updated_at)
+                VALUES
+                  (%s, %s, %s, %s, %s, %s, now(), now())
+                """,
+                (tenant_id, workspace, team_id, name, description, parent_team_id),
+            )
+            team = _fetch_team(conn, tenant_id=tenant_id, workspace=workspace, team_id=team_id)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="team",
+                entity_id=team_id,
+                fingerprint=None,
+                event_type="team.created",
+                event_category="configuration",
+                previous_value=None,
+                new_value=team,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "team": team}, status=201)
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.put("/api/teams/<team_id>")
+def api_update_team(team_id: str) -> Any:
+    """Update mutable team fields in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        tid = _coerce_optional_text(team_id)
+        if not tid:
+            raise ValueError("team_id is required")
+
+        name_v = _payload_optional_text(payload, "name")
+        description_v = _payload_optional_text(payload, "description")
+        parent_team_id_v = _payload_optional_text(payload, "parent_team_id")
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+        if name_v is _MISSING and description_v is _MISSING and parent_team_id_v is _MISSING:
+            raise ValueError("at least one of name, description, parent_team_id must be provided")
+
+        with db_conn() as conn:
+            before = _fetch_team(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid)
+            if before is None:
+                return _err("not_found", "team not found", status=404)
+
+            name = before.get("name") if name_v is _MISSING else name_v
+            if not name:
+                raise ValueError("name cannot be empty")
+            description = before.get("description") if description_v is _MISSING else description_v
+            parent_team_id = before.get("parent_team_id") if parent_team_id_v is _MISSING else parent_team_id_v
+            if parent_team_id == tid:
+                raise ValueError("parent_team_id cannot equal team_id")
+
+            if parent_team_id is not None and not _team_exists(
+                conn, tenant_id=tenant_id, workspace=workspace, team_id=str(parent_team_id)
+            ):
+                return _err("not_found", f"parent team not found: {parent_team_id}", status=404)
+
+            execute_conn(
+                conn,
+                """
+                UPDATE teams
+                SET
+                  name = %s,
+                  description = %s,
+                  parent_team_id = %s,
+                  updated_at = now()
+                WHERE tenant_id = %s AND workspace = %s AND team_id = %s
+                """,
+                (name, description, parent_team_id, tenant_id, workspace, tid),
+            )
+            after = _fetch_team(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="team",
+                entity_id=tid,
+                fingerprint=None,
+                event_type="team.updated",
+                event_category="configuration",
+                previous_value=before,
+                new_value=after,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "team": after})
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.delete("/api/teams/<team_id>")
+def api_delete_team(team_id: str) -> Any:
+    """Delete a team in tenant/workspace scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        tid = _coerce_optional_text(team_id)
+        if not tid:
+            raise ValueError("team_id is required")
+        updated_by = _coerce_optional_text(_q("updated_by"))
+
+        with db_conn() as conn:
+            before = _fetch_team(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid)
+            if before is None:
+                return _err("not_found", "team not found", status=404)
+
+            execute_conn(
+                conn,
+                "DELETE FROM teams WHERE tenant_id = %s AND workspace = %s AND team_id = %s",
+                (tenant_id, workspace, tid),
+            )
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="team",
+                entity_id=tid,
+                fingerprint=None,
+                event_type="team.deleted",
+                event_category="configuration",
+                previous_value=before,
+                new_value=None,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "team_id": tid})
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.get("/api/teams/<team_id>/members")
+def api_team_members(team_id: str) -> Any:
+    """List members for one team in tenant/workspace scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        tid = _coerce_optional_text(team_id)
+        if not tid:
+            raise ValueError("team_id is required")
+
+        limit = _parse_int(_q("limit"), default=200, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        query_str = _q("q")
+
+        with db_conn() as conn:
+            if not _team_exists(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid):
+                return _err("not_found", "team not found", status=404)
+
+            where = ["tenant_id = %s", "workspace = %s", "team_id = %s"]
+            params: List[Any] = [tenant_id, workspace, tid]
+            if query_str:
+                where.append(
+                    "(user_id ILIKE %s OR user_email ILIKE %s OR COALESCE(user_name, '') ILIKE %s)"
+                )
+                params.extend([f"%{query_str}%", f"%{query_str}%", f"%{query_str}%"])
+
+            members = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  tenant_id,
+                  workspace,
+                  team_id,
+                  user_id,
+                  user_email,
+                  user_name,
+                  role,
+                  joined_at
+                FROM team_members
+                WHERE {' AND '.join(where)}
+                ORDER BY user_email ASC, user_id ASC
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*)::bigint AS n FROM team_members WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "team_id": tid,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": members,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.post("/api/teams/<team_id>/members")
+def api_team_member_add(team_id: str) -> Any:
+    """Add one member to a team in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        tid = _coerce_optional_text(team_id)
+        if not tid:
+            raise ValueError("team_id is required")
+
+        user_id = _coerce_optional_text(payload.get("user_id"))
+        user_email = _coerce_optional_text(payload.get("user_email"))
+        user_name_v = _payload_optional_text(payload, "user_name")
+        role_v = _payload_optional_text(payload, "role")
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+
+        if not user_id:
+            raise ValueError("user_id is required")
+        if not user_email:
+            raise ValueError("user_email is required")
+
+        role = "member" if role_v is _MISSING else role_v
+        if role not in {"owner", "member", "viewer"}:
+            raise ValueError("role must be one of: owner, member, viewer")
+        user_name = None if user_name_v is _MISSING else user_name_v
+
+        with db_conn() as conn:
+            if not _team_exists(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid):
+                return _err("not_found", "team not found", status=404)
+            before = _fetch_team_member(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                team_id=tid,
+                user_id=user_id,
+            )
+            if before is not None:
+                return _err("conflict", f"team member already exists: {user_id}", status=409)
+
+            execute_conn(
+                conn,
+                """
+                INSERT INTO team_members
+                  (tenant_id, workspace, team_id, user_id, user_email, user_name, role, joined_at)
+                VALUES
+                  (%s, %s, %s, %s, %s, %s, %s, now())
+                """,
+                (tenant_id, workspace, tid, user_id, user_email, user_name, role),
+            )
+            after = _fetch_team_member(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                team_id=tid,
+                user_id=user_id,
+            )
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="team_member",
+                entity_id=f"{tid}:{user_id}",
+                fingerprint=None,
+                event_type="member.added",
+                event_category="access",
+                previous_value=None,
+                new_value=after,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "team_id": tid,
+                "member": after,
+            },
+            status=201,
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.delete("/api/teams/<team_id>/members/<user_id>")
+def api_team_member_remove(team_id: str, user_id: str) -> Any:
+    """Remove one member from a team in tenant/workspace scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        tid = _coerce_optional_text(team_id)
+        uid = _coerce_optional_text(user_id)
+        if not tid:
+            raise ValueError("team_id is required")
+        if not uid:
+            raise ValueError("user_id is required")
+        updated_by = _coerce_optional_text(_q("updated_by"))
+
+        with db_conn() as conn:
+            if not _team_exists(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid):
+                return _err("not_found", "team not found", status=404)
+            before = _fetch_team_member(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                team_id=tid,
+                user_id=uid,
+            )
+            if before is None:
+                return _err("not_found", "team member not found", status=404)
+
+            execute_conn(
+                conn,
+                """
+                DELETE FROM team_members
+                WHERE tenant_id = %s
+                  AND workspace = %s
+                  AND team_id = %s
+                  AND user_id = %s
+                """,
+                (tenant_id, workspace, tid, uid),
+            )
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="team_member",
+                entity_id=f"{tid}:{uid}",
+                fingerprint=None,
+                event_type="member.removed",
+                event_category="access",
+                previous_value=before,
+                new_value=None,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "team_id": tid, "user_id": uid})
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+# --------------------
+# Governance: SLA Policies
+# --------------------
+
+
+@app.get("/api/sla/policies")
+def api_sla_policies() -> Any:
+    """List category SLA policies in tenant/workspace scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=200, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(
+                conn,
+                """
+                SELECT
+                  tenant_id,
+                  workspace,
+                  category,
+                  sla_days,
+                  description,
+                  created_at,
+                  updated_at
+                FROM sla_policy_category
+                WHERE tenant_id = %s AND workspace = %s
+                ORDER BY category ASC
+                LIMIT %s OFFSET %s
+                """,
+                (tenant_id, workspace, limit, offset),
+            )
+            count_row = fetch_one_dict_conn(
+                conn,
+                """
+                SELECT COUNT(*)::bigint AS n
+                FROM sla_policy_category
+                WHERE tenant_id = %s AND workspace = %s
+                """,
+                (tenant_id, workspace),
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.post("/api/sla/policies")
+def api_create_sla_policy() -> Any:
+    """Create a category SLA policy in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        category = _coerce_optional_text(payload.get("category"))
+        sla_days = _coerce_positive_int(payload.get("sla_days"), field_name="sla_days")
+        description_v = _payload_optional_text(payload, "description")
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+
+        if not category:
+            raise ValueError("category is required")
+        description = None if description_v is _MISSING else description_v
+
+        with db_conn() as conn:
+            if _fetch_sla_policy_category(conn, tenant_id=tenant_id, workspace=workspace, category=category):
+                return _err("conflict", f"sla policy already exists for category: {category}", status=409)
+
+            execute_conn(
+                conn,
+                """
+                INSERT INTO sla_policy_category
+                  (tenant_id, workspace, category, sla_days, description, created_at, updated_at)
+                VALUES
+                  (%s, %s, %s, %s, %s, now(), now())
+                """,
+                (tenant_id, workspace, category, sla_days, description),
+            )
+            policy = _fetch_sla_policy_category(conn, tenant_id=tenant_id, workspace=workspace, category=category)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="sla_policy_category",
+                entity_id=category,
+                fingerprint=None,
+                event_type="sla.policy.created",
+                event_category="configuration",
+                previous_value=None,
+                new_value=policy,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "policy": policy}, status=201)
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.put("/api/sla/policies/<category>")
+def api_update_sla_policy(category: str) -> Any:
+    """Update one category SLA policy in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        cat = _coerce_optional_text(category)
+        if not cat:
+            raise ValueError("category is required")
+
+        sla_days_raw = payload.get("sla_days")
+        description_v = _payload_optional_text(payload, "description")
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+        if sla_days_raw is None and description_v is _MISSING:
+            raise ValueError("at least one of sla_days, description must be provided")
+
+        with db_conn() as conn:
+            before = _fetch_sla_policy_category(conn, tenant_id=tenant_id, workspace=workspace, category=cat)
+            if before is None:
+                return _err("not_found", "sla policy not found", status=404)
+
+            sla_days = int(before.get("sla_days") or 0)
+            if sla_days_raw is not None:
+                sla_days = _coerce_positive_int(sla_days_raw, field_name="sla_days")
+            description = before.get("description") if description_v is _MISSING else description_v
+
+            execute_conn(
+                conn,
+                """
+                UPDATE sla_policy_category
+                SET
+                  sla_days = %s,
+                  description = %s,
+                  updated_at = now()
+                WHERE tenant_id = %s AND workspace = %s AND category = %s
+                """,
+                (sla_days, description, tenant_id, workspace, cat),
+            )
+            after = _fetch_sla_policy_category(conn, tenant_id=tenant_id, workspace=workspace, category=cat)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="sla_policy_category",
+                entity_id=cat,
+                fingerprint=None,
+                event_type="sla.policy.updated",
+                event_category="configuration",
+                previous_value=before,
+                new_value=after,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "policy": after})
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.get("/api/sla/policies/overrides")
+def api_sla_overrides() -> Any:
+    """List check-level SLA overrides in tenant/workspace scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=200, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        check_ids = _parse_csv_list(_q("check_id"))
+
+        where = ["tenant_id = %s", "workspace = %s"]
+        params: List[Any] = [tenant_id, workspace]
+        if check_ids:
+            where.append("check_id = ANY(%s)")
+            params.append(check_ids)
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  tenant_id,
+                  workspace,
+                  check_id,
+                  sla_days,
+                  reason,
+                  created_at,
+                  updated_at
+                FROM sla_policy_check_override
+                WHERE {' AND '.join(where)}
+                ORDER BY check_id ASC
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*)::bigint AS n FROM sla_policy_check_override WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.post("/api/sla/policies/overrides")
+def api_create_sla_override() -> Any:
+    """Create a check-level SLA override in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        check_id = _coerce_optional_text(payload.get("check_id"))
+        sla_days = _coerce_positive_int(payload.get("sla_days"), field_name="sla_days")
+        reason_v = _payload_optional_text(payload, "reason")
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+
+        if not check_id:
+            raise ValueError("check_id is required")
+        reason = None if reason_v is _MISSING else reason_v
+
+        with db_conn() as conn:
+            if _fetch_sla_policy_override(conn, tenant_id=tenant_id, workspace=workspace, check_id=check_id):
+                return _err("conflict", f"sla override already exists for check_id: {check_id}", status=409)
+
+            execute_conn(
+                conn,
+                """
+                INSERT INTO sla_policy_check_override
+                  (tenant_id, workspace, check_id, sla_days, reason, created_at, updated_at)
+                VALUES
+                  (%s, %s, %s, %s, %s, now(), now())
+                """,
+                (tenant_id, workspace, check_id, sla_days, reason),
+            )
+            override = _fetch_sla_policy_override(conn, tenant_id=tenant_id, workspace=workspace, check_id=check_id)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="sla_policy_check_override",
+                entity_id=check_id,
+                fingerprint=None,
+                event_type="sla.override.created",
+                event_category="configuration",
+                previous_value=None,
+                new_value=override,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "override": override}, status=201)
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
 # --------------------
 # Lifecycle actions
 # --------------------
+
+
+def _audit_log_event(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    entity_type: str,
+    entity_id: str,
+    fingerprint: Optional[str],
+    event_type: str,
+    event_category: str,
+    previous_value: Optional[Dict[str, Any]],
+    new_value: Optional[Dict[str, Any]],
+    actor_id: Optional[str],
+    actor_email: Optional[str],
+    actor_name: Optional[str],
+    source: str,
+    run_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Best-effort append-only write to audit_log, isolated by savepoint."""
+    try:
+        ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
+        user_agent = request.headers.get("User-Agent", "")
+    except RuntimeError:
+        ip_address = None
+        user_agent = ""
+
+    params = (
+        tenant_id,
+        workspace,
+        entity_type,
+        entity_id,
+        fingerprint,
+        event_type,
+        event_category,
+        (json.dumps(previous_value, separators=(",", ":")) if previous_value is not None else None),
+        (json.dumps(new_value, separators=(",", ":")) if new_value is not None else None),
+        actor_id,
+        actor_email,
+        actor_name,
+        source,
+        ip_address,
+        user_agent,
+        run_id,
+        correlation_id,
+    )
+
+    with conn.cursor() as cur:
+        try:
+            cur.execute("SAVEPOINT mckay_audit_log_1")
+            cur.execute(
+                """
+                INSERT INTO audit_log
+                  (
+                    tenant_id, workspace, entity_type, entity_id, fingerprint,
+                    event_type, event_category, previous_value, new_value,
+                    actor_id, actor_email, actor_name, source, ip_address, user_agent,
+                    run_id, correlation_id, created_at
+                  )
+                VALUES
+                  (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s, now())
+                """,
+                params,
+            )
+            cur.execute("RELEASE SAVEPOINT mckay_audit_log_1")
+            return
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_log_1")
+            except Exception:
+                pass
+            try:
+                cur.execute("RELEASE SAVEPOINT mckay_audit_log_1")
+            except Exception:
+                pass
+            _log(
+                "WARN",
+                "audit_log_db_write_failed",
+                {
+                    "tenant_id": tenant_id,
+                    "workspace": workspace,
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "event_type": event_type,
+                },
+            )
+            return
 
 
 def _audit_lifecycle(
@@ -871,6 +2037,30 @@ def _audit_lifecycle(
         "updated_by": updated_by,
     }
     _log("INFO", "lifecycle_audit", evt)
+
+    _audit_log_event(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        entity_type=subject_type,
+        entity_id=subject_id,
+        fingerprint=(subject_id if subject_type == "fingerprint" else None),
+        event_type="finding.state.changed",
+        event_category="lifecycle",
+        previous_value=None,
+        new_value={
+            "action": action,
+            "state": state,
+            "snooze_until": _iso_z(snooze_until) if snooze_until else None,
+            "reason": reason,
+        },
+        actor_id=updated_by,
+        actor_email=updated_by,
+        actor_name=None,
+        source="api",
+        run_id=None,
+        correlation_id=None,
+    )
 
     params = (
         tenant_id,
@@ -987,6 +2177,590 @@ def _upsert_group_state(
         """,
         (tenant_id, workspace, group_key, state, snooze_until, reason, updated_by),
     )
+
+
+def _finding_exists(conn: Any, *, tenant_id: str, workspace: str, fingerprint: str) -> bool:
+    """Return True when a finding fingerprint exists in finding_latest."""
+    row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT 1 AS ok
+        FROM finding_latest
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        LIMIT 1
+        """,
+        (tenant_id, workspace, fingerprint),
+    )
+    return bool(row and row.get("ok") == 1)
+
+
+def _fetch_finding_effective_state(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+) -> Optional[str]:
+    """Return effective_state for a finding from finding_current."""
+    row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT effective_state
+        FROM finding_current
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        """,
+        (tenant_id, workspace, fingerprint),
+    )
+    return _coerce_optional_text((row or {}).get("effective_state"))
+
+
+def _fetch_team(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    team_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one team by scoped id."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          team_id,
+          name,
+          description,
+          parent_team_id,
+          created_at,
+          updated_at
+        FROM teams
+        WHERE tenant_id = %s AND workspace = %s AND team_id = %s
+        """,
+        (tenant_id, workspace, team_id),
+    )
+
+
+def _fetch_team_member(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    team_id: str,
+    user_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one team member by scoped team_id + user_id."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          team_id,
+          user_id,
+          user_email,
+          user_name,
+          role,
+          joined_at
+        FROM team_members
+        WHERE tenant_id = %s
+          AND workspace = %s
+          AND team_id = %s
+          AND user_id = %s
+        """,
+        (tenant_id, workspace, team_id, user_id),
+    )
+
+
+def _team_exists(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> bool:
+    """Return True when a team exists for a tenant/workspace scope."""
+    row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT 1 AS ok
+        FROM teams
+        WHERE tenant_id = %s AND workspace = %s AND team_id = %s
+        LIMIT 1
+        """,
+        (tenant_id, workspace, team_id),
+    )
+    return bool(row and row.get("ok") == 1)
+
+
+def _ensure_finding_governance_row(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+) -> None:
+    """Ensure governance overlay row exists for a finding fingerprint."""
+    execute_conn(
+        conn,
+        """
+        INSERT INTO finding_governance
+          (tenant_id, workspace, fingerprint, first_detected_at, first_opened_at, created_at, updated_at)
+        SELECT
+          fc.tenant_id,
+          fc.workspace,
+          fc.fingerprint,
+          fc.detected_at,
+          CASE WHEN fc.effective_state = 'open' THEN fc.detected_at ELSE NULL END,
+          now(),
+          now()
+        FROM finding_current fc
+        WHERE fc.tenant_id = %s AND fc.workspace = %s AND fc.fingerprint = %s
+        ON CONFLICT (tenant_id, workspace, fingerprint) DO NOTHING
+        """,
+        (tenant_id, workspace, fingerprint),
+    )
+
+
+def _fetch_governance_owner_team(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+) -> Dict[str, Optional[str]]:
+    """Fetch owner/team governance fields for a finding."""
+    row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT owner_id, owner_email, owner_name, team_id
+        FROM finding_governance
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        """,
+        (tenant_id, workspace, fingerprint),
+    ) or {}
+    return {
+        "owner_id": _coerce_optional_text(row.get("owner_id")),
+        "owner_email": _coerce_optional_text(row.get("owner_email")),
+        "owner_name": _coerce_optional_text(row.get("owner_name")),
+        "team_id": _coerce_optional_text(row.get("team_id")),
+    }
+
+
+def _fetch_sla_policy_category(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    category: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one category SLA policy row by scope + category."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          category,
+          sla_days,
+          description,
+          created_at,
+          updated_at
+        FROM sla_policy_category
+        WHERE tenant_id = %s AND workspace = %s AND category = %s
+        """,
+        (tenant_id, workspace, category),
+    )
+
+
+def _fetch_sla_policy_override(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    check_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch one check SLA override row by scope + check_id."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          check_id,
+          sla_days,
+          reason,
+          created_at,
+          updated_at
+        FROM sla_policy_check_override
+        WHERE tenant_id = %s AND workspace = %s AND check_id = %s
+        """,
+        (tenant_id, workspace, check_id),
+    )
+
+
+def _fetch_governance_sla(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+) -> Dict[str, Any]:
+    """Fetch SLA governance fields for a finding."""
+    row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          sla_deadline,
+          sla_paused_at,
+          sla_total_paused_seconds,
+          sla_extension_seconds,
+          sla_breached_at,
+          sla_extended_count,
+          sla_extension_reason
+        FROM finding_governance
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        """,
+        (tenant_id, workspace, fingerprint),
+    ) or {}
+    return {
+        "sla_deadline": row.get("sla_deadline"),
+        "sla_paused_at": row.get("sla_paused_at"),
+        "sla_total_paused_seconds": int(row.get("sla_total_paused_seconds") or 0),
+        "sla_extension_seconds": int(row.get("sla_extension_seconds") or 0),
+        "sla_breached_at": row.get("sla_breached_at"),
+        "sla_extended_count": int(row.get("sla_extended_count") or 0),
+        "sla_extension_reason": _coerce_optional_text(row.get("sla_extension_reason")),
+    }
+
+
+def _apply_finding_sla_extension(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+    extend_days: int,
+    reason: Optional[str],
+    event_ts: datetime,
+) -> Optional[Dict[str, Any]]:
+    """Apply manual SLA extension in seconds and return updated SLA fields."""
+    execute_conn(
+        conn,
+        "SELECT governance_sync_finding_sla(%s, %s, %s, %s)",
+        (tenant_id, workspace, fingerprint, event_ts),
+    )
+
+    before = _fetch_governance_sla(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        fingerprint=fingerprint,
+    )
+    if before.get("sla_deadline") is None:
+        return None
+
+    extend_seconds = int(extend_days) * 86400
+    execute_conn(
+        conn,
+        """
+        UPDATE finding_governance
+        SET
+          sla_extension_seconds = COALESCE(sla_extension_seconds, 0) + %s,
+          sla_extended_count = COALESCE(sla_extended_count, 0) + 1,
+          sla_extension_reason = CASE
+              WHEN %s IS NOT NULL THEN %s
+              ELSE sla_extension_reason
+          END,
+          updated_at = now()
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        """,
+        (
+            extend_seconds,
+            reason,
+            reason,
+            tenant_id,
+            workspace,
+            fingerprint,
+        ),
+    )
+
+    execute_conn(
+        conn,
+        "SELECT governance_sync_finding_sla(%s, %s, %s, %s)",
+        (tenant_id, workspace, fingerprint, event_ts),
+    )
+
+    return _fetch_governance_sla(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        fingerprint=fingerprint,
+    )
+
+
+def _update_finding_owner(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+    owner_id: Optional[str],
+    owner_email: Optional[str],
+    owner_name: Optional[str],
+) -> None:
+    """Persist owner fields in finding_governance."""
+    execute_conn(
+        conn,
+        """
+        UPDATE finding_governance
+        SET owner_id = %s,
+            owner_email = %s,
+            owner_name = %s,
+            updated_at = now()
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        """,
+        (owner_id, owner_email, owner_name, tenant_id, workspace, fingerprint),
+    )
+
+
+def _update_finding_team(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+    team_id: Optional[str],
+) -> None:
+    """Persist team assignment in finding_governance."""
+    execute_conn(
+        conn,
+        """
+        UPDATE finding_governance
+        SET team_id = %s,
+            updated_at = now()
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        """,
+        (team_id, tenant_id, workspace, fingerprint),
+    )
+
+
+@app.put("/api/findings/<fingerprint>/owner")
+def api_findings_set_owner(fingerprint: str) -> Any:
+    """Assign or clear owner governance fields for a finding."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        fp = str(fingerprint or "").strip()
+        if not fp:
+            raise ValueError("fingerprint is required")
+
+        owner_id_v = _payload_optional_text(payload, "owner_id")
+        owner_email_v = _payload_optional_text(payload, "owner_email")
+        owner_name_v = _payload_optional_text(payload, "owner_name")
+        if owner_id_v is _MISSING and owner_email_v is _MISSING and owner_name_v is _MISSING:
+            raise ValueError("at least one of owner_id, owner_email, owner_name must be provided")
+
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+
+        with db_conn() as conn:
+            if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp):
+                return _err("not_found", "finding not found", status=404)
+
+            _ensure_finding_governance_row(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+            before = _fetch_governance_owner_team(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+
+            owner_id = before["owner_id"] if owner_id_v is _MISSING else owner_id_v
+            owner_email = before["owner_email"] if owner_email_v is _MISSING else owner_email_v
+            owner_name = before["owner_name"] if owner_name_v is _MISSING else owner_name_v
+
+            _update_finding_owner(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                fingerprint=fp,
+                owner_id=owner_id,
+                owner_email=owner_email,
+                owner_name=owner_name,
+            )
+            after = _fetch_governance_owner_team(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+
+            event_type = (
+                "finding.owner.cleared"
+                if not after.get("owner_id") and not after.get("owner_email") and not after.get("owner_name")
+                else "finding.owner.assigned"
+            )
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="finding",
+                entity_id=fp,
+                fingerprint=fp,
+                event_type=event_type,
+                event_category="ownership",
+                previous_value=before,
+                new_value=after,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "fingerprint": fp,
+                "owner_id": after.get("owner_id"),
+                "owner_email": after.get("owner_email"),
+                "owner_name": after.get("owner_name"),
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.put("/api/findings/<fingerprint>/team")
+def api_findings_set_team(fingerprint: str) -> Any:
+    """Assign or clear team ownership for a finding."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        fp = str(fingerprint or "").strip()
+        if not fp:
+            raise ValueError("fingerprint is required")
+
+        team_id_v = _payload_optional_text(payload, "team_id")
+        if team_id_v is _MISSING:
+            raise ValueError("team_id must be provided (nullable to clear)")
+
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+
+        with db_conn() as conn:
+            if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp):
+                return _err("not_found", "finding not found", status=404)
+
+            _ensure_finding_governance_row(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+            before = _fetch_governance_owner_team(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+
+            if team_id_v is not None and not _team_exists(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                team_id=team_id_v,
+            ):
+                return _err("not_found", f"team not found: {team_id_v}", status=404)
+
+            _update_finding_team(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                fingerprint=fp,
+                team_id=team_id_v,
+            )
+            after = _fetch_governance_owner_team(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="finding",
+                entity_id=fp,
+                fingerprint=fp,
+                event_type=("finding.team.cleared" if after.get("team_id") is None else "finding.team.assigned"),
+                event_category="ownership",
+                previous_value={"team_id": before.get("team_id")},
+                new_value={"team_id": after.get("team_id")},
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "fingerprint": fp,
+                "team_id": after.get("team_id"),
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.post("/api/findings/<fingerprint>/sla/extend")
+def api_findings_extend_sla(fingerprint: str) -> Any:
+    """Extend SLA deadline for a finding while preserving pause accounting."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        fp = str(fingerprint or "").strip()
+        if not fp:
+            raise ValueError("fingerprint is required")
+
+        extend_days = _coerce_positive_int(payload.get("extend_days"), field_name="extend_days")
+        reason = _coerce_optional_text(payload.get("reason"))
+        updated_by = _coerce_optional_text(payload.get("updated_by"))
+        event_ts = _now_utc()
+
+        with db_conn() as conn:
+            if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp):
+                return _err("not_found", "finding not found", status=404)
+
+            effective_state = _fetch_finding_effective_state(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                fingerprint=fp,
+            )
+            if effective_state in {"resolved", "ignored"}:
+                return _err("invalid_state", f"cannot extend SLA in state '{effective_state}'", status=409)
+
+            _ensure_finding_governance_row(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+            before = _fetch_governance_sla(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fp)
+            after = _apply_finding_sla_extension(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                fingerprint=fp,
+                extend_days=extend_days,
+                reason=reason,
+                event_ts=event_ts,
+            )
+            if after is None:
+                return _err("bad_request", "finding has no SLA policy to extend", status=400)
+
+            _audit_log_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                entity_type="finding",
+                entity_id=fp,
+                fingerprint=fp,
+                event_type="finding.sla.extended",
+                event_category="sla",
+                previous_value=before,
+                new_value=after,
+                actor_id=updated_by,
+                actor_email=updated_by,
+                actor_name=None,
+                source="api",
+            )
+            conn.commit()
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "fingerprint": fp,
+                "extend_days": extend_days,
+                "sla_deadline": after.get("sla_deadline"),
+                "sla_breached_at": after.get("sla_breached_at"),
+                "sla_extended_count": after.get("sla_extended_count"),
+                "sla_extension_reason": after.get("sla_extension_reason"),
+                "sla_extension_seconds": after.get("sla_extension_seconds"),
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
 
 
 @app.post("/api/lifecycle/group/ignore")
