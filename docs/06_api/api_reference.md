@@ -7,7 +7,7 @@ This document describes the HTTP API implemented in `apps/flask_api/flask_app.py
 
 ## Base and auth
 
-- Base URL: `http(s)://<host>`
+- Base URL: `http(s)://RootSquirrels.pythonanywhere.com`
 - Public endpoints:
   - `GET /health`
   - `GET /api/health/db`
@@ -295,7 +295,7 @@ Use `tests/api/api_smoke.py`:
 
 ```bash
 python tests/api/api_smoke.py \
-  --base-url http://127.0.0.1:5000 \
+  --base-url `http(s)://RootSquirrels.pythonanywhere.com` \
   --tenant-id <tenant> \
   --workspace <workspace> \
   --token <bearer-token>
