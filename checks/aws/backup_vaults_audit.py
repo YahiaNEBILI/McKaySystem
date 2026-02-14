@@ -59,6 +59,8 @@ from checks.aws._common import (
     build_scope,
     money,
     paginate_items,
+    pricing_first_positive,
+    pricing_service,
     safe_region_from_client,
 )
 from checks.registry import register_checker
@@ -105,24 +107,32 @@ def _pricing_backup_gb_month_price(
 
     Returns: (unit_price_usd, notes, confidence)
     """
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
+    pricing = pricing_service(ctx)
     if pricing is None:
         return fallback_usd, "Fallback pricing (no PricingService)", 0
 
-    fn = getattr(pricing, "backup_storage_gb_month", None)
-    if fn is None:
-        return fallback_usd, "Fallback pricing (PricingService missing backup_storage_gb_month)", 0
+    normalized = str(storage_class or "").strip().lower()
+    tier = "cold" if normalized in {"cold", "cold_storage", "coldstorage"} else "warm"
 
-    try:
-        val = fn(region=region, storage_class=storage_class)
-        if val is None:
-            return fallback_usd, "Fallback pricing (PricingService returned None)", 0
-        unit = float(val)
-        if unit <= 0.0:
-            return fallback_usd, "Fallback pricing (PricingService returned non-positive)", 0
-        return unit, "PricingService", 70
-    except Exception as exc:  # pragma: no cover
-        return fallback_usd, f"Fallback pricing (PricingService error: {exc})", 0
+    unit, method_name = pricing_first_positive(
+        pricing,
+        method_names=(
+            "backup_storage_gb_month",
+            "backup_storage_gb_month_price",
+            "backup_gb_month_price",
+            "aws_backup_storage_gb_month_price",
+            "aws_backup_gb_month_price",
+        ),
+        kwargs_variants=(
+            {"region": region, "storage_class": storage_class},
+            {"region": region, "storage_class": tier},
+            {"region": region, "tier": tier},
+        ),
+        args_variants=((region, storage_class), (region, tier)),
+    )
+    if unit is None:
+        return fallback_usd, "Fallback pricing (PricingService unavailable/unknown)", 0
+    return float(unit), f"PricingService ({method_name})", 70
 
 
 def _parse_account_id_from_principal(principal: str) -> Optional[str]:

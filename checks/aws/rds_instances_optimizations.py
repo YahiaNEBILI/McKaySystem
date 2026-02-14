@@ -110,7 +110,7 @@ def _resolve_rds_instance_hour_price(
             database_engine=engine or None,
             license_model=license_model or None,
         )
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         quote = None
 
     if quote is None:

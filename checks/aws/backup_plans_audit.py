@@ -53,6 +53,8 @@ from checks.aws._common import (
     money,
     now_utc,
     paginate_items,
+    pricing_first_positive,
+    pricing_service,
     safe_float,
     safe_region_from_client,
     utc,
@@ -88,7 +90,7 @@ def _pricing_backup_gb_month_price(
 
     Returns: (unit_price_usd_per_gb_month, notes, confidence)
     """
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
+    pricing = pricing_service(ctx)
     if pricing is None:
         return float(fallback_usd), "PricingService unavailable; using configured fallback $/GB-month.", 10
 
@@ -106,25 +108,17 @@ def _pricing_backup_gb_month_price(
         "aws_backup_gb_month_price",
     )
 
-    for method_name in candidates:
-        fn = getattr(pricing, method_name, None)
-        if fn is None:
-            continue
-        try:
-            # Try a couple call signatures (keyword-only preferred)
-            try:
-                price = fn(region=region, tier=tier)
-            except TypeError:
-                try:
-                    price = fn(region=region, storage_class=tier)
-                except TypeError:
-                    price = fn(region, tier)
-            price_f = float(price)
-            if price_f > 0.0:
-                return price_f, f"Unit price from PricingService ({method_name}, tier={tier}).", 60
-        except Exception:
-            # Best-effort only, fall through to fallback
-            continue
+    price_f, method_name = pricing_first_positive(
+        pricing,
+        method_names=candidates,
+        kwargs_variants=(
+            {"region": region, "tier": tier},
+            {"region": region, "storage_class": tier},
+        ),
+        args_variants=((region, tier),),
+    )
+    if price_f is not None:
+        return float(price_f), f"Unit price from PricingService ({method_name}, tier={tier}).", 60
 
     return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
 

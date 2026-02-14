@@ -271,3 +271,56 @@ def paginate_items(
                 break
         if not next_token:
             break
+
+
+def pricing_service(ctx: Any) -> Any:
+    """Return PricingService from RunContext-like objects, else None."""
+    return getattr(getattr(ctx, "services", None), "pricing", None)
+
+
+def pricing_first_positive(
+    pricing: Any,
+    *,
+    method_names: Sequence[str],
+    kwargs_variants: Sequence[Mapping[str, Any]] = (),
+    args_variants: Sequence[Sequence[Any]] = (),
+    call_exceptions: Tuple[type[Exception], ...] = (Exception,),
+) -> Tuple[Optional[float], str]:
+    """Return first strictly-positive pricing value and method name.
+
+    This helper is intentionally best-effort: it tries multiple method names and
+    call signatures and returns ``(None, "")`` when no positive price is found.
+    """
+    if pricing is None:
+        return None, ""
+
+    for method_name in method_names:
+        fn = getattr(pricing, method_name, None)
+        if not callable(fn):
+            continue
+
+        for kwargs in kwargs_variants:
+            try:
+                value = fn(**dict(kwargs))
+            except call_exceptions:
+                continue
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if price > 0.0:
+                return price, method_name
+
+        for args in args_variants:
+            try:
+                value = fn(*tuple(args))
+            except call_exceptions:
+                continue
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if price > 0.0:
+                return price, method_name
+
+    return None, ""
