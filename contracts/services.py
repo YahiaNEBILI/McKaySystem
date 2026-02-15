@@ -43,6 +43,8 @@ class Services:
     lambda_client: Any = None
     cloudwatch: Any = None
     logs: Any = None
+    savingsplans: Any = None
+    ce: Any = None  # Cost Explorer client (global, us-east-1)
     region: str = ""
     pricing: Any = None
 
@@ -69,6 +71,8 @@ class ServicesFactory:
         self._sdk_config = sdk_config
         self._by_region: dict[str, Services] = {}
         self._s3_global: Any | None = None
+        self._savingsplans_global: Any | None = None
+        self._ce_global: Any | None = None
         self._pricing_client = self._client("pricing", region="us-east-1")
         self._pricing_cache = make_pricing_cache(base_dir=default_cache_dir(), ttl_days=7)
         self._pricing_service = PricingService(pricing_client=self._pricing_client, cache=self._pricing_cache)
@@ -89,6 +93,18 @@ class ServicesFactory:
         if self._s3_global is None:
             self._s3_global = self._client("s3", region=None)
         return self._s3_global
+
+    def global_savingsplans(self) -> Any:
+        """Savings Plans inventory is account-wide; reuse one client."""
+        if self._savingsplans_global is None:
+            self._savingsplans_global = self._client("savingsplans", region="us-east-1")
+        return self._savingsplans_global
+
+    def global_ce(self) -> Any:
+        """Cost Explorer is a global API; reuse one client."""
+        if self._ce_global is None:
+            self._ce_global = self._client("ce", region="us-east-1")
+        return self._ce_global
 
     def for_region(self, region: str) -> Services:
         """
@@ -115,6 +131,8 @@ class ServicesFactory:
             lambda_client=self._client("lambda", region=reg),
             cloudwatch=self._client("cloudwatch", region=reg),
             logs=self._client("logs", region=reg),
+            savingsplans=self.global_savingsplans(),
+            ce=self.global_ce(),
             pricing=self._pricing_service,
             region=reg,
         )

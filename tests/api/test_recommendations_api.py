@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-import apps.flask_api.flask_app as flask_app
 import apps.flask_api.blueprints.recommendations as recommendations_blueprint
+import apps.flask_api.flask_app as flask_app
 
 
 class _DummyConn:
@@ -273,6 +273,53 @@ def test_recommendations_response_ri_coverage_gap_is_enriched(monkeypatch) -> No
     assert (item.get("current") or {}).get("value") == "33.33"
     assert (item.get("target") or {}).get("value") == "90.00"
     assert "m5.large" in str(item.get("action") or "")
+
+
+def test_recommendations_response_savings_plan_coverage_gap_is_enriched(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Savings Plan coverage-gap recommendations should expose hourly commitment guidance."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        return [
+            {
+                "fingerprint": "fp-sp-gap",
+                "check_id": "aws.ec2.savings.plans.coverage.gap",
+                "service": "ec2",
+                "severity": "high",
+                "category": "cost",
+                "title": "Savings Plan coverage gap",
+                "estimated_monthly_savings": 36.5,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "dimensions": {
+                        "estimated_demand_usd_per_hour": "0.2000",
+                        "committed_usd_per_hour": "0.0000",
+                        "uncovered_usd_per_hour": "0.2000",
+                    }
+                },
+            }
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 1}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    assert item.get("recommendation_type") == "commitment.ec2.savings_plan.coverage"
+    assert item.get("action_type") == "purchase"
+    assert (item.get("current") or {}).get("value") == "0.0000"
+    assert (item.get("target") or {}).get("value") == "0.2000"
+    assert "$0.2000/hr" in str(item.get("action") or "")
 
 
 def test_recommendations_estimate_is_scoped_and_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]

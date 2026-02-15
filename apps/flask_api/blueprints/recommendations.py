@@ -78,6 +78,32 @@ _RECOMMENDATION_RULES: Dict[str, Dict[str, Any]] = {
         "pricing_source": "finding_estimate",
         "requires_approval": True,
     },
+    "aws.ec2.savings.plans.coverage.gap": {
+        "recommendation_type": "commitment.ec2.savings_plan.coverage",
+        "action": "Increase EC2 Savings Plan commitment for steady-state demand.",
+        "priority": "p1",
+        "action_type": "purchase",
+        "target_kind": "commitment_usd_per_hour",
+        "target_value": "match_demand",
+        "current_kind": "commitment_usd_per_hour",
+        "current_value": "current",
+        "confidence": 66,
+        "pricing_source": "finding_estimate",
+        "requires_approval": True,
+    },
+    "aws.ec2.savings.plans.utilization.low": {
+        "recommendation_type": "commitment.ec2.savings_plan.utilization",
+        "action": "Optimize underutilized EC2 Savings Plan commitments.",
+        "priority": "p1",
+        "action_type": "tune",
+        "target_kind": "utilization_pct",
+        "target_value": ">=80",
+        "current_kind": "utilization_pct",
+        "current_value": "current",
+        "confidence": 60,
+        "pricing_source": "finding_estimate",
+        "requires_approval": True,
+    },
     "aws.rds.storage.overprovisioned": {
         "recommendation_type": "rightsizing.rds.storage",
         "action": "Reduce allocated RDS storage to match observed baseline plus safety headroom.",
@@ -372,6 +398,34 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
             action = (
                 f"Reduce unused RI commitments for {instance_type} (~{unused} unit(s)) via "
                 "modification/exchange/reallocation."
+            )
+
+    if check_id == "aws.ec2.savings.plans.coverage.gap":
+        demand_hourly = str(dimensions.get("estimated_demand_usd_per_hour") or "").strip()
+        committed_hourly = str(dimensions.get("committed_usd_per_hour") or "").strip()
+        uncovered_hourly = str(dimensions.get("uncovered_usd_per_hour") or "").strip()
+        if committed_hourly:
+            current_value = committed_hourly
+        if demand_hourly:
+            target_value = demand_hourly
+        if uncovered_hourly:
+            action = (
+                f"Increase Savings Plan commitment by about ${uncovered_hourly}/hr "
+                "after validating steady-state demand."
+            )
+
+    if check_id == "aws.ec2.savings.plans.utilization.low":
+        utilization_pct = str(dimensions.get("utilization_pct") or "").strip()
+        target_utilization_pct = str(dimensions.get("target_utilization_pct") or "").strip()
+        unused_hourly = str(dimensions.get("unused_usd_per_hour") or "").strip()
+        if utilization_pct:
+            current_value = utilization_pct
+        if target_utilization_pct:
+            target_value = target_utilization_pct
+        if unused_hourly:
+            action = (
+                f"Reduce underused Savings Plan commitment (about ${unused_hourly}/hr appears unused) "
+                "through workload alignment and commitment planning."
             )
 
     return {

@@ -21,6 +21,10 @@ EC2_RI_UTILIZATION_LOW_THRESHOLD_PCT: Final[float] = 80.0
 EC2_RI_MIN_COVERAGE_GAP_INSTANCES: Final[int] = 1
 EC2_RI_POTENTIAL_SAVINGS_DISCOUNT_FACTOR: Final[float] = 0.30
 EC2_RI_UNUSED_EFFECTIVE_COST_FACTOR: Final[float] = 0.70
+EC2_SP_LOW_UTILIZATION_THRESHOLD_PCT: Final[float] = 80.0
+EC2_SP_MIN_COVERAGE_GAP_USD_PER_HOUR: Final[float] = 0.05
+EC2_SP_POTENTIAL_SAVINGS_DISCOUNT_FACTOR: Final[float] = 0.25
+EC2_SP_UNUSED_COMMITMENT_COST_FACTOR: Final[float] = 1.00
 
 # ECS/EKS containers checker defaults
 CONTAINERS_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
@@ -189,3 +193,40 @@ EBS_SUPPRESS_VALUE_PREFIXES: Final[tuple[str, ...]] = (
     "donotdelete",
 )
 EBS_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+
+# Cost Explorer Analyzer defaults
+# See: cost_explorer_checker_design_v2.md
+
+# Lookback and freshness windows
+COST_EXPLORER_LOOKBACK_MONTHS: Final[int] = 12
+COST_EXPLORER_CE_FRESHNESS_MONTHS: Final[int] = 3
+
+# Guardrails (threshold-based detection)
+COST_EXPLORER_SPIKE_THRESHOLD_PCT: Final[float] = 20.0
+COST_EXPLORER_DROP_THRESHOLD_PCT: Final[float] = 20.0
+COST_EXPLORER_MIN_COST_ABS: Final[float] = 25.0
+COST_EXPLORER_MIN_DELTA_ABS: Final[float] = 50.0
+
+# Moving average / Z-score
+COST_EXPLORER_MIN_MONTHS_FOR_MOVING: Final[int] = 2
+COST_EXPLORER_MOVING_AVG_WINDOW_MONTHS: Final[int] = 3
+COST_EXPLORER_MOVING_AVG_THRESHOLD_PCT: Final[float] = 50.0
+COST_EXPLORER_ENABLE_ZSCORE: Final[bool] = True
+COST_EXPLORER_ZSCORE_THRESHOLD: Final[float] = 2.0
+
+# Year-over-Year
+COST_EXPLORER_ENABLE_YOY: Final[bool] = True
+COST_EXPLORER_YOY_THRESHOLD_PCT: Final[float] = 30.0
+COST_EXPLORER_YOY_MIN_MONTHS: Final[int] = 12
+
+# Trend (regression-based)
+COST_EXPLORER_TREND_MIN_MONTHS: Final[int] = 3
+COST_EXPLORER_TREND_WINDOW_MONTHS: Final[int] = 6
+COST_EXPLORER_TREND_SLOPE_MIN_ABS: Final[float] = 50.0
+COST_EXPLORER_TREND_SLOPE_MIN_PCT: Final[float] = 10.0
+
+# Service discovery
+COST_EXPLORER_DISCOVERY_HYSTERESIS_MONTHS: Final[int] = 1
+
+# CUR backfill (optional)
+COST_EXPLORER_ENABLE_CUR_BACKFILL: Final[bool] = False

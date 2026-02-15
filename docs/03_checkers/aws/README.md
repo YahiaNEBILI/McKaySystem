@@ -11,6 +11,7 @@ Service-specific checker references:
 - `ebs.md`
 - `ec2.md`
 - `ec2_reserved_instances.md`
+- `ec2_savings_plans.md`
 - `ecs_eks.md`
 - `efs.md`
 - `elbv2.md`
