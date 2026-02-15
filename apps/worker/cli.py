@@ -63,6 +63,26 @@ def _env_default(name: str, default: Optional[str] = None) -> Optional[str]:
     return v
 
 
+def _pricing_env_from_args(args: argparse.Namespace) -> dict[str, str]:
+    """Build optional pricing metadata env overrides for runner commands."""
+    env: dict[str, str] = {}
+    pricing_version = (
+        getattr(args, "pricing_version", None)
+        or _env_default("PRICING_VERSION")
+        or _env_default("FINOPS_PRICING_VERSION")
+    )
+    pricing_source = (
+        getattr(args, "pricing_source", None)
+        or _env_default("PRICING_SOURCE")
+        or _env_default("FINOPS_PRICING_SOURCE")
+    )
+    if pricing_version:
+        env["PRICING_VERSION"] = pricing_version
+    if pricing_source:
+        env["PRICING_SOURCE"] = pricing_source
+    return env
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     root = _repo_root()
     tenant = args.tenant or _env_default("TENANT_ID")
@@ -79,7 +99,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise SystemExit(f"{runner_module} module not found. Run from the project directory.")
 
     cmd = [_python(), "-m", runner_module, "--tenant", tenant, "--workspace", workspace, "--out", out_dir]
-    _run_cmd(cmd, cwd=root)
+    env = dict(os.environ)
+    env.update(_pricing_env_from_args(args))
+    _run_cmd(cmd, cwd=root, env=env)
 
 
 def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argument
@@ -241,8 +263,27 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--tenant", default=None, help="Tenant id (or TENANT_ID env var).")
         sp.add_argument("--workspace", default=None, help="Workspace (or WORKSPACE env var).")
 
+    def add_pricing_metadata(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--pricing-version",
+            default=None,
+            help=(
+                "Pricing snapshot version for run metadata "
+                "(or PRICING_VERSION / FINOPS_PRICING_VERSION env var)."
+            ),
+        )
+        sp.add_argument(
+            "--pricing-source",
+            default=None,
+            help=(
+                "Pricing source label for run metadata "
+                "(or PRICING_SOURCE / FINOPS_PRICING_SOURCE env var)."
+            ),
+        )
+
     sp = sub.add_parser("run", help="Run checkers and produce parquet output.")
     add_tenant_workspace(sp)
+    add_pricing_metadata(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var). Default: data/finops_findings")
     sp.set_defaults(func=cmd_run)
 
@@ -268,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_migrate)
     sp = sub.add_parser("run-all", help="Run -> ingest -> (optional) export.")
     add_tenant_workspace(sp)
+    add_pricing_metadata(sp)
     sp.add_argument("--out", default=None, help="Output directory (or OUT_DIR env var).")
     sp.add_argument("--db-url", default=None, help="Database URL (or DB_URL env var).")
     sp.add_argument("--skip-export", action="store_true", help="Skip export step.")

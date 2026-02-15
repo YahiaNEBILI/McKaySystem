@@ -9,6 +9,7 @@ Last reviewed: 2026-02-01
 2. Run the CLI / runner with:
    - tenant_id, workspace
    - output base directory
+   - pricing metadata (`PRICING_VERSION`, `PRICING_SOURCE`) for reproducible recommendation estimates
    - optional flags to enable/disable correlation and CUR enrichment
 3. (Optional) Use `mckay run-all` to run -> ingest -> export (if `DB_URL` is set).
 4. (Recommended before ingest) Run `mckay recover --tenant <tenant> --workspace <workspace> --db-url <url>`
@@ -19,6 +20,23 @@ Last reviewed: 2026-02-01
 - Raw findings Parquet (system of record)
 - Correlated findings Parquet (optional)
 - JSON exports for UI (optional)
+
+Pricing metadata for run manifests:
+
+```
+export PRICING_VERSION=aws_2026_02_01
+export PRICING_SOURCE=snapshot
+mckay run-all --tenant <tenant> --workspace <workspace> --db-url <url>
+```
+
+Equivalent explicit CLI flags:
+
+```
+mckay run-all --tenant <tenant> --workspace <workspace> \
+  --pricing-version aws_2026_02_01 \
+  --pricing-source snapshot \
+  --db-url <url>
+```
 
 See:
 - `02_pipeline/pipeline_overview.md`
