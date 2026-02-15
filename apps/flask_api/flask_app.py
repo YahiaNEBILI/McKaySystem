@@ -413,6 +413,146 @@ def _enforce_api_auth() -> None:
 
 
 # --------------------
+# OpenAPI + API versioning
+# --------------------
+
+_OPENAPI_EXCLUDED_CANONICAL_PATHS = {"/api/openapi.json"}
+
+
+def _operation_summary_from_view(view_func: Any, method: str, path: str) -> str:
+    doc = str(getattr(view_func, "__doc__", "") or "").strip()
+    if doc:
+        return doc.splitlines()[0].strip()
+    clean = path.strip("/").replace("/", " ")
+    return f"{method.upper()} {clean or 'root'}"
+
+
+def _openapi_security_for_path(path: str) -> list[dict[str, list[str]]]:
+    # Keep health + OpenAPI discovery unauthenticated in docs.
+    if path in {"/api/health/db", "/api/openapi.json"}:
+        return []
+    return [{"bearerAuth": []}]
+
+
+def _build_openapi_spec() -> Dict[str, Any]:
+    """Build OpenAPI 3.0 spec from registered Flask API routes."""
+    paths: Dict[str, Dict[str, Any]] = {}
+    seen_ops: Set[Tuple[str, str]] = set()
+
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == "static":
+            continue
+
+        canonical = _canonical_api_path(str(rule.rule or ""))
+        if not canonical.startswith("/api/"):
+            continue
+        if canonical in _OPENAPI_EXCLUDED_CANONICAL_PATHS:
+            continue
+
+        subpath = canonical[len("/api") :] or "/"
+        openapi_path = _rule_to_openapi_path(subpath)
+
+        raw_methods = set(rule.methods or set())
+        methods = sorted(m.lower() for m in raw_methods if m not in {"HEAD", "OPTIONS"})
+        if not methods:
+            continue
+
+        view_func = app.view_functions.get(rule.endpoint)
+        if view_func is None:
+            continue
+
+        path_item = paths.setdefault(openapi_path, {})
+        for method in methods:
+            op_key = (openapi_path, method)
+            if op_key in seen_ops:
+                continue
+            seen_ops.add(op_key)
+
+            method_u = method.upper()
+            parameters: List[Dict[str, Any]] = []
+            for arg in sorted(rule.arguments):
+                parameters.append(
+                    {
+                        "name": arg,
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
+                )
+
+            operation: Dict[str, Any] = {
+                "operationId": f"{rule.endpoint.replace('.', '_')}_{method}",
+                "summary": _operation_summary_from_view(view_func, method_u, openapi_path),
+                "tags": [openapi_path.strip("/").split("/", 1)[0] or "root"],
+                "parameters": parameters,
+                "responses": {
+                    "200": {"description": "Successful response"},
+                    "400": {"description": "Bad request"},
+                    "500": {"description": "Internal server error"},
+                },
+                "security": _openapi_security_for_path(canonical),
+            }
+            if method in {"post", "put", "patch"}:
+                operation["requestBody"] = {
+                    "required": False,
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object"},
+                        }
+                    },
+                }
+            path_item[method] = operation
+
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "McKaySystem API",
+            "version": _API_VERSION,
+            "description": "Generated from Flask routes; versioned and legacy API bases are both supported.",
+        },
+        "servers": [
+            {"url": _API_PREFIX, "description": f"Versioned API base ({_API_VERSION})"},
+            {"url": "/api", "description": "Legacy API base (compatibility)"},
+        ],
+        "paths": dict(sorted(paths.items(), key=lambda kv: kv[0])),
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "token",
+                }
+            }
+        },
+    }
+
+
+@app.get("/openapi.json")
+def api_openapi_public() -> Any:
+    """OpenAPI 3.0 specification (public endpoint)."""
+    return _json(_build_openapi_spec())
+
+
+@app.get("/api/openapi.json")
+def api_openapi_scoped() -> Any:
+    """OpenAPI 3.0 specification under API base."""
+    return _json(_build_openapi_spec())
+
+
+@app.get("/api/version")
+def api_version() -> Any:
+    """API version metadata and supported versions."""
+    return _json(
+        {
+            "version": _API_VERSION,
+            "prefix": _API_PREFIX,
+            "supported_versions": [_API_VERSION],
+            "legacy_prefix": "/api",
+        }
+    )
+
+
+# --------------------
 # Small parsing helpers
 # --------------------
 
@@ -3198,6 +3338,52 @@ def api_lifecycle_snooze() -> Any:
         return jsonify({"ok": True})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+_versioned_aliases_registered = False
+
+
+def _register_versioned_api_aliases() -> None:
+    """Register `/api/<version>/...` aliases for all existing `/api/...` routes."""
+    global _versioned_aliases_registered
+    if _versioned_aliases_registered:
+        return
+
+    existing_rules = {str(rule.rule or "") for rule in app.url_map.iter_rules()}
+    rules = list(app.url_map.iter_rules())
+    for rule in rules:
+        raw_path = str(rule.rule or "")
+        if not raw_path.startswith("/api/"):
+            continue
+        if re.match(r"^/api/v\d+(?:/|$)", raw_path):
+            continue
+
+        versioned_path = f"{_API_PREFIX}{raw_path[len('/api'):]}"
+        if versioned_path in existing_rules:
+            continue
+
+        view_func = app.view_functions.get(rule.endpoint)
+        if view_func is None:
+            continue
+
+        methods = sorted(m for m in (rule.methods or set()) if m not in {"HEAD", "OPTIONS"})
+        if not methods:
+            continue
+
+        alias_endpoint = f"{rule.endpoint}__{_API_VERSION}"
+        app.add_url_rule(
+            versioned_path,
+            endpoint=alias_endpoint,
+            view_func=view_func,
+            methods=methods,
+            strict_slashes=rule.strict_slashes,
+        )
+        existing_rules.add(versioned_path)
+
+    _versioned_aliases_registered = True
+
+
+_register_versioned_api_aliases()
 
 
 if __name__ == "__main__":

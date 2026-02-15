@@ -8,6 +8,14 @@ This document describes the HTTP API implemented in `apps/flask_api/flask_app.py
 ## Base and auth
 
 - Base URL: `http(s)://RootSquirrels.pythonanywhere.com`
+- Versioned API base: `/api/v1`
+- Legacy compatibility base (still supported): `/api`
+- OpenAPI 3.0 spec endpoints:
+  - `GET /openapi.json` (public)
+  - `GET /api/openapi.json`
+  - `GET /api/v1/openapi.json`
+- Version metadata endpoint:
+  - `GET /api/version` (also available as `/api/v1/version`)
 - Public endpoints:
   - `GET /health`
   - `GET /api/health/db`
