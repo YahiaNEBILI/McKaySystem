@@ -10,6 +10,7 @@ Service-specific checker references:
 - `cloudwatch.md`
 - `ebs.md`
 - `ec2.md`
+- `ec2_reserved_instances.md`
 - `ecs_eks.md`
 - `efs.md`
 - `elbv2.md`

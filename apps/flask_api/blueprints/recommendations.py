@@ -52,6 +52,32 @@ _RECOMMENDATION_RULES: Dict[str, Dict[str, Any]] = {
         "pricing_source": "finding_estimate",
         "requires_approval": False,
     },
+    "aws.ec2.ri.coverage.gap": {
+        "recommendation_type": "commitment.ec2.ri.coverage",
+        "action": "Increase EC2 Reserved Instance coverage for steady-state usage.",
+        "priority": "p1",
+        "action_type": "purchase",
+        "target_kind": "coverage_pct",
+        "target_value": "90",
+        "current_kind": "coverage_pct",
+        "current_value": "current",
+        "confidence": 66,
+        "pricing_source": "finding_estimate",
+        "requires_approval": True,
+    },
+    "aws.ec2.ri.utilization.low": {
+        "recommendation_type": "commitment.ec2.ri.utilization",
+        "action": "Optimize underutilized EC2 Reserved Instance commitments.",
+        "priority": "p1",
+        "action_type": "tune",
+        "target_kind": "utilization_pct",
+        "target_value": ">=80",
+        "current_kind": "utilization_pct",
+        "current_value": "current",
+        "confidence": 60,
+        "pricing_source": "finding_estimate",
+        "requires_approval": True,
+    },
     "aws.rds.storage.overprovisioned": {
         "recommendation_type": "rightsizing.rds.storage",
         "action": "Reduce allocated RDS storage to match observed baseline plus safety headroom.",
@@ -316,6 +342,36 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
             action = (
                 f"Reduce allocated RDS storage from {allocated_gb} GB toward observed baseline "
                 f"({estimated_used_gb} GB) after validating growth headroom."
+            )
+
+    if check_id == "aws.ec2.ri.coverage.gap":
+        instance_type = str(dimensions.get("instance_type") or "").strip()
+        uncovered = str(dimensions.get("uncovered_count") or "").strip()
+        coverage_pct = str(dimensions.get("coverage_pct") or "").strip()
+        target_coverage_pct = str(dimensions.get("target_coverage_pct") or "").strip()
+        if coverage_pct:
+            current_value = coverage_pct
+        if target_coverage_pct:
+            target_value = target_coverage_pct
+        if instance_type and uncovered:
+            action = (
+                f"Increase RI coverage for {instance_type} by about {uncovered} instance(s) "
+                "after validating baseline demand."
+            )
+
+    if check_id == "aws.ec2.ri.utilization.low":
+        instance_type = str(dimensions.get("instance_type") or "").strip()
+        unused = str(dimensions.get("unused_count") or "").strip()
+        utilization_pct = str(dimensions.get("utilization_pct") or "").strip()
+        target_utilization_pct = str(dimensions.get("target_utilization_pct") or "").strip()
+        if utilization_pct:
+            current_value = utilization_pct
+        if target_utilization_pct:
+            target_value = target_utilization_pct
+        if instance_type and unused:
+            action = (
+                f"Reduce unused RI commitments for {instance_type} (~{unused} unit(s)) via "
+                "modification/exchange/reallocation."
             )
 
     return {

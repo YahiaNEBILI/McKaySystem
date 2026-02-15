@@ -227,6 +227,54 @@ def test_recommendations_response_uses_run_metadata_fallback(monkeypatch) -> Non
     assert item.get("pricing_version") == "aws_2026_04_01"
 
 
+def test_recommendations_response_ri_coverage_gap_is_enriched(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """RI coverage-gap recommendations should expose actionable target/current values."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        return [
+            {
+                "fingerprint": "fp-ri-gap",
+                "check_id": "aws.ec2.ri.coverage.gap",
+                "service": "ec2",
+                "severity": "high",
+                "category": "cost",
+                "title": "RI coverage gap",
+                "estimated_monthly_savings": 43.8,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "dimensions": {
+                        "instance_type": "m5.large",
+                        "uncovered_count": "2",
+                        "coverage_pct": "33.33",
+                        "target_coverage_pct": "90.00",
+                    }
+                },
+            }
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 1}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    assert item.get("recommendation_type") == "commitment.ec2.ri.coverage"
+    assert item.get("action_type") == "purchase"
+    assert (item.get("current") or {}).get("value") == "33.33"
+    assert (item.get("target") or {}).get("value") == "90.00"
+    assert "m5.large" in str(item.get("action") or "")
+
+
 def test_recommendations_estimate_is_scoped_and_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """`/api/recommendations/estimate` should query finding_current with scope + fingerprint filter."""
     _disable_runtime_guards(monkeypatch)

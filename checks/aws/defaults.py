@@ -17,6 +17,10 @@ EC2_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
 EC2_T_CREDIT_LOOKBACK_DAYS: Final[int] = 7
 EC2_T_CREDIT_BALANCE_MIN_THRESHOLD: Final[float] = 20.0
 EC2_REQUIRED_INSTANCE_TAG_KEYS: Final[tuple[str, ...]] = ("ApplicationId", "Environment", "Application")
+EC2_RI_UTILIZATION_LOW_THRESHOLD_PCT: Final[float] = 80.0
+EC2_RI_MIN_COVERAGE_GAP_INSTANCES: Final[int] = 1
+EC2_RI_POTENTIAL_SAVINGS_DISCOUNT_FACTOR: Final[float] = 0.30
+EC2_RI_UNUSED_EFFECTIVE_COST_FACTOR: Final[float] = 0.70
 
 # ECS/EKS containers checker defaults
 CONTAINERS_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
