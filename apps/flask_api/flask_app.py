@@ -687,7 +687,7 @@ def api_runs_latest() -> Any:
                 conn,
                 """
                 SELECT tenant_id, workspace, run_id, run_ts, status, artifact_prefix,
-                       ingested_at, engine_version,
+                       ingested_at, engine_version, pricing_version, pricing_source,
                        raw_present, correlated_present, enriched_present
                 FROM runs
                 WHERE tenant_id = %s AND workspace = %s

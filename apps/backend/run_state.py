@@ -163,6 +163,8 @@ def begin_run_running(
     run_ts: datetime,
     artifact_prefix: str,
     engine_version: Optional[str],
+    pricing_version: Optional[str],
+    pricing_source: Optional[str],
     raw_present: bool,
     correlated_present: bool,
     enriched_present: bool,
@@ -191,9 +193,10 @@ def begin_run_running(
                 """
                 INSERT INTO runs
                   (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at, engine_version,
+                   pricing_version, pricing_source,
                    raw_present, correlated_present, enriched_present)
                 VALUES
-                  (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s)
+                  (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     tenant_id,
@@ -203,6 +206,8 @@ def begin_run_running(
                     STATE_RUNNING,
                     artifact_prefix,
                     engine_version,
+                    pricing_version,
+                    pricing_source,
                     bool(raw_present),
                     bool(correlated_present),
                     bool(enriched_present),
@@ -216,6 +221,8 @@ def begin_run_running(
                     status=%s,
                     artifact_prefix=%s,
                     engine_version=%s,
+                    pricing_version=%s,
+                    pricing_source=%s,
                     raw_present=%s,
                     correlated_present=%s,
                     enriched_present=%s,
@@ -227,6 +234,8 @@ def begin_run_running(
                     STATE_RUNNING,
                     artifact_prefix,
                     engine_version,
+                    pricing_version,
+                    pricing_source,
                     bool(raw_present),
                     bool(correlated_present),
                     bool(enriched_present),
@@ -315,6 +324,8 @@ def transition_run_to_failed(
     run_ts: datetime,
     artifact_prefix: str,
     engine_version: Optional[str],
+    pricing_version: Optional[str],
+    pricing_source: Optional[str],
     actor: str,
     reason: str,
 ) -> None:
@@ -338,9 +349,10 @@ def transition_run_to_failed(
                 """
                 INSERT INTO runs
                   (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at, engine_version,
+                   pricing_version, pricing_source,
                    raw_present, correlated_present, enriched_present)
                 VALUES
-                  (%s, %s, %s, %s, %s, %s, NULL, %s, FALSE, FALSE, FALSE)
+                  (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, FALSE, FALSE, FALSE)
                 """,
                 (
                     tenant_id,
@@ -350,16 +362,20 @@ def transition_run_to_failed(
                     STATE_FAILED,
                     artifact_prefix,
                     engine_version,
+                    pricing_version,
+                    pricing_source,
                 ),
             )
         else:
             cur.execute(
                 """
                 UPDATE runs
-                SET status=%s
+                SET status=%s,
+                    pricing_version=COALESCE(%s, pricing_version),
+                    pricing_source=COALESCE(%s, pricing_source)
                 WHERE tenant_id=%s AND workspace=%s AND run_id=%s
                 """,
-                (STATE_FAILED, tenant_id, workspace, run_id),
+                (STATE_FAILED, pricing_version, pricing_source, tenant_id, workspace, run_id),
             )
 
     append_run_event(

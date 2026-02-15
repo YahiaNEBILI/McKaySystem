@@ -544,13 +544,16 @@ def ingest_from_manifest(
         api.execute(
             """
             INSERT INTO runs (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at, engine_version,
+                              pricing_version, pricing_source,
                               raw_present, correlated_present, enriched_present)
-            VALUES (%s, %s, %s, %s, 'running', %s, NULL, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, 'running', %s, NULL, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (tenant_id, workspace, run_id) DO UPDATE SET
               run_ts = EXCLUDED.run_ts,
               status = 'running',
               artifact_prefix = EXCLUDED.artifact_prefix,
               engine_version = EXCLUDED.engine_version,
+              pricing_version = EXCLUDED.pricing_version,
+              pricing_source = EXCLUDED.pricing_source,
               raw_present = EXCLUDED.raw_present,
               correlated_present = EXCLUDED.correlated_present,
               enriched_present = EXCLUDED.enriched_present,
@@ -563,6 +566,8 @@ def ingest_from_manifest(
                 run_ts,
                 dataset_dir,
                 manifest.engine_version,
+                manifest.pricing_version,
+                manifest.pricing_source,
                 raw_present,
                 correlated_present,
                 enriched_present,
@@ -895,6 +900,8 @@ def _ingest_with_copy(
                 run_ts=run_ts,
                 artifact_prefix=dataset_dir,
                 engine_version=manifest.engine_version,
+                pricing_version=manifest.pricing_version,
+                pricing_source=manifest.pricing_source,
                 raw_present=raw_present,
                 correlated_present=correlated_present,
                 enriched_present=enriched_present,
@@ -1135,6 +1142,8 @@ def _ingest_with_copy(
                     run_ts=run_ts,
                     artifact_prefix=dataset_dir,
                     engine_version=manifest.engine_version,
+                    pricing_version=manifest.pricing_version,
+                    pricing_source=manifest.pricing_source,
                     actor=lock_owner,
                     reason=str(exc),
                 )

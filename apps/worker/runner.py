@@ -94,6 +94,15 @@ def _non_empty_dir(path: str) -> bool:
     return os.path.isdir(path) and bool(glob.glob(f"{path}/**/*.parquet", recursive=True))
 
 
+def _env_first_non_empty(*names: str) -> str:
+    """Return the first non-empty environment value for the provided names."""
+    for name in names:
+        value = str(os.getenv(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _make_run_id(run_ts: datetime) -> str:
     return f"run-{run_ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}"
 
@@ -614,6 +623,8 @@ def main(argv: Sequence[str]) -> int:
     # Downstream steps (export/ingest) should NOT rely on hidden defaults for
     # tenant/workspace or dataset paths.
     try:
+        pricing_version = _env_first_non_empty("PRICING_VERSION", "FINOPS_PRICING_VERSION")
+        pricing_source = _env_first_non_empty("PRICING_SOURCE", "FINOPS_PRICING_SOURCE")
         manifest = RunManifest(
             tenant_id=args.tenant,
             workspace=args.workspace,
@@ -623,6 +634,8 @@ def main(argv: Sequence[str]) -> int:
             engine_version=ENGINE_VERSION,
             rulepack_version=RULEPACK_VERSION,
             schema_version=SCHEMA_VERSION,
+            pricing_version=(pricing_version or None),
+            pricing_source=(pricing_source or None),
             out_raw=str(raw_out_dir),
             out_correlated=str(corr_out_dir),
             out_enriched=str(enriched_out_dir),

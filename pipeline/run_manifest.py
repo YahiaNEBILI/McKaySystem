@@ -43,6 +43,8 @@ class RunManifest:
     engine_version: Optional[str] = None
     rulepack_version: Optional[str] = None
     schema_version: Optional[int] = None
+    pricing_version: Optional[str] = None
+    pricing_source: Optional[str] = None
 
     # Paths
     out_raw: Optional[str] = None
@@ -69,6 +71,8 @@ class RunManifest:
             engine_version=(str(payload.get("engine_version") or "").strip() or None),
             rulepack_version=(str(payload.get("rulepack_version") or "").strip() or None),
             schema_version=(int(payload["schema_version"]) if payload.get("schema_version") is not None else None),
+            pricing_version=(str(payload.get("pricing_version") or "").strip() or None),
+            pricing_source=(str(payload.get("pricing_source") or "").strip() or None),
             out_raw=(str(payload.get("out_raw") or "").strip() or None),
             out_correlated=(str(payload.get("out_correlated") or "").strip() or None),
             out_enriched=(str(payload.get("out_enriched") or "").strip() or None),
