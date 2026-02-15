@@ -935,6 +935,126 @@ def _as_float(value: Any, *, default: float = 0.0) -> float:
         return default
 
 
+def _payload_dict(value: Any) -> Dict[str, Any]:
+    """Normalize finding payload to a dictionary."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _as_int_0_100(value: Any) -> Optional[int]:
+    """Coerce an optional confidence-like value to an integer between 0 and 100."""
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, n))
+
+
+def _payload_optional_str(payload: Dict[str, Any], *path: str) -> Optional[str]:
+    """Get an optional non-empty nested string from payload path."""
+    cur: Any = payload
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    if cur is None:
+        return None
+    text = str(cur).strip()
+    return text or None
+
+
+def _payload_estimated_confidence(payload: Dict[str, Any]) -> Optional[int]:
+    """Extract estimated confidence from canonical payload structure."""
+    est = payload.get("estimated")
+    if not isinstance(est, dict):
+        return None
+    return _as_int_0_100(est.get("confidence"))
+
+
+def _payload_pricing_source(payload: Dict[str, Any]) -> Optional[str]:
+    """Extract pricing source when available in finding payload."""
+    from_estimated = (
+        _payload_optional_str(payload, "estimated", "pricing_source")
+        or _payload_optional_str(payload, "estimated", "price_source")
+    )
+    if from_estimated:
+        return from_estimated
+
+    from_dimensions = (
+        _payload_optional_str(payload, "dimensions", "pricing_source")
+        or _payload_optional_str(payload, "dimensions", "price_source")
+    )
+    if from_dimensions:
+        return from_dimensions
+
+    metadata_json = _payload_optional_str(payload, "metadata_json")
+    if metadata_json:
+        try:
+            meta = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(meta, dict):
+            val = meta.get("pricing_source") or meta.get("price_source")
+            if val is not None:
+                text = str(val).strip()
+                return text or None
+    return None
+
+
+def _run_meta_pricing_source(run_meta: Dict[str, Any]) -> Optional[str]:
+    """Extract pricing source from run metadata payload when available."""
+    val = run_meta.get("pricing_source") or run_meta.get("price_source")
+    if val is None:
+        return None
+    text = str(val).strip()
+    return text or None
+
+
+def _payload_pricing_version(payload: Dict[str, Any]) -> Optional[str]:
+    """Extract pricing version when available in finding payload."""
+    from_estimated = _payload_optional_str(payload, "estimated", "pricing_version")
+    if from_estimated:
+        return from_estimated
+
+    from_dimensions = _payload_optional_str(payload, "dimensions", "pricing_version")
+    if from_dimensions:
+        return from_dimensions
+
+    metadata_json = _payload_optional_str(payload, "metadata_json")
+    if metadata_json:
+        try:
+            meta = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(meta, dict):
+            val = meta.get("pricing_version")
+            if val is not None:
+                text = str(val).strip()
+                return text or None
+    return None
+
+
+def _run_meta_pricing_version(run_meta: Dict[str, Any]) -> Optional[str]:
+    """Extract pricing version from run metadata payload when available."""
+    val = run_meta.get("pricing_version")
+    if val is None:
+        return None
+    text = str(val).strip()
+    return text or None
+
+
 def _coerce_text_list(value: Any, *, field_name: str) -> Optional[List[str]]:
     """Normalize list-like API input into a compact list of strings."""
     if value is None:
@@ -984,13 +1104,13 @@ def _build_recommendations_where_from_values(
     fingerprints: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[Any]]:
     """Build scoped SQL filters for recommendations endpoints."""
-    where = ["tenant_id = %s", "workspace = %s", "check_id = ANY(%s)"]
+    where = ["fc.tenant_id = %s", "fc.workspace = %s", "fc.check_id = ANY(%s)"]
     params: List[Any] = [tenant_id, workspace, _RECOMMENDATION_CHECK_IDS]
 
     def _add_any(field: str, values: Optional[List[str]]) -> None:
         if not values:
             return
-        where.append(f"{field} = ANY(%s)")
+        where.append(f"fc.{field} = ANY(%s)")
         params.append(values)
 
     _add_any("effective_state", effective_states)
@@ -1003,11 +1123,11 @@ def _build_recommendations_where_from_values(
     _add_any("fingerprint", fingerprints)
 
     if query_str:
-        where.append("title ILIKE %s")
+        where.append("fc.title ILIKE %s")
         params.append(f"%{query_str}%")
 
     if min_savings is not None:
-        where.append("COALESCE(estimated_monthly_savings, 0) >= %s")
+        where.append("COALESCE(fc.estimated_monthly_savings, 0) >= %s")
         params.append(min_savings)
 
     return where, params
@@ -1050,9 +1170,23 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a finding_current row to a recommendation item payload."""
     check_id = str(row.get("check_id") or "")
     rule = _RECOMMENDATION_RULES.get(check_id, _RECOMMENDATION_DEFAULT_RULE)
+    payload = _payload_dict(row.get("payload"))
+    run_meta = _payload_dict(row.get("run_meta"))
+
     monthly_savings = _as_float(row.get("estimated_monthly_savings"), default=0.0)
     annual_savings = round(monthly_savings * 12.0, 2)
-    confidence = int(rule.get("confidence") or 0)
+    confidence = _payload_estimated_confidence(payload)
+    if confidence is None:
+        confidence = int(rule.get("confidence") or 0)
+    pricing_source = _payload_pricing_source(payload)
+    if not pricing_source:
+        pricing_source = _run_meta_pricing_source(run_meta)
+    if not pricing_source:
+        pricing_source = str(rule["pricing_source"])
+
+    pricing_version = _payload_pricing_version(payload)
+    if not pricing_version:
+        pricing_version = _run_meta_pricing_version(run_meta)
     return {
         "fingerprint": row.get("fingerprint"),
         "check_id": check_id,
@@ -1076,7 +1210,8 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
         "estimated_annual_savings": annual_savings,
         "confidence": confidence,
         "confidence_label": "high" if confidence >= 80 else ("medium" if confidence >= 60 else "low"),
-        "pricing_source": rule["pricing_source"],
+        "pricing_source": pricing_source,
+        "pricing_version": pricing_version,
         "requires_approval": bool(rule.get("requires_approval")),
         "region": row.get("region"),
         "account_id": row.get("account_id"),
@@ -1151,10 +1286,15 @@ def api_recommendations() -> Any:
 
         sql = f"""
             SELECT
-              tenant_id, workspace, fingerprint, check_id, service, severity,
-              category, title, estimated_monthly_savings, region, account_id,
-              detected_at, effective_state
-            FROM finding_current
+              fc.tenant_id, fc.workspace, fc.fingerprint, fc.check_id, fc.service, fc.severity,
+              fc.category, fc.title, fc.estimated_monthly_savings, fc.region, fc.account_id,
+              fc.detected_at, fc.effective_state, fc.payload,
+              to_jsonb(r) AS run_meta
+            FROM finding_current fc
+            LEFT JOIN runs r
+              ON r.tenant_id = fc.tenant_id
+             AND r.workspace = fc.workspace
+             AND r.run_id = fc.run_id
             WHERE {' AND '.join(where)}
             ORDER BY {order_sql}
             LIMIT %s OFFSET %s
@@ -1165,7 +1305,7 @@ def api_recommendations() -> Any:
             rows = fetch_all_dict_conn(conn, sql, params2)
             count_row = fetch_one_dict_conn(
                 conn,
-                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                f"SELECT COUNT(*) AS n FROM finding_current fc WHERE {' AND '.join(where)}",
                 params,
             )
 
@@ -1218,7 +1358,7 @@ def api_recommendations_composite() -> Any:
               COUNT(*)::bigint AS finding_count,
               SUM(COALESCE(estimated_monthly_savings, 0))::double precision AS total_monthly_savings,
               (SUM(COALESCE(estimated_monthly_savings, 0)) * 12.0)::double precision AS total_annual_savings
-            FROM finding_current
+            FROM finding_current fc
             WHERE {' AND '.join(where)}
             GROUP BY group_key
             ORDER BY {order_sql}
@@ -1230,7 +1370,7 @@ def api_recommendations_composite() -> Any:
             SELECT COUNT(*) AS n
             FROM (
               SELECT {group_expr} AS group_key
-              FROM finding_current
+              FROM finding_current fc
               WHERE {' AND '.join(where)}
               GROUP BY group_key
             ) grouped
@@ -1316,10 +1456,15 @@ def api_recommendations_estimate() -> Any:
 
         sql = f"""
             SELECT
-              tenant_id, workspace, fingerprint, check_id, service, severity,
-              category, title, estimated_monthly_savings, region, account_id,
-              detected_at, effective_state
-            FROM finding_current
+              fc.tenant_id, fc.workspace, fc.fingerprint, fc.check_id, fc.service, fc.severity,
+              fc.category, fc.title, fc.estimated_monthly_savings, fc.region, fc.account_id,
+              fc.detected_at, fc.effective_state, fc.payload,
+              to_jsonb(r) AS run_meta
+            FROM finding_current fc
+            LEFT JOIN runs r
+              ON r.tenant_id = fc.tenant_id
+             AND r.workspace = fc.workspace
+             AND r.run_id = fc.run_id
             WHERE {' AND '.join(where)}
             ORDER BY {order_sql}
             LIMIT %s OFFSET %s
@@ -1330,13 +1475,26 @@ def api_recommendations_estimate() -> Any:
             rows = fetch_all_dict_conn(conn, sql, params2)
             count_row = fetch_one_dict_conn(
                 conn,
-                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                f"SELECT COUNT(*) AS n FROM finding_current fc WHERE {' AND '.join(where)}",
                 params,
             )
 
         items = [_build_recommendation_item(row) for row in rows]
         total_monthly_savings = round(sum(_as_float(item.get("estimated_monthly_savings")) for item in items), 2)
         total_annual_savings = round(total_monthly_savings * 12.0, 2)
+        pricing_versions = sorted(
+            {
+                str(item.get("pricing_version")).strip()
+                for item in items
+                if str(item.get("pricing_version") or "").strip()
+            }
+        )
+        pricing_version = "unknown"
+        if len(pricing_versions) == 1:
+            pricing_version = pricing_versions[0]
+        elif len(pricing_versions) > 1:
+            pricing_version = "mixed"
+
         avg_confidence = round(
             sum(int(item.get("confidence") or 0) for item in items) / max(1, len(items)),
             2,
@@ -1351,6 +1509,8 @@ def api_recommendations_estimate() -> Any:
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "mode": "estimate",
+                "pricing_version": pricing_version,
+                "pricing_versions": pricing_versions,
                 "limit": limit,
                 "offset": offset,
                 "total": int((count_row or {}).get("n") or 0),
