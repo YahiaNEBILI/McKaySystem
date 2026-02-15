@@ -14,11 +14,13 @@ Goals:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import boto3
 from botocore.config import Config
-from services.pricing_service import PricingService, make_pricing_cache, default_cache_dir
+
+from services.pricing_service import PricingService, default_cache_dir, make_pricing_cache
+
 
 @dataclass(frozen=True)
 class Services:
@@ -38,6 +40,7 @@ class Services:
     fsx: Any = None
     efs: Any = None
     elbv2: Any = None
+    lambda_client: Any = None
     cloudwatch: Any = None
     logs: Any = None
     region: str = ""
@@ -61,17 +64,17 @@ class ServicesFactory:
     - For "global" checks, you can pick a control region and call for_region(control_region).
     """
 
-    def __init__(self, *, session: boto3.Session, sdk_config: Optional[Config] = None) -> None:
+    def __init__(self, *, session: boto3.Session, sdk_config: Config | None = None) -> None:
         self._session = session
         self._sdk_config = sdk_config
-        self._by_region: Dict[str, Services] = {}
-        self._s3_global: Optional[Any] = None
+        self._by_region: dict[str, Services] = {}
+        self._s3_global: Any | None = None
         self._pricing_client = self._client("pricing", region="us-east-1")
         self._pricing_cache = make_pricing_cache(base_dir=default_cache_dir(), ttl_days=7)
         self._pricing_service = PricingService(pricing_client=self._pricing_client, cache=self._pricing_cache)
 
-    def _client(self, service: str, *, region: Optional[str]) -> Any:
-        kwargs: Dict[str, Any] = {}
+    def _client(self, service: str, *, region: str | None) -> Any:
+        kwargs: dict[str, Any] = {}
         if region:
             kwargs["region_name"] = region
         if self._sdk_config is not None:
@@ -109,6 +112,7 @@ class ServicesFactory:
             fsx=self._client("fsx", region=reg),
             efs=self._client("efs", region=reg),
             elbv2=self._client("elbv2", region=reg),
+            lambda_client=self._client("lambda", region=reg),
             cloudwatch=self._client("cloudwatch", region=reg),
             logs=self._client("logs", region=reg),
             pricing=self._pricing_service,

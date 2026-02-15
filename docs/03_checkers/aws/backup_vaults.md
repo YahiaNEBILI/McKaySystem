@@ -1,27 +1,54 @@
-# AWS BACKUP_VAULTS checker
+# AWS Backup Vaults checker
 
-Status: Derived  
-Last reviewed: 2026-02-01
+Status: Canonical  
+Last reviewed: 2026-02-15
 
 **Source code:** `checks/aws/backup_vaults_audit.py`
 
 ## Purpose
 
-AWS Backup Vaults Audit Checker
+Audit backup vault retention guardrails (Vault Lock) and access policy risk.
 
-## Signals
+## Checker identity
 
-This page is generated from module docstrings and static analysis of `check_id` constants.
-Use it as an index; detailed semantics are in code and in the checker contract.
+- `checker_id`: `aws.backup.vaults.audit`
+- `spec`: `checks.aws.backup_vaults_audit:AwsBackupVaultsAuditChecker`
 
 ## Check IDs emitted
 
-- `aws.backup.access.error`
-- `aws.backup.vaults.access.policy.misconfig`
-- `aws.backup.vaults.audit`
 - `aws.backup.vaults.no.lifecycle`
+- `aws.backup.vaults.access.policy.misconfig`
+- `aws.backup.access.error`
 
-## Notes / limitations
+## Key signals
 
-- API access can be partial; AccessDenied should downgrade to informational findings where applicable.
-- Cost estimates are best-effort unless explicitly enriched from CUR.
+- Vaults missing retention guardrails (Vault Lock not configured) or allowing effectively indefinite retention.
+- Vault access policies with wildcard principals, unallowlisted cross-account principals, or broad sensitive actions.
+- Informational access findings when required Backup APIs are denied.
+
+## Configuration and defaults
+
+- Configured by checker constructor and bootstrap allowlist inputs.
+- Defaults include fallback storage pricing in `checks/aws/defaults.py`:
+  - `BACKUP_VAULTS_WARM_FALLBACK_USD`
+  - `BACKUP_VAULTS_COLD_FALLBACK_USD`
+
+## IAM permissions
+
+Minimum read-only permissions:
+- `backup:ListBackupVaults`
+- `backup:DescribeBackupVault`
+- `backup:GetBackupVaultAccessPolicy`
+
+Optional for improved cost-confidence:
+- `pricing:GetProducts` (via pricing service)
+
+## Determinism and limitations
+
+- Policy evaluation is intentionally conservative and best-effort for complex IAM policy semantics.
+- Cost estimates are directional and reflect current stored data signals, not full lifecycle simulation.
+- Missing permissions degrade to informational findings.
+
+## Related tests
+
+- `tests/test_backup_vaults_audit.py`

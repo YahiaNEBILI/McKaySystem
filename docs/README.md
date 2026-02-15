@@ -10,6 +10,7 @@ Last reviewed: 2026-02-01
 - **Architecture**: `01_architecture/architecture.md`
 - **Pipeline**: `02_pipeline/pipeline_overview.md`
 - **Checkers contract**: `03_checkers/checker_contract.md`
+- **AWS checker catalog**: `03_checkers/aws/README.md`
 - **Finding schema**: `04_schemas/finding_schema.md`
 - **Operations**: `05_operations/running.md`
 - **API**: `06_api/api_reference.md`
