@@ -7,14 +7,21 @@ import os
 
 from apps.backend.db import db_conn
 from apps.backend.run_state import default_owner, recover_stale_runs_for_scope
+from infra.config import get_settings
 
 
 def _env_default(name: str, default: str | None = None) -> str | None:
-    """Return env var value, falling back to ``default`` when missing/empty."""
-    value = os.getenv(name)
-    if value is None or value == "":
+    """Return centralized config value for a known env key."""
+    settings = get_settings(reload=True)
+    value_map = {
+        "DB_URL": settings.db.url,
+        "TENANT_ID": settings.worker.tenant_id,
+        "WORKSPACE": settings.worker.workspace,
+    }
+    value = value_map.get(name)
+    if value is None or str(value).strip() == "":
         return default
-    return value
+    return str(value)
 
 
 def run_recovery(*, tenant_id: str, workspace: str, actor: str, limit: int) -> None:

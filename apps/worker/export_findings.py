@@ -17,9 +17,9 @@ Notes
 
 import argparse
 import json
-import os
 from pathlib import Path
 
+from infra.config import get_settings
 from infra.pipeline_paths import PipelinePaths
 from pipeline.export_json import ExportConfig, run_export
 from pipeline.run_manifest import find_manifest, load_manifest
@@ -56,7 +56,8 @@ def main() -> None:
         if discovered and discovered.exists():
             manifest = load_manifest(discovered)
 
-    tenant_id = (args.tenant_id or os.environ.get("TENANT_ID") or "").strip()
+    worker_cfg = get_settings(reload=True).worker
+    tenant_id = (args.tenant_id or worker_cfg.tenant_id or "").strip()
     if manifest and not tenant_id:
         tenant_id = manifest.tenant_id
 

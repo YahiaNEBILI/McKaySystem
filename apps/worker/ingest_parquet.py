@@ -11,7 +11,6 @@ import csv
 import io
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -32,6 +31,7 @@ from apps.backend.run_state import (
     transition_run_to_failed,
     transition_run_to_ready,
 )
+from infra.config import get_settings
 from pipeline.run_manifest import find_manifest, load_manifest
 from version import SCHEMA_VERSION
 
@@ -40,25 +40,7 @@ logger = logging.getLogger(__name__)
 
 def _lock_ttl_seconds() -> int:
     """Lock TTL for run-scoped ingestion lock."""
-    return _env_int("RUN_LOCK_TTL_SECONDS", 1800)
-
-def _env_bool(name: str) -> bool:
-    """Read a boolean env var."""
-    v = os.getenv(name)
-    if not v:
-        return False
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer env var with a default."""
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return default
+    return int(get_settings(reload=True).worker.run_lock_ttl_seconds)
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
@@ -463,11 +445,13 @@ def ingest_from_manifest(
     parquet_batch_size: Optional[int] = None,
 ) -> IngestStats:
     """Ingest a Parquet dataset described by a run_manifest.json."""
+    worker_cfg = get_settings(reload=True).worker
     api = db_api or _default_db_api()
-    batch_size = batch_size or _env_int("INGEST_BATCH_SIZE", 2000)
-    parquet_batch_size = parquet_batch_size or _env_int("PARQUET_BATCH_SIZE", 10_000)
+    batch_size = batch_size or int(worker_cfg.ingest_batch_size)
+    parquet_batch_size = parquet_batch_size or int(worker_cfg.parquet_batch_size)
+    allow_schema_mismatch = bool(worker_cfg.allow_schema_mismatch)
 
-    if db_api is None and not _env_bool("ALLOW_SCHEMA_MISMATCH"):
+    if db_api is None and not allow_schema_mismatch:
         _ensure_db_schema_current()
 
     manifest = load_manifest(manifest_path)
@@ -478,7 +462,7 @@ def ingest_from_manifest(
         except (TypeError, ValueError):
             raise SystemExit(f"Invalid schema_version in manifest: {manifest.schema_version!r}") from None
 
-        if manifest_ver != expected_schema and not _env_bool("ALLOW_SCHEMA_MISMATCH"):
+        if manifest_ver != expected_schema and not allow_schema_mismatch:
             raise SystemExit(
                 f"Schema mismatch: manifest={manifest_ver} expected={expected_schema}. "
                 "Run `mckay migrate` (or `python -m apps.backend.db_migrate`) to update the DB, "
@@ -486,8 +470,8 @@ def ingest_from_manifest(
             )
 
     # Fail fast on mismatch: prevents ingesting with the wrong tenant/workspace.
-    env_tenant = (os.getenv("TENANT_ID") or "").strip()
-    env_ws = (os.getenv("WORKSPACE") or "").strip()
+    env_tenant = str(worker_cfg.tenant_id or "").strip()
+    env_ws = str(worker_cfg.workspace or "").strip()
     if env_tenant and env_tenant != manifest.tenant_id:
         raise SystemExit(f"TENANT_ID mismatch: env={env_tenant!r} manifest={manifest.tenant_id!r}")
     if env_ws and env_ws != manifest.workspace:
@@ -503,7 +487,7 @@ def ingest_from_manifest(
     correlated_present = bool(manifest.out_correlated and _glob_has_files(manifest.out_correlated))
     enriched_present = bool(manifest.out_enriched and _glob_has_files(manifest.out_enriched))
 
-    use_copy = db_api is None and not _env_bool("INGEST_DISABLE_COPY")
+    use_copy = db_api is None and not bool(worker_cfg.ingest_disable_copy)
     if use_copy:
         return _ingest_with_copy(
             manifest=manifest,
@@ -1203,7 +1187,7 @@ def _find_manifest_path(arg: Optional[str]) -> Path:
             raise SystemExit(f"manifest not found: {p}")
         return p
 
-    env_path = os.getenv("MANIFEST_PATH")
+    env_path = get_settings(reload=True).worker.manifest_path
     if env_path:
         p = Path(env_path).resolve()
         if p.exists():

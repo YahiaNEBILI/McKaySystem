@@ -108,6 +108,92 @@ class APIConfig(BaseModel):
         return "v1"
 
 
+class LoggingSettings(BaseModel):
+    """Repository-wide logging settings."""
+
+    model_config = ConfigDict(frozen=True)
+
+    level: str = Field(default="INFO")
+    json_logs: bool = Field(default=False)
+    override_root_handlers: bool = Field(default=False)
+
+    @field_validator("level")
+    @classmethod
+    def _normalize_level(cls, value: str) -> str:
+        text = str(value or "").strip().upper()
+        if text in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            return text
+        return "INFO"
+
+
+class DbMetricsConfig(BaseModel):
+    """DB query instrumentation settings."""
+
+    model_config = ConfigDict(frozen=True)
+
+    metrics_enabled: bool = Field(default=True)
+    slow_query_threshold_ms: float = Field(default=1000.0, ge=0.0)
+
+    @field_validator("metrics_enabled", mode="before")
+    @classmethod
+    def _normalize_metrics_enabled(cls, value: object) -> bool:
+        if value is None:
+            return True
+        text = str(value).strip().lower()
+        if text == "":
+            return True
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return True
+
+    @field_validator("slow_query_threshold_ms", mode="before")
+    @classmethod
+    def _normalize_threshold_ms(cls, value: object) -> float:
+        if value is None:
+            return 1000.0
+        text = str(value).strip()
+        if text == "":
+            return 1000.0
+        try:
+            parsed = float(text)
+        except (TypeError, ValueError):
+            return 1000.0
+        return max(0.0, parsed)
+
+
+class WorkerConfig(BaseModel):
+    """Worker/CLI runtime defaults."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str = Field(default="")
+    workspace: str = Field(default="")
+    out_dir: str = Field(default="data/finops_findings")
+    manifest_path: str | None = Field(default=None)
+    pricing_version: str | None = Field(default=None)
+    pricing_source: str | None = Field(default=None)
+    run_lock_ttl_seconds: int = Field(default=1800, ge=1)
+    ingest_batch_size: int = Field(default=2000, ge=1)
+    parquet_batch_size: int = Field(default=10_000, ge=1)
+    allow_schema_mismatch: bool = Field(default=False)
+    ingest_disable_copy: bool = Field(default=False)
+
+    @field_validator("tenant_id", "workspace", "out_dir", mode="before")
+    @classmethod
+    def _normalize_required_text(cls, value: object) -> str:
+        return str(value or "").strip()
+
+    @field_validator("manifest_path", "pricing_version", "pricing_source", mode="before")
+    @classmethod
+    def _normalize_optional_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
 class Settings(BaseModel):
     """Top-level settings model."""
 
@@ -116,6 +202,9 @@ class Settings(BaseModel):
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
     aws: AWSConfig = Field(default_factory=AWSConfig)
     api: APIConfig = Field(default_factory=APIConfig)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    db_metrics: DbMetricsConfig = Field(default_factory=DbMetricsConfig)
+    worker: WorkerConfig = Field(default_factory=WorkerConfig)
 
     @classmethod
     def from_env(
@@ -196,10 +285,49 @@ def _build_payload(env: Mapping[str, str]) -> dict[str, object]:
         "enforce_schema_gate": _first_non_empty(env, "API__ENFORCE_SCHEMA_GATE", "API_ENFORCE_SCHEMA_GATE"),
         "bearer_token": _first_non_empty(env, "API__BEARER_TOKEN", "API_BEARER_TOKEN"),
     }
+    logging_settings = {
+        "level": _first_non_empty(env, "LOGGING__LEVEL", "MCKAY_LOG_LEVEL"),
+        "json_logs": _first_non_empty(env, "LOGGING__JSON_LOGS", "MCKAY_LOG_JSON"),
+        "override_root_handlers": _first_non_empty(
+            env, "LOGGING__OVERRIDE_ROOT_HANDLERS", "MCKAY_LOG_OVERRIDE"
+        ),
+    }
+    db_metrics = {
+        "metrics_enabled": _first_non_empty(env, "DB_METRICS__ENABLED", "DB_QUERY_METRICS_ENABLED"),
+        "slow_query_threshold_ms": _first_non_empty(
+            env, "DB_METRICS__SLOW_QUERY_THRESHOLD_MS", "DB_SLOW_QUERY_THRESHOLD_MS"
+        ),
+    }
+    worker = {
+        "tenant_id": _first_non_empty(env, "WORKER__TENANT_ID", "TENANT_ID"),
+        "workspace": _first_non_empty(env, "WORKER__WORKSPACE", "WORKSPACE"),
+        "out_dir": _first_non_empty(env, "WORKER__OUT_DIR", "OUT_DIR"),
+        "manifest_path": _first_non_empty(env, "WORKER__MANIFEST_PATH", "MANIFEST_PATH"),
+        "pricing_version": _first_non_empty(
+            env, "WORKER__PRICING_VERSION", "PRICING_VERSION", "FINOPS_PRICING_VERSION"
+        ),
+        "pricing_source": _first_non_empty(
+            env, "WORKER__PRICING_SOURCE", "PRICING_SOURCE", "FINOPS_PRICING_SOURCE"
+        ),
+        "run_lock_ttl_seconds": _first_non_empty(
+            env, "WORKER__RUN_LOCK_TTL_SECONDS", "RUN_LOCK_TTL_SECONDS"
+        ),
+        "ingest_batch_size": _first_non_empty(env, "WORKER__INGEST_BATCH_SIZE", "INGEST_BATCH_SIZE"),
+        "parquet_batch_size": _first_non_empty(env, "WORKER__PARQUET_BATCH_SIZE", "PARQUET_BATCH_SIZE"),
+        "allow_schema_mismatch": _first_non_empty(
+            env, "WORKER__ALLOW_SCHEMA_MISMATCH", "ALLOW_SCHEMA_MISMATCH"
+        ),
+        "ingest_disable_copy": _first_non_empty(
+            env, "WORKER__INGEST_DISABLE_COPY", "INGEST_DISABLE_COPY"
+        ),
+    }
     return {
         "db": {k: v for k, v in db.items() if v is not None},
         "aws": {k: v for k, v in aws.items() if v is not None},
         "api": {k: v for k, v in api.items() if v is not None},
+        "logging": {k: v for k, v in logging_settings.items() if v is not None},
+        "db_metrics": {k: v for k, v in db_metrics.items() if v is not None},
+        "worker": {k: v for k, v in worker.items() if v is not None},
     }
 
 
@@ -227,7 +355,10 @@ __all__ = [
     "APIConfig",
     "AWSConfig",
     "DatabaseConfig",
+    "DbMetricsConfig",
+    "LoggingSettings",
     "Settings",
+    "WorkerConfig",
     "get_settings",
     "clear_settings_cache",
     "ValidationError",

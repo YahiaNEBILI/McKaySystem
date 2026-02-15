@@ -58,6 +58,7 @@ from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
 from contracts.services import ServicesFactory, Services
 from infra.aws_config import SDK_CONFIG
+from infra.config import get_settings
 from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
 from pipeline.run_manifest import RunManifest, write_manifest
@@ -92,15 +93,6 @@ def _has_parquet(globs_list: Sequence[str]) -> bool:
 
 def _non_empty_dir(path: str) -> bool:
     return os.path.isdir(path) and bool(glob.glob(f"{path}/**/*.parquet", recursive=True))
-
-
-def _env_first_non_empty(*names: str) -> str:
-    """Return the first non-empty environment value for the provided names."""
-    for name in names:
-        value = str(os.getenv(name) or "").strip()
-        if value:
-            return value
-    return ""
 
 
 def _optional_non_empty_text(value: Any) -> Optional[str]:
@@ -143,8 +135,9 @@ def _resolve_run_pricing_metadata(*, services: Services) -> Tuple[Optional[str],
     """Resolve run pricing metadata with explicit env override precedence."""
     auto_source, auto_version = _derive_pricing_metadata_from_services(services)
 
-    pricing_version = _env_first_non_empty("PRICING_VERSION", "FINOPS_PRICING_VERSION")
-    pricing_source = _env_first_non_empty("PRICING_SOURCE", "FINOPS_PRICING_SOURCE")
+    worker_cfg = get_settings(reload=True).worker
+    pricing_version = str(worker_cfg.pricing_version or "").strip()
+    pricing_source = str(worker_cfg.pricing_source or "").strip()
 
     resolved_version = pricing_version or auto_version or ""
     resolved_source = pricing_source or auto_source or ""

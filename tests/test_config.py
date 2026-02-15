@@ -31,6 +31,7 @@ def test_settings_reads_legacy_env_keys() -> None:
     assert settings.api.version == "v2"
     assert settings.api.debug_errors is True
     assert settings.api.port == 7001
+    assert settings.worker.tenant_id == ""
 
 
 def test_settings_reads_nested_env_keys() -> None:
@@ -49,6 +50,52 @@ def test_settings_reads_nested_env_keys() -> None:
     assert settings.aws.regions == ["us-east-2", "eu-central-1"]
     assert settings.api.host == "127.0.0.1"
     assert settings.api.port == 5050
+
+
+def test_settings_parses_logging_db_metrics_and_worker_keys() -> None:
+    """Operational settings should parse from legacy env names."""
+    env = {
+        "MCKAY_LOG_LEVEL": "debug",
+        "MCKAY_LOG_JSON": "1",
+        "MCKAY_LOG_OVERRIDE": "true",
+        "DB_QUERY_METRICS_ENABLED": "0",
+        "DB_SLOW_QUERY_THRESHOLD_MS": "2500",
+        "TENANT_ID": "acme",
+        "WORKSPACE": "prod",
+        "OUT_DIR": "data/custom",
+        "MANIFEST_PATH": "data/custom/run_manifest.json",
+        "PRICING_VERSION": "aws_2026_03_01",
+        "PRICING_SOURCE": "snapshot",
+        "RUN_LOCK_TTL_SECONDS": "1200",
+        "INGEST_BATCH_SIZE": "5000",
+        "PARQUET_BATCH_SIZE": "3000",
+        "ALLOW_SCHEMA_MISMATCH": "1",
+        "INGEST_DISABLE_COPY": "1",
+    }
+    settings = Settings.from_env(env=env, env_file=".missing.env")
+
+    assert settings.logging.level == "DEBUG"
+    assert settings.logging.json_logs is True
+    assert settings.logging.override_root_handlers is True
+    assert settings.db_metrics.metrics_enabled is False
+    assert settings.db_metrics.slow_query_threshold_ms == 2500.0
+    assert settings.worker.tenant_id == "acme"
+    assert settings.worker.workspace == "prod"
+    assert settings.worker.out_dir == "data/custom"
+    assert settings.worker.manifest_path == "data/custom/run_manifest.json"
+    assert settings.worker.pricing_version == "aws_2026_03_01"
+    assert settings.worker.pricing_source == "snapshot"
+    assert settings.worker.run_lock_ttl_seconds == 1200
+    assert settings.worker.ingest_batch_size == 5000
+    assert settings.worker.parquet_batch_size == 3000
+    assert settings.worker.allow_schema_mismatch is True
+    assert settings.worker.ingest_disable_copy is True
+
+
+def test_settings_invalid_db_metrics_threshold_falls_back_to_default() -> None:
+    """Invalid db metrics threshold values should safely default."""
+    settings = Settings.from_env(env={"DB_SLOW_QUERY_THRESHOLD_MS": "bogus"}, env_file=".missing.env")
+    assert settings.db_metrics.slow_query_threshold_ms == 1000.0
 
 
 def test_settings_invalid_pool_size_raises_validation_error() -> None:

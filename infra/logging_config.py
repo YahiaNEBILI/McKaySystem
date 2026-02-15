@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import time
 from collections.abc import Mapping
@@ -18,12 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+from infra.config import get_settings
 
 
 # Context that follows requests through the system
@@ -217,12 +211,14 @@ def setup_logging(
       - UTC timestamps for both text and JSON logs.
       - JSON logs are always valid JSON.
     """
+    config = get_settings(reload=True).logging
+
     cfg = LoggingConfig(
-        level=(level or os.getenv("MCKAY_LOG_LEVEL", "INFO")).upper(),
-        json_logs=json_logs if json_logs is not None else _env_bool("MCKAY_LOG_JSON", False),
+        level=(level or config.level).upper(),
+        json_logs=json_logs if json_logs is not None else bool(config.json_logs),
         override_root_handlers=override_root_handlers
         if override_root_handlers is not None
-        else _env_bool("MCKAY_LOG_OVERRIDE", False),
+        else bool(config.override_root_handlers),
         extra_fields=extra_fields,
     )
 

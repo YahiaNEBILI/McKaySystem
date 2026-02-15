@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from infra.config import get_settings
+
 
 def _walk_up_for_root(start: Path) -> Optional[Path]:
     """Walk up from *start* to find a project root marker."""
@@ -57,10 +59,22 @@ def _run_cmd(cmd: List[str], *, cwd: Optional[Path] = None, env: Optional[dict] 
 
 
 def _env_default(name: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.environ.get(name)
-    if v is None or v == "":
+    settings = get_settings(reload=True)
+    value_map = {
+        "DB_URL": settings.db.url,
+        "TENANT_ID": settings.worker.tenant_id,
+        "WORKSPACE": settings.worker.workspace,
+        "OUT_DIR": settings.worker.out_dir,
+        "MANIFEST_PATH": settings.worker.manifest_path,
+        "PRICING_VERSION": settings.worker.pricing_version,
+        "FINOPS_PRICING_VERSION": settings.worker.pricing_version,
+        "PRICING_SOURCE": settings.worker.pricing_source,
+        "FINOPS_PRICING_SOURCE": settings.worker.pricing_source,
+    }
+    v = value_map.get(name)
+    if v is None or str(v).strip() == "":
         return default
-    return v
+    return str(v)
 
 
 def _pricing_env_from_args(args: argparse.Namespace) -> dict[str, str]:

@@ -13,41 +13,25 @@ Goals
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+
+from infra.config import get_settings
 
 _LOGGER = logging.getLogger(__name__)
 _HISTOGRAM_NAME = "db_query_duration_ms"
 _METRIC_EMITTER: Callable[[str, float, Sequence[str]], None] | None = None
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    """Parse a boolean environment flag with a safe default."""
-    raw = (os.getenv(name) or "").strip().lower()
-    if raw == "":
-        return default
-    return raw in {"1", "true", "yes", "on"}
-
-
 def query_metrics_enabled() -> bool:
     """Return whether DB query instrumentation is enabled."""
-    return _env_flag("DB_QUERY_METRICS_ENABLED", True)
+    return bool(get_settings(reload=True).db_metrics.metrics_enabled)
 
 
 def slow_query_threshold_ms() -> float:
     """Return the slow-query warning threshold in milliseconds."""
-    raw = (os.getenv("DB_SLOW_QUERY_THRESHOLD_MS") or "").strip()
-    if not raw:
-        return 1000.0
-    try:
-        value = float(raw)
-    except ValueError:
-        return 1000.0
-    if value < 0.0:
-        return 0.0
-    return value
+    return float(get_settings(reload=True).db_metrics.slow_query_threshold_ms)
 
 
 def register_histogram_emitter(emitter: Callable[[str, float, Sequence[str]], None] | None) -> None:
