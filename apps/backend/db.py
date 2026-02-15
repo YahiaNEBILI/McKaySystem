@@ -23,15 +23,15 @@ from __future__ import annotations
 
 import atexit
 import json
-import os
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional, Sequence, Tuple
 
 from apps.backend.db_metrics import measure_query
+from infra.config import get_settings
 
 
 def _db_url() -> str:
-    url = os.getenv("DB_URL")
+    url = str(get_settings(reload=True).db.url or "").strip()
     if not url:
         raise RuntimeError("DB_URL is not set")
     return url
@@ -53,11 +53,13 @@ def _get_pool():
     import psycopg2  # type: ignore  # noqa: F401
     from psycopg2.pool import SimpleConnectionPool  # type: ignore
 
+    db_cfg = get_settings(reload=True).db
+
     _POOL = SimpleConnectionPool(
         minconn=1,
-        maxconn=int(os.getenv("DB_POOL_MAXCONN", "10")),
+        maxconn=int(db_cfg.pool_maxconn),
         dsn=dsn,
-        connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
+        connect_timeout=int(db_cfg.connect_timeout),
     )
     _POOL_DSN = dsn
     return _POOL

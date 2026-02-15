@@ -9,11 +9,16 @@ Configuration knobs you are expected to edit:
 
 from botocore.config import Config
 
+from infra.config import get_settings
+
+_SETTINGS = get_settings()
+_AWS_CFG = _SETTINGS.aws
+
 SDK_CONFIG = Config(
-    retries={"max_attempts": 10, "mode": "adaptive"},
+    retries={"max_attempts": int(_AWS_CFG.max_retries), "mode": "adaptive"},
     user_agent_extra="finopsanalyzer/0.1.0",
-    connect_timeout=5,
-    read_timeout=60,
+    connect_timeout=int(_AWS_CFG.connect_timeout),
+    read_timeout=int(_AWS_CFG.timeout),
 )
 
-AWS_REGIONS = ["eu-west-1", "eu-west-2",  "eu-west-3", "us-east-1", "us-east-2", "us-west-1", "eu-central-1"]
+AWS_REGIONS = list(_AWS_CFG.regions)

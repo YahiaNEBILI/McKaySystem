@@ -29,7 +29,6 @@ from collections.abc import Iterable
 import hmac
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -56,14 +55,16 @@ from apps.flask_api.blueprints import recommendations as recommendations_module
 from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
 from apps.flask_api.blueprints import teams as teams_module
+from infra.config import get_settings
 
 app = Flask(__name__)
 _LOGGER = logging.getLogger(__name__)
 _API_VERSION_RE = re.compile(r"^v(?P<major>\d+)$")
+_SETTINGS = get_settings()
 
 
 def _resolved_api_version() -> str:
-    raw = (os.getenv("API_VERSION") or "v1").strip().lower()
+    raw = str(_SETTINGS.api.version or "v1").strip().lower()
     if _API_VERSION_RE.match(raw):
         return raw
     return "v1"
@@ -99,11 +100,11 @@ def _rule_to_openapi_path(path: str) -> str:
 # Logging and rate limiting are intentionally lightweight (no extra deps).
 # In hosted environments, prefer adding proper reverse-proxy/WAF rate limiting.
 
-_API_DEBUG_ERRORS = (os.getenv("API_DEBUG_ERRORS") or "").strip() == "1"
-_API_LOG_LEVEL = (os.getenv("API_LOG_LEVEL") or "INFO").strip().upper()
+_API_DEBUG_ERRORS = bool(_SETTINGS.api.debug_errors)
+_API_LOG_LEVEL = str(_SETTINGS.api.log_level or "INFO").strip().upper()
 
-_RATE_LIMIT_RPS_RAW = (os.getenv("API_RATE_LIMIT_RPS") or "").strip()
-_RATE_LIMIT_BURST_RAW = (os.getenv("API_RATE_LIMIT_BURST") or "").strip()
+_RATE_LIMIT_RPS = _SETTINGS.api.rate_limit_rps
+_RATE_LIMIT_BURST = _SETTINGS.api.rate_limit_burst
 
 
 def _iso_z(dt: datetime) -> str:
@@ -215,25 +216,17 @@ _rate_lock = threading.Lock()
 _rate_buckets: Dict[str, _TokenBucket] = {}
 _schema_gate_lock = threading.Lock()
 _schema_gate_checked = False
-_schema_gate_enabled = (os.getenv("API_ENFORCE_SCHEMA_GATE") or "1").strip() != "0"
+_schema_gate_enabled = bool(_SETTINGS.api.enforce_schema_gate)
 
 
 def _rate_limits() -> Tuple[Optional[float], Optional[float]]:
-    if not _RATE_LIMIT_RPS_RAW:
+    if _RATE_LIMIT_RPS is None:
         return None, None
-    try:
-        rps = float(_RATE_LIMIT_RPS_RAW)
-    except ValueError:
-        return None, None
+    rps = float(_RATE_LIMIT_RPS)
     if rps <= 0:
         return None, None
 
-    burst: Optional[float] = None
-    if _RATE_LIMIT_BURST_RAW:
-        try:
-            burst = float(_RATE_LIMIT_BURST_RAW)
-        except ValueError:
-            burst = None
+    burst: Optional[float] = float(_RATE_LIMIT_BURST) if _RATE_LIMIT_BURST is not None else None
     if burst is None:
         burst = max(10.0, rps * 2.0)
     return rps, burst
@@ -387,7 +380,7 @@ def _err_500(exc: Exception) -> Any:
 # If API_BEARER_TOKEN is unset/empty, authentication is disabled (useful for
 # local dev). In hosted environments, set it to require:
 #   Authorization: Bearer <token>
-_API_BEARER_TOKEN = (os.getenv("API_BEARER_TOKEN") or "").strip()
+_API_BEARER_TOKEN = str(_SETTINGS.api.bearer_token or "").strip()
 
 
 def _is_auth_required() -> bool:
@@ -819,5 +812,4 @@ _register_versioned_api_aliases()
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host=str(_SETTINGS.api.host), port=int(_SETTINGS.api.port))

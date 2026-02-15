@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, List, Set
 
 from apps.backend.db import db_conn
+from infra.config import get_settings
 
 
 def _ensure_migrations_table(conn) -> None:
@@ -147,7 +147,7 @@ def _split_sql(sql: str) -> List[str]:
 
 def _db_url() -> str:
     """Read DB_URL from the environment."""
-    url = os.getenv("DB_URL")
+    url = str(get_settings(reload=True).db.url or "").strip()
     if not url:
         raise RuntimeError("DB_URL is not set. Use `mckay migrate --db-url ...` or set DB_URL.")
     return url
