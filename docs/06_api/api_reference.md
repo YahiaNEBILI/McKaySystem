@@ -1,9 +1,27 @@
 # API Reference
 
 Status: Derived  
-Last reviewed: 2026-02-14
+Last reviewed: 2026-02-15
 
-This document describes the HTTP API implemented in `apps/flask_api/flask_app.py`.
+This document describes the HTTP API implemented in the Flask application using a modular Blueprint architecture.
+
+## Architecture
+
+The API is organized into Flask Blueprints, each handling a specific domain:
+- `health` - Health checks and liveness probes
+- `runs` - Run management and diffs
+- `findings` - Finding queries and governance
+- `recommendations` - FinOps optimization recommendations
+- `teams` - Team and member management
+- `sla_policies` - SLA policy management
+- `lifecycle` - Finding lifecycle actions
+- `groups` - Finding grouping and aggregation
+- `facets` - Filter facets and audit log
+
+Source code:
+- Main app: `apps/flask_api/flask_app.py`
+- Blueprints: `apps/flask_api/blueprints/`
+- Utilities: `apps/flask_api/utils/`
 
 ## Base and auth
 
@@ -79,6 +97,34 @@ Common optional filters:
 - `age_basis=open|detected` (default `open`)
 - `min_days` (default `0`)
 - `max_days` (optional, must be `>= min_days`)
+
+## Recommendations
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/recommendations` | Actionable recommendations from findings |
+| GET | `/api/recommendations/composite` | Aggregated recommendations by type |
+| POST | `/api/recommendations/estimate` | Estimate savings for selected recommendations |
+| POST | `/api/recommendations/preview` | Alias for /estimate |
+
+Query/Body params for `/api/recommendations`:
+- Scope: `tenant_id`, `workspace` (required)
+- Filters: `state`, `severity`, `service`, `check_id`, `category`, `region`, `account_id`
+- Search: `q` (title ILIKE)
+- Min savings: `min_savings`
+- Sorting: `order=savings_desc|detected_desc`
+- Pagination: `limit`, `offset`
+
+Query/Body params for `/api/recommendations/composite`:
+- Scope: `tenant_id`, `workspace`
+- Grouping: `group_by=recommendation_type|service|check_id|category|region`
+- Sorting: `order=savings_desc|count_desc`
+- Pagination: `limit`, `offset`
+
+Body params for `/api/recommendations/estimate`:
+- `tenant_id`, `workspace` required
+- `fingerprints` - list of finding fingerprints
+- Optional: `limit`, `offset`, `order`, `state`, `severity`, `service`, `check_id`, `category`, `region`, `account_id`, `q`, `min_savings`
 
 ## Finding governance mutation routes
 
