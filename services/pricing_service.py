@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -201,6 +201,46 @@ class PricingService:
         self._cache = cache
         self._partition = partition
         self._memo: Dict[str, PriceQuote] = {}
+        self._sources_seen: Set[str] = set()
+
+    def _record_quote_source(self, quote: Optional[PriceQuote]) -> Optional[PriceQuote]:
+        """Track quote source to expose best-effort run metadata."""
+        if quote is None:
+            return None
+        source = str(getattr(quote, "source", "") or "").strip().lower()
+        if source:
+            self._sources_seen.add(source)
+        return quote
+
+    def derived_pricing_source(self) -> str:
+        """Return a deterministic run-level pricing source label."""
+        if self._sources_seen:
+            normalized = sorted(self._sources_seen)
+            if normalized == ["cache", "pricing_api"]:
+                return "pricing_api+cache"
+            if len(normalized) == 1:
+                return normalized[0]
+            return "mixed+" + "+".join(normalized)
+        if self._cache is not None:
+            return "pricing_api+cache"
+        return "pricing_api"
+
+    def derived_pricing_version(self) -> Optional[str]:
+        """Return a best-effort version label for pricing metadata."""
+        meta = getattr(self._client, "meta", None)
+        service_model = getattr(meta, "service_model", None)
+        api_version = str(getattr(service_model, "api_version", "") or "").strip()
+        if not api_version:
+            return None
+        partition = str(self._partition or "").strip() or "aws"
+        return f"{partition}_pricing_api_{api_version}"
+
+    def run_metadata(self) -> Dict[str, Optional[str]]:
+        """Return best-effort run-level pricing metadata."""
+        return {
+            "pricing_source": self.derived_pricing_source(),
+            "pricing_version": self.derived_pricing_version(),
+        }
 
     # -------------------------
     # Public helpers
@@ -297,14 +337,14 @@ class PricingService:
         # in-run memo
         memo = self._memo.get(cache_key)
         if memo is not None:
-            return memo
+            return self._record_quote_source(memo)
 
         # disk cache
         if self._cache is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 self._memo[cache_key] = cached
-                return cached
+                return self._record_quote_source(cached)
 
         # pricing API
         try:
@@ -322,7 +362,7 @@ class PricingService:
         self._memo[cache_key] = api_quote
         if self._cache is not None:
             self._cache.put(cache_key, api_quote)
-        return api_quote
+        return self._record_quote_source(api_quote)
 
     # -------------------------
     # Convenience methods (start small; add more as you need)

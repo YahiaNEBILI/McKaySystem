@@ -11,7 +11,7 @@ Required env (depends on command):
 - AWS credentials/role
 - `TENANT_ID`, `WORKSPACE` (or command args)
 - `DB_URL` only for ingest/migrate paths
-- `PRICING_VERSION`, `PRICING_SOURCE` for runner metadata (recommended)
+- `PRICING_VERSION`, `PRICING_SOURCE` only when you want to override auto-derived pricing metadata
 
 Recommended runner job pattern:
 

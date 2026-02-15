@@ -49,7 +49,7 @@ import sys
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import boto3
 
@@ -101,6 +101,54 @@ def _env_first_non_empty(*names: str) -> str:
         if value:
             return value
     return ""
+
+
+def _optional_non_empty_text(value: Any) -> Optional[str]:
+    """Return normalized optional text."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _derive_pricing_metadata_from_services(services: Services) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort derive pricing source/version from runtime services."""
+    pricing = getattr(services, "pricing", None)
+    if pricing is None:
+        return None, None
+
+    run_metadata = getattr(pricing, "run_metadata", None)
+    if callable(run_metadata):
+        try:
+            metadata = run_metadata()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            metadata = None
+        if isinstance(metadata, dict):
+            source = _optional_non_empty_text(
+                metadata.get("pricing_source") or metadata.get("price_source")
+            )
+            version = _optional_non_empty_text(metadata.get("pricing_version"))
+            return source, version
+
+    source = _optional_non_empty_text(
+        getattr(pricing, "pricing_source", None) or getattr(pricing, "source", None)
+    )
+    version = _optional_non_empty_text(
+        getattr(pricing, "pricing_version", None) or getattr(pricing, "version", None)
+    )
+    return source, version
+
+
+def _resolve_run_pricing_metadata(*, services: Services) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve run pricing metadata with explicit env override precedence."""
+    auto_source, auto_version = _derive_pricing_metadata_from_services(services)
+
+    pricing_version = _env_first_non_empty("PRICING_VERSION", "FINOPS_PRICING_VERSION")
+    pricing_source = _env_first_non_empty("PRICING_SOURCE", "FINOPS_PRICING_SOURCE")
+
+    resolved_version = pricing_version or auto_version or ""
+    resolved_source = pricing_source or auto_source or ""
+    return (resolved_version or None), (resolved_source or None)
 
 
 def _make_run_id(run_ts: datetime) -> str:
@@ -623,8 +671,7 @@ def main(argv: Sequence[str]) -> int:
     # Downstream steps (export/ingest) should NOT rely on hidden defaults for
     # tenant/workspace or dataset paths.
     try:
-        pricing_version = _env_first_non_empty("PRICING_VERSION", "FINOPS_PRICING_VERSION")
-        pricing_source = _env_first_non_empty("PRICING_SOURCE", "FINOPS_PRICING_SOURCE")
+        pricing_version, pricing_source = _resolve_run_pricing_metadata(services=control_services)
         manifest = RunManifest(
             tenant_id=args.tenant,
             workspace=args.workspace,
@@ -634,8 +681,8 @@ def main(argv: Sequence[str]) -> int:
             engine_version=ENGINE_VERSION,
             rulepack_version=RULEPACK_VERSION,
             schema_version=SCHEMA_VERSION,
-            pricing_version=(pricing_version or None),
-            pricing_source=(pricing_source or None),
+            pricing_version=pricing_version,
+            pricing_source=pricing_source,
             out_raw=str(raw_out_dir),
             out_correlated=str(corr_out_dir),
             out_enriched=str(enriched_out_dir),

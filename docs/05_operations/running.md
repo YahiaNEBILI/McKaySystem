@@ -9,7 +9,8 @@ Last reviewed: 2026-02-01
 2. Run the CLI / runner with:
    - tenant_id, workspace
    - output base directory
-   - pricing metadata (`PRICING_VERSION`, `PRICING_SOURCE`) for reproducible recommendation estimates
+   - pricing metadata auto-derived from the pricing service when available
+   - optional pricing metadata override (`PRICING_VERSION`, `PRICING_SOURCE`) for pinned snapshots
    - optional flags to enable/disable correlation and CUR enrichment
 3. (Optional) Use `mckay run-all` to run -> ingest -> export (if `DB_URL` is set).
 4. (Recommended before ingest) Run `mckay recover --tenant <tenant> --workspace <workspace> --db-url <url>`
@@ -21,7 +22,7 @@ Last reviewed: 2026-02-01
 - Correlated findings Parquet (optional)
 - JSON exports for UI (optional)
 
-Pricing metadata for run manifests:
+Pricing metadata overrides for run manifests (optional):
 
 ```
 export PRICING_VERSION=aws_2026_02_01
