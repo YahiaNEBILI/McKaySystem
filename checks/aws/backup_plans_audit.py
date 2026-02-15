@@ -46,6 +46,7 @@ from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    PricingResolver,
     build_scope,
     AwsAccountContext,
     gb_from_bytes,
@@ -54,8 +55,6 @@ from checks.aws._common import (
     money,
     now_utc,
     paginate_items,
-    pricing_first_positive,
-    pricing_service,
     safe_float,
     safe_region_from_client,
     utc,
@@ -100,37 +99,28 @@ def _pricing_backup_gb_month_price(
 
     Returns: (unit_price_usd_per_gb_month, notes, confidence)
     """
-    pricing = pricing_service(ctx)
-    if pricing is None:
-        return float(fallback_usd), "PricingService unavailable; using configured fallback $/GB-month.", 10
-
-    # Normalize storage class signals from AWS Backup list responses
-    normalized = str(storage_class or "").strip().lower()
-    if normalized in {"cold", "cold_storage", "coldstorage"}:
-        tier = "cold"
-    else:
-        tier = "warm"
-
-    candidates = (
-        "backup_storage_gb_month_price",
-        "backup_gb_month_price",
-        "aws_backup_storage_gb_month_price",
-        "aws_backup_gb_month_price",
-    )
-
-    price_f, method_name = pricing_first_positive(
-        pricing,
-        method_names=candidates,
-        kwargs_variants=(
-            {"region": region, "tier": tier},
-            {"region": region, "storage_class": tier},
+    return PricingResolver(ctx).resolve_backup_storage_price(
+        region=region,
+        storage_class=storage_class,
+        fallback_usd=fallback_usd,
+        method_names=(
+            "backup_storage_gb_month_price",
+            "backup_gb_month_price",
+            "aws_backup_storage_gb_month_price",
+            "aws_backup_gb_month_price",
         ),
-        args_variants=((region, tier),),
+        kwargs_variants=(
+            {"region": "{region}", "tier": "{tier}"},
+            {"region": "{region}", "storage_class": "{tier}"},
+        ),
+        args_variants=(("{region}", "{tier}"),),
+        resolved_confidence=60,
+        fallback_confidence_when_no_service=10,
+        fallback_confidence_when_lookup_fails=15,
+        no_service_note="PricingService unavailable; using configured fallback $/GB-month.",
+        lookup_failed_note="PricingService did not provide a unit price; using configured fallback $/GB-month.",
+        resolved_note_template="Unit price from PricingService ({method_name}, tier={tier}).",
     )
-    if price_f is not None:
-        return float(price_f), f"Unit price from PricingService ({method_name}, tier={tier}).", 60
-
-    return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
 
 
 class AwsBackupPlansAuditChecker:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from contracts.finops_checker_pattern import Scope
 
@@ -402,3 +402,664 @@ def pricing_on_demand_first_positive(
             return float(price), quote
 
     return None, None
+
+
+def percentile(values: Sequence[float], p: float, *, method: str = "linear") -> Optional[float]:
+    """Compute percentile from a sequence without external dependencies.
+
+    Supported methods:
+    - ``linear``: linear interpolation between neighboring points.
+    - ``floor``: floor index selection (nearest-rank lower bound).
+    - ``nearest``: nearest index selection (round to nearest rank).
+    """
+    numbers: List[float] = []
+    for value in values:
+        try:
+            numbers.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not numbers:
+        return None
+
+    numbers.sort()
+    if p <= 0.0:
+        return numbers[0]
+    if p >= 100.0:
+        return numbers[-1]
+
+    idx = (len(numbers) - 1) * (float(p) / 100.0)
+    if method == "linear":
+        floor_idx = int(idx)
+        ceil_idx = min(floor_idx + 1, len(numbers) - 1)
+        if floor_idx == ceil_idx:
+            return numbers[floor_idx]
+        return (numbers[floor_idx] * (ceil_idx - idx)) + (numbers[ceil_idx] * (idx - floor_idx))
+
+    if method == "floor":
+        floor_idx = int(idx)
+        floor_idx = max(0, min(floor_idx, len(numbers) - 1))
+        return numbers[floor_idx]
+
+    if method == "nearest":
+        near_idx = int(round(idx))
+        near_idx = max(0, min(near_idx, len(numbers) - 1))
+        return numbers[near_idx]
+
+    raise ValueError(f"Unsupported percentile method: {method}")
+
+
+class PricingResolver:
+    """Best-effort pricing resolver used by AWS checkers."""
+
+    def __init__(self, ctx: Any) -> None:
+        self._ctx = ctx
+
+    def _pricing(self) -> Any:
+        return pricing_service(self._ctx)
+
+    def resolve_ec2_instance_monthly_cost(
+        self,
+        *,
+        region: str,
+        instance_type: str,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[Optional[float], int, str]:
+        """Resolve EC2 on-demand Linux/shared monthly cost."""
+        pricing = self._pricing()
+        if pricing is None:
+            return None, 30, "pricing service not available"
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return None, 30, "pricing location unavailable"
+
+        attempts: List[List[Dict[str, str]]] = [
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Compute Instance"},
+                {"Field": "instanceType", "Value": instance_type},
+                {"Field": "operatingSystem", "Value": "Linux"},
+                {"Field": "tenancy", "Value": "Shared"},
+                {"Field": "preInstalledSw", "Value": "NA"},
+                {"Field": "capacitystatus", "Value": "Used"},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "instanceType", "Value": instance_type},
+                {"Field": "operatingSystem", "Value": "Linux"},
+                {"Field": "tenancy", "Value": "Shared"},
+            ],
+        ]
+
+        quote = None
+        fn = getattr(pricing, "get_on_demand_unit_price", None)
+        if not callable(fn):
+            return None, 35, "no on-demand EC2 price match"
+        for filters in attempts:
+            try:
+                quote = fn(service_code="AmazonEC2", filters=filters, unit="Hrs")
+            except call_exceptions:
+                quote = None
+            if quote is not None:
+                break
+
+        if quote is None:
+            return None, 35, "no on-demand EC2 price match"
+
+        try:
+            hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            hourly = 0.0
+        if hourly <= 0.0:
+            return None, 35, "invalid on-demand EC2 unit price"
+
+        return money(hourly * 730.0), 75, "on-demand Linux shared"
+
+    def estimate_ebs_monthly_cost(
+        self,
+        *,
+        size_gib: float,
+        volume_type: str,
+        fallback_prices: Mapping[str, float],
+        default_price: float = 0.10,
+    ) -> float:
+        """Estimate EBS storage monthly cost from fallback pricing."""
+        price = float(fallback_prices.get(str(volume_type or "gp2"), default_price))
+        return money(float(size_gib) * price)
+
+    def resolve_ebs_volume_storage_price(
+        self,
+        *,
+        region: str,
+        volume_type: str,
+        fallback_prices: Mapping[str, float],
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int]:
+        """Resolve EBS volume storage unit price (GB-Mo)."""
+        default_price = float(fallback_prices.get(str(volume_type or "gp2"), 0.10))
+        pricing = self._pricing()
+        if pricing is None:
+            return default_price, "PricingService unavailable; using fallback pricing.", 30
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return default_price, "Pricing region mapping missing; using fallback pricing.", 30
+
+        vt = str(volume_type or "gp2").strip().lower()
+        usage_types: List[str]
+        if vt == "gp2":
+            usage_types = ["EBS:VolumeUsage.gp2", "EBS:VolumeUsage"]
+        elif vt == "gp3":
+            usage_types = ["EBS:VolumeUsage.gp3", "EBS:VolumeUsage"]
+        elif vt in ("io1", "io2"):
+            usage_types = ["EBS:VolumeUsage.piops", "EBS:VolumeUsage.io2", "EBS:VolumeUsage"]
+        elif vt == "st1":
+            usage_types = ["EBS:VolumeUsage.st1", "EBS:VolumeUsage"]
+        elif vt == "sc1":
+            usage_types = ["EBS:VolumeUsage.sc1", "EBS:VolumeUsage"]
+        else:
+            usage_types = ["EBS:VolumeUsage"]
+
+        attempts = [
+            (
+                "GB-Mo",
+                [
+                    {"Field": "location", "Value": location},
+                    {"Field": "productFamily", "Value": "Storage"},
+                    {"Field": "usagetype", "Value": usage_type},
+                ],
+            )
+            for usage_type in usage_types
+        ]
+        price, quote = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonEC2",
+            attempts=attempts,
+            call_exceptions=call_exceptions,
+        )
+        if price is not None and quote is not None:
+            source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+            as_of = getattr(quote, "as_of", None)
+            unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+            as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+            return (
+                float(price),
+                f"PricingService {source} as_of={as_of_txt} unit={unit}",
+                60 if source == "cache" else 70,
+            )
+
+        return default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30
+
+    def resolve_ebs_snapshot_storage_price(
+        self,
+        *,
+        region: str,
+        default_price: float,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int]:
+        """Resolve EBS snapshot storage unit price (GB-Mo)."""
+        pricing = self._pricing()
+        if pricing is None:
+            return default_price, "PricingService unavailable; using fallback pricing.", 30
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return default_price, "Pricing region mapping missing; using fallback pricing.", 30
+
+        price, quote = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonEC2",
+            attempts=(
+                (
+                    "GB-Mo",
+                    [
+                        {"Field": "location", "Value": location},
+                        {"Field": "productFamily", "Value": "Storage"},
+                        {"Field": "usagetype", "Value": "EBS:SnapshotUsage"},
+                    ],
+                ),
+            ),
+            call_exceptions=call_exceptions,
+        )
+        if price is not None and quote is not None:
+            source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+            as_of = getattr(quote, "as_of", None)
+            unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+            as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+            return (
+                float(price),
+                f"PricingService {source} as_of={as_of_txt} unit={unit}",
+                60 if source == "cache" else 70,
+            )
+
+        return default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30
+
+    def resolve_rds_instance_hour_price(
+        self,
+        *,
+        region: str,
+        db_instance_class: str,
+        deployment_option: str,
+        engine: str,
+        license_model: str,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[Optional[float], str, int]:
+        """Resolve RDS on-demand hourly instance price."""
+        pricing = self._pricing()
+        if pricing is None:
+            return None, "PricingService unavailable; leaving instance pricing unknown.", 20
+
+        fn = getattr(pricing, "rds_instance_hour", None)
+        if not callable(fn):
+            return None, "Pricing lookup failed/unknown; leaving instance pricing unknown.", 20
+
+        try:
+            quote = fn(
+                region=region,
+                db_instance_class=db_instance_class,
+                deployment_option=deployment_option,
+                database_engine=engine or None,
+                license_model=license_model or None,
+            )
+        except call_exceptions:
+            quote = None
+
+        if quote is None:
+            return None, "Pricing lookup failed/unknown; leaving instance pricing unknown.", 20
+
+        conf = 70 if str(getattr(quote, "source", "")) == "pricing_api" else 60
+        return (
+            float(getattr(quote, "unit_price_usd")),
+            f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
+            conf,
+        )
+
+    def resolve_nat_pricing(
+        self,
+        *,
+        region: str,
+        fallback_hourly_usd: float,
+        fallback_data_usd_per_gb: float,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, float, str, int]:
+        """Resolve NAT gateway hourly and per-GB processing prices."""
+        pricing = self._pricing()
+        if pricing is None:
+            return fallback_hourly_usd, fallback_data_usd_per_gb, "PricingService unavailable; using fallback pricing.", 30
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return fallback_hourly_usd, fallback_data_usd_per_gb, "Pricing region mapping missing; using fallback pricing.", 30
+
+        notes: List[str] = []
+        hourly_attempts: List[List[Dict[str, str]]] = [
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "NAT Gateway"},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "usagetype", "Value": "NatGateway-Hours"},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "group", "Value": "NAT Gateway"},
+            ],
+        ]
+        hourly, _ = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonEC2",
+            attempts=[("Hrs", filters) for filters in hourly_attempts],
+            call_exceptions=call_exceptions,
+        )
+        if hourly and hourly > 0.0:
+            notes.append("on-demand hourly price resolved via PricingService")
+
+        data_attempts: List[List[Dict[str, str]]] = [
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "usagetype", "Value": "NatGateway-Bytes"},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "group", "Value": "NAT Gateway"},
+                {"Field": "operation", "Value": "DataProcessing"},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "NAT Gateway"},
+                {"Field": "operation", "Value": "DataProcessing"},
+            ],
+        ]
+        per_gb, _ = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonEC2",
+            attempts=[("GB", filters) for filters in data_attempts],
+            call_exceptions=call_exceptions,
+        )
+        if per_gb and per_gb > 0.0:
+            notes.append("on-demand data processing price resolved via PricingService")
+
+        final_hourly = float(hourly if hourly and hourly > 0.0 else fallback_hourly_usd)
+        final_per_gb = float(per_gb if per_gb and per_gb > 0.0 else fallback_data_usd_per_gb)
+        confidence = 75 if hourly and per_gb else 55 if (hourly or per_gb) else 30
+        if not notes:
+            notes.append("using fallback pricing")
+        return final_hourly, final_per_gb, "; ".join(notes), confidence
+
+    def resolve_elb_hourly_price(
+        self,
+        *,
+        region: str,
+        lb_type: str,
+        fallback_alb_hourly_usd: float,
+        fallback_nlb_hourly_usd: float,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int]:
+        """Resolve ALB/NLB hourly price."""
+        fallback = fallback_alb_hourly_usd if lb_type == "application" else fallback_nlb_hourly_usd
+        pricing = self._pricing()
+        if pricing is None:
+            return fallback, "PricingService unavailable; using fallback pricing.", 30
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return fallback, "Pricing region mapping missing; using fallback pricing.", 30
+
+        attempts: List[List[Dict[str, str]]]
+        if lb_type == "application":
+            attempts = [
+                [
+                    {"Field": "location", "Value": location},
+                    {"Field": "productFamily", "Value": "Load Balancer"},
+                    {"Field": "group", "Value": "Application Load Balancer"},
+                ],
+                [
+                    {"Field": "location", "Value": location},
+                    {"Field": "usagetype", "Value": "LoadBalancerUsage"},
+                ],
+            ]
+        else:
+            attempts = [
+                [
+                    {"Field": "location", "Value": location},
+                    {"Field": "productFamily", "Value": "Load Balancer"},
+                    {"Field": "group", "Value": "Network Load Balancer"},
+                ],
+                [
+                    {"Field": "location", "Value": location},
+                    {"Field": "usagetype", "Value": "NetworkLoadBalancerUsage"},
+                ],
+            ]
+
+        hourly, _ = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonEC2",
+            attempts=[("Hrs", filters) for filters in attempts],
+            call_exceptions=call_exceptions,
+        )
+        if hourly and hourly > 0.0:
+            return float(hourly), "on-demand hourly price resolved via PricingService", 60
+
+        return float(fallback), "using fallback pricing", 30
+
+    def resolve_s3_storage_price(
+        self,
+        *,
+        region: str,
+        pricing_storage_class: str,
+        fallback_usd_per_gb_month: float,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int, str]:
+        """Resolve S3 storage unit price (GB-Mo)."""
+        fallback = (
+            float(fallback_usd_per_gb_month),
+            f"Fallback pricing used (no PricingService quote) for {pricing_storage_class}.",
+            55,
+            "fallback",
+        )
+
+        pricing = self._pricing()
+        if pricing is None:
+            return fallback
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return fallback
+
+        attempts: List[List[Dict[str, str]]] = [
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Storage"},
+                {"Field": "storageClass", "Value": pricing_storage_class},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Storage"},
+                {"Field": "volumeType", "Value": pricing_storage_class},
+            ],
+        ]
+        fn = getattr(pricing, "get_on_demand_unit_price", None)
+        if not callable(fn):
+            return fallback
+
+        for filters in attempts:
+            try:
+                quote = fn(service_code="AmazonS3", filters=filters, unit="GB-Mo")
+            except call_exceptions:
+                quote = None
+            if quote is None:
+                continue
+            try:
+                unit_price = float(getattr(quote, "unit_price_usd", fallback_usd_per_gb_month))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if unit_price <= 0.0:
+                continue
+            source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+            return (
+                unit_price,
+                f"PricingService quote for S3 {pricing_storage_class} in {location} ({source}).",
+                80,
+                source,
+            )
+        return fallback
+
+    def resolve_fsx_storage_price(
+        self,
+        *,
+        region: str,
+        fs_type: str,
+        storage_type: str,
+        default_price: float,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int]:
+        """Resolve FSx storage unit price (GB-Mo)."""
+        pricing = self._pricing()
+        if pricing is None:
+            return default_price, "PricingService unavailable; using fallback pricing.", 30
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return default_price, "Pricing region mapping missing; using fallback pricing.", 30
+
+        attempts: List[List[Dict[str, str]]] = [
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Storage"},
+                {"Field": "fileSystemType", "Value": str(fs_type).upper()},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Storage"},
+                {"Field": "fileSystemType", "Value": str(fs_type).upper()},
+                {"Field": "storageType", "Value": str(storage_type).upper()},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "File System Storage"},
+                {"Field": "fileSystemType", "Value": str(fs_type).upper()},
+            ],
+        ]
+
+        price, quote = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonFSx",
+            attempts=[("GB-Mo", filters) for filters in attempts],
+            call_exceptions=call_exceptions,
+        )
+        if price is not None and quote is not None:
+            source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+            as_of = getattr(quote, "as_of", None)
+            unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+            as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+            return (
+                float(price),
+                f"PricingService {source} as_of={as_of_txt} unit={unit}",
+                60 if source == "cache" else 70,
+            )
+
+        return default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30
+
+    def resolve_fsx_throughput_price(
+        self,
+        *,
+        region: str,
+        fs_type: str,
+        default_price: float,
+        units: Sequence[str],
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int]:
+        """Resolve FSx throughput unit price (MBps-Mo style units)."""
+        if default_price <= 0.0:
+            return 0.0, "No throughput fallback for this FSx type; leaving throughput estimate as 0.", 20
+
+        pricing = self._pricing()
+        if pricing is None:
+            return default_price, "PricingService unavailable; using fallback pricing.", 30
+
+        location = pricing_location_for_region(pricing, region)
+        if not location:
+            return default_price, "Pricing region mapping missing; using fallback pricing.", 30
+
+        attempts: List[List[Dict[str, str]]] = [
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "Provisioned Throughput"},
+                {"Field": "fileSystemType", "Value": str(fs_type).upper()},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "productFamily", "Value": "System Operation"},
+                {"Field": "fileSystemType", "Value": str(fs_type).upper()},
+            ],
+            [
+                {"Field": "location", "Value": location},
+                {"Field": "fileSystemType", "Value": str(fs_type).upper()},
+            ],
+        ]
+        attempt_units = [(unit, filters) for unit in units for filters in attempts]
+        price, quote = pricing_on_demand_first_positive(
+            pricing,
+            service_code="AmazonFSx",
+            attempts=attempt_units,
+            call_exceptions=call_exceptions,
+        )
+        if price is not None and quote is not None:
+            source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+            as_of = getattr(quote, "as_of", None)
+            unit = str(getattr(quote, "unit", "MBps-Mo") or "MBps-Mo")
+            as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+            return (
+                float(price),
+                f"PricingService {source} as_of={as_of_txt} unit={unit}",
+                60 if source == "cache" else 70,
+            )
+
+        return default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30
+
+    def resolve_rds_snapshot_storage_price(
+        self,
+        *,
+        region: str,
+        default_price: float,
+        call_exceptions: Tuple[type[Exception], ...],
+    ) -> Tuple[float, str, int]:
+        """Resolve RDS snapshot storage unit price (GB-Mo)."""
+        pricing = self._pricing()
+        if pricing is None:
+            return default_price, "PricingService unavailable; using default price.", 30
+
+        fn = getattr(pricing, "rds_backup_storage_gb_month", None)
+        if not callable(fn):
+            return default_price, "Pricing lookup failed/unknown; using default price.", 30
+
+        try:
+            quote = fn(region=region)
+        except call_exceptions:
+            quote = None
+        if quote is None:
+            return default_price, "Pricing lookup failed/unknown; using default price.", 30
+
+        try:
+            price = float(getattr(quote, "unit_price_usd"))
+        except (AttributeError, TypeError, ValueError):
+            return default_price, "Pricing lookup failed/unknown; using default price.", 30
+
+        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
+        as_of = getattr(quote, "as_of", None)
+        unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
+        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
+        return (
+            price,
+            f"PricingService {source} as_of={as_of_txt} unit={unit}",
+            60 if source == "cache" else 70,
+        )
+
+    def resolve_backup_storage_price(
+        self,
+        *,
+        region: str,
+        storage_class: str,
+        fallback_usd: float,
+        method_names: Sequence[str],
+        kwargs_variants: Sequence[Mapping[str, Any]],
+        args_variants: Sequence[Sequence[Any]],
+        resolved_confidence: int,
+        fallback_confidence_when_no_service: int,
+        fallback_confidence_when_lookup_fails: int,
+        no_service_note: str,
+        lookup_failed_note: str,
+        resolved_note_template: str,
+    ) -> Tuple[float, str, int]:
+        """Resolve AWS Backup storage unit price (GB-Mo)."""
+        pricing = self._pricing()
+        if pricing is None:
+            return float(fallback_usd), no_service_note, int(fallback_confidence_when_no_service)
+
+        normalized = str(storage_class or "").strip().lower()
+        tier = "cold" if normalized in {"cold", "cold_storage", "coldstorage"} else "warm"
+
+        rendered_kwargs = []
+        for kwargs in kwargs_variants:
+            rendered_kwargs.append(
+                {
+                    k: (tier if v == "{tier}" else storage_class if v == "{storage_class}" else region if v == "{region}" else v)
+                    for k, v in kwargs.items()
+                }
+            )
+        rendered_args: List[Tuple[Any, ...]] = []
+        for args in args_variants:
+            rendered_args.append(
+                tuple(tier if a == "{tier}" else storage_class if a == "{storage_class}" else region if a == "{region}" else a for a in args)
+            )
+
+        unit_price, method_name = pricing_first_positive(
+            pricing,
+            method_names=method_names,
+            kwargs_variants=tuple(rendered_kwargs),
+            args_variants=tuple(rendered_args),
+        )
+        if unit_price is None:
+            return float(fallback_usd), lookup_failed_note, int(fallback_confidence_when_lookup_fails)
+        return float(unit_price), resolved_note_template.format(method_name=method_name, tier=tier), int(resolved_confidence)

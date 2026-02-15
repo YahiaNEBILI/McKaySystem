@@ -34,6 +34,7 @@ from botocore.exceptions import BotoCoreError, ClientError, OperationNotPageable
 
 from checks.aws._common import (
     AwsAccountContext,
+    PricingResolver,
     build_scope,
     gb_from_bytes,
     get_logger,
@@ -45,6 +46,7 @@ from checks.aws._common import (
     pricing_location_for_region,
     pricing_on_demand_first_positive,
     pricing_service,
+    percentile,
     safe_float,
     safe_region_from_client,
 )
@@ -109,77 +111,12 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float,
 
     Returns: (usd_per_hour, usd_per_gb_processed, notes, confidence_0_100)
     """
-    pricing = pricing_service(ctx)
-    if pricing is None:
-        return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "PricingService unavailable; using fallback pricing.", 30
-
-    location = pricing_location_for_region(pricing, region)
-    if not location:
-        return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "Pricing region mapping missing; using fallback pricing.", 30
-
-    # NAT pricing is published under AmazonEC2. Catalog attributes are not perfectly stable,
-    # so we try a few filter sets and fall back if none match.
-    hourly: Optional[float] = None
-    per_gb: Optional[float] = None
-    notes: List[str] = []
-
-    # Hourly (Hrs)
-    hourly_attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "NAT Gateway"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "usagetype", "Value": "NatGateway-Hours"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "group", "Value": "NAT Gateway"},
-        ],
-    ]
-
-    hourly, _ = pricing_on_demand_first_positive(
-        pricing,
-        service_code="AmazonEC2",
-        attempts=[("Hrs", flt) for flt in hourly_attempts],
+    return PricingResolver(ctx).resolve_nat_pricing(
+        region=region,
+        fallback_hourly_usd=_FALLBACK_NAT_HOURLY_USD,
+        fallback_data_usd_per_gb=_FALLBACK_NAT_DATA_USD_PER_GB,
         call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
     )
-    if hourly and hourly > 0.0:
-        notes.append("on-demand hourly price resolved via PricingService")
-
-    # Data processing (GB)
-    data_attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "usagetype", "Value": "NatGateway-Bytes"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "group", "Value": "NAT Gateway"},
-            {"Field": "operation", "Value": "DataProcessing"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "NAT Gateway"},
-            {"Field": "operation", "Value": "DataProcessing"},
-        ],
-    ]
-    per_gb, _ = pricing_on_demand_first_positive(
-        pricing,
-        service_code="AmazonEC2",
-        attempts=[("GB", flt) for flt in data_attempts],
-        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
-    )
-    if per_gb and per_gb > 0.0:
-        notes.append("on-demand data processing price resolved via PricingService")
-
-    final_hourly = float(hourly if hourly and hourly > 0.0 else _FALLBACK_NAT_HOURLY_USD)
-    final_per_gb = float(per_gb if per_gb and per_gb > 0.0 else _FALLBACK_NAT_DATA_USD_PER_GB)
-    confidence = 75 if hourly and per_gb else 55 if (hourly or per_gb) else 30
-    if not notes:
-        notes.append("using fallback pricing")
-    return final_hourly, final_per_gb, "; ".join(notes), confidence
 
 
 # -----------------------------
@@ -992,13 +929,10 @@ class NatGatewaysChecker:
 
 def _p95(values: Sequence[float]) -> float:
     vals = [safe_float(v, default=0.0) for v in values if safe_float(v, default=0.0) >= 0.0]
-    if not vals:
+    p95_value = percentile(vals, 95.0, method="floor")
+    if p95_value is None:
         return 0.0
-    vals_sorted = sorted(vals)
-    # p95 index (floor) to avoid rounding bias; matches common statistical convention.
-    idx = int(0.95 * (len(vals_sorted) - 1))
-    idx = max(0, min(idx, len(vals_sorted) - 1))
-    return float(vals_sorted[idx])
+    return float(p95_value)
 
 
 @register_checker("checks.aws.nat_gateways:NatGatewaysChecker")

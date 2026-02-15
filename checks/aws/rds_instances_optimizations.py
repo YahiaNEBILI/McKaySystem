@@ -118,46 +118,18 @@ def _resolve_rds_instance_hour_price(
     - confidence is a rough indicator used in findings (0-100).
     """
 
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
-    if pricing is None:
-        return (None, "PricingService unavailable; leaving instance pricing unknown.", 20)
-
-    try:
-        quote = pricing.rds_instance_hour(
-            region=region,
-            db_instance_class=db_instance_class,
-            deployment_option=deployment_option,
-            database_engine=engine or None,
-            license_model=license_model or None,
-        )
-    except (AttributeError, TypeError, ValueError):
-        quote = None
-
-    if quote is None:
-        return (None, "Pricing lookup failed/unknown; leaving instance pricing unknown.", 20)
-
-    conf = 70 if str(quote.source) == "pricing_api" else 60
-    return (
-        float(quote.unit_price_usd),
-        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-        conf,
+    return common.PricingResolver(ctx).resolve_rds_instance_hour_price(
+        region=region,
+        db_instance_class=db_instance_class,
+        deployment_option=deployment_option,
+        engine=engine,
+        license_model=license_model,
+        call_exceptions=(AttributeError, TypeError, ValueError),
     )
 
 
 def _percentile(values: Sequence[float], p: float) -> Optional[float]:
-    if not values:
-        return None
-    vals = sorted(values)
-    if p <= 0:
-        return vals[0]
-    if p >= 100:
-        return vals[-1]
-    k = (len(vals) - 1) * (p / 100.0)
-    f = int(k)
-    c = min(f + 1, len(vals) - 1)
-    if f == c:
-        return vals[f]
-    return vals[f] * (c - k) + vals[c] * (k - f)
+    return common.percentile(values, p, method="linear")
 
 
 def _extract_tags(tag_list: Sequence[Dict[str, Any]]) -> Dict[str, str]:

@@ -34,14 +34,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    PricingResolver,
     build_scope,
     AwsAccountContext,
     get_logger,
-    pricing_location_for_region,
-    pricing_on_demand_first_positive,
-    pricing_service,
     normalize_tags,
     now_utc,
+    percentile,
     safe_region_from_client,
     money,
 )
@@ -153,56 +152,13 @@ def _resolve_fsx_storage_price_usd_per_gb_month(
     Returns: (usd_per_gb_month, notes, confidence_int)
     """
     default_price = _fallback_storage_usd_per_gb_month(fs_type=fs_type, storage_type=storage_type)
-    pricing = pricing_service(ctx)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using fallback pricing.", 30)
-
-    location = pricing_location_for_region(pricing, region)
-    if not location:
-        return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
-
-    # Pricing catalog evolves. We try several attempts and take first match.
-    # NOTE: Filter fields are best-effort; fallback will kick in if the catalog doesn't match.
-    attempts: List[List[Dict[str, str]]] = [
-        # Attempt 1: broad storage family
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Storage"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-        # Attempt 2: explicit storageType (common attribute name)
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Storage"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-            {"Field": "storageType", "Value": str(storage_type).upper()},
-        ],
-        # Attempt 3: some catalogs use "File System Storage" as productFamily
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "File System Storage"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-    ]
-
-    price, quote = pricing_on_demand_first_positive(
-        pricing,
-        service_code="AmazonFSx",
-        attempts=[("GB-Mo", flt) for flt in attempts],
+    return PricingResolver(ctx).resolve_fsx_storage_price(
+        region=region,
+        fs_type=fs_type,
+        storage_type=storage_type,
+        default_price=default_price,
         call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
     )
-    if price is not None and quote is not None:
-        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
-        as_of = getattr(quote, "as_of", None)
-        unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
-        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
-        return (
-            float(price),
-            f"PricingService {source} as_of={as_of_txt} unit={unit}",
-            60 if source == "cache" else 70,
-        )
-
-    return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
 
 
 def _resolve_fsx_throughput_price_usd_per_mbps_month(
@@ -217,58 +173,13 @@ def _resolve_fsx_throughput_price_usd_per_mbps_month(
     Returns: (usd_per_mbps_month, notes, confidence_int)
     """
     default_price = _fallback_throughput_usd_per_mbps_month(fs_type=fs_type)
-    if default_price <= 0.0:
-        return (0.0, "No throughput fallback for this FSx type; leaving throughput estimate as 0.", 20)
-
-    pricing = pricing_service(ctx)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using fallback pricing.", 30)
-
-    location = pricing_location_for_region(pricing, region)
-    if not location:
-        return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
-
-    # Throughput unit name is catalog-dependent; "MBps-Mo" is commonly used.
-    # We'll try a couple of likely unit spellings.
-    units = ["MBps-Mo", "MBps-month", "MB/s-Mo"]
-
-    # Try multiple plausible filter sets.
-    attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Provisioned Throughput"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "System Operation"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-    ]
-
-    attempt_units = [(unit, flt) for unit in units for flt in attempts]
-    price, quote = pricing_on_demand_first_positive(
-        pricing,
-        service_code="AmazonFSx",
-        attempts=attempt_units,
+    return PricingResolver(ctx).resolve_fsx_throughput_price(
+        region=region,
+        fs_type=fs_type,
+        default_price=default_price,
+        units=("MBps-Mo", "MBps-month", "MB/s-Mo"),
         call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
     )
-    if price is not None and quote is not None:
-        source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
-        as_of = getattr(quote, "as_of", None)
-        unit = str(getattr(quote, "unit", "MBps-Mo") or "MBps-Mo")
-        as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
-        return (
-            float(price),
-            f"PricingService {source} as_of={as_of_txt} unit={unit}",
-            60 if source == "cache" else 70,
-        )
-
-    return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
 
 
 def _to_str(v: Any) -> str:
@@ -392,11 +303,7 @@ def _cw_get(
 
 
 def _p95(values: List[float]) -> Optional[float]:
-    if not values:
-        return None
-    values.sort()
-    idx = int(0.95 * (len(values) - 1))
-    return values[idx]
+    return percentile(values, 95.0, method="floor")
 
 
 def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, Dict[str, Any]]:

@@ -49,7 +49,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from checks.aws._common import AwsAccountContext, build_scope, get_logger, money, now_utc, safe_region_from_client, utc, normalize_tags
+from checks.aws._common import AwsAccountContext, PricingResolver, build_scope, get_logger, money, now_utc, safe_region_from_client, utc, normalize_tags
 from checks.aws.defaults import (
     EC2_MAX_FINDINGS_PER_TYPE,
     EC2_REQUIRED_INSTANCE_TAG_KEYS,
@@ -106,73 +106,25 @@ _FALLBACK_EBS_USD_PER_GB_MONTH: Dict[str, float] = {
 }
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
 def _estimate_instance_monthly_cost_usd(ctx: RunContext, *, region: str, instance_type: str) -> Tuple[Optional[float], int, str]:
     """Best-effort on-demand Linux shared instance monthly cost estimate.
 
     Returns: (monthly_cost, confidence_0_100, notes)
     """
-
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return None, 30, "pricing service not available"
-
-    location = None
-    try:
-        location = pricing.location_for_region(region)
-    except (AttributeError, TypeError, ValueError, BotoCoreError, ClientError):
-        location = None
-    if not location:
-        return None, 30, "pricing location unavailable"
-
-    # Pricing catalog is not perfectly stable; try a few filter sets.
-    attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Compute Instance"},
-            {"Field": "instanceType", "Value": instance_type},
-            {"Field": "operatingSystem", "Value": "Linux"},
-            {"Field": "tenancy", "Value": "Shared"},
-            {"Field": "preInstalledSw", "Value": "NA"},
-            {"Field": "capacitystatus", "Value": "Used"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "instanceType", "Value": instance_type},
-            {"Field": "operatingSystem", "Value": "Linux"},
-            {"Field": "tenancy", "Value": "Shared"},
-        ],
-    ]
-
-    quote = None
-    for filters in attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except (AttributeError, TypeError, ValueError, BotoCoreError, ClientError):
-            quote = None
-        if quote is not None:
-            break
-
-    if quote is None:
-        return None, 35, "no on-demand EC2 price match"
-
-    # Convert hourly -> monthly using a standard 730 hours/month approximation.
-    try:
-        hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-    except (AttributeError, TypeError, ValueError):
-        hourly = 0.0
-    if hourly <= 0.0:
-        return None, 35, "invalid on-demand EC2 unit price"
-
-    return money(hourly * 730.0), 75, "on-demand Linux shared"
+    return PricingResolver(ctx).resolve_ec2_instance_monthly_cost(
+        region=region,
+        instance_type=instance_type,
+        call_exceptions=(AttributeError, TypeError, ValueError, BotoCoreError, ClientError),
+    )
 
 
 def _estimate_ebs_monthly_cost_usd(size_gib: float, volume_type: str) -> float:
-    price = float(_FALLBACK_EBS_USD_PER_GB_MONTH.get(str(volume_type or "gp2"), 0.10))
-    return money(float(size_gib) * price)
+    return PricingResolver(None).estimate_ebs_monthly_cost(
+        size_gib=float(size_gib),
+        volume_type=volume_type,
+        fallback_prices=_FALLBACK_EBS_USD_PER_GB_MONTH,
+        default_price=0.10,
+    )
 
 
 # -----------------------------

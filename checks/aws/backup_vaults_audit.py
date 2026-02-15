@@ -56,12 +56,11 @@ from botocore.exceptions import ClientError
 
 from checks.aws._common import (
     AwsAccountContext,
+    PricingResolver,
     build_scope,
     get_logger,
     money,
     paginate_items,
-    pricing_first_positive,
-    pricing_service,
     safe_region_from_client,
 )
 from checks.aws.defaults import BACKUP_VAULTS_COLD_FALLBACK_USD, BACKUP_VAULTS_WARM_FALLBACK_USD
@@ -112,15 +111,10 @@ def _pricing_backup_gb_month_price(
 
     Returns: (unit_price_usd, notes, confidence)
     """
-    pricing = pricing_service(ctx)
-    if pricing is None:
-        return fallback_usd, "Fallback pricing (no PricingService)", 0
-
-    normalized = str(storage_class or "").strip().lower()
-    tier = "cold" if normalized in {"cold", "cold_storage", "coldstorage"} else "warm"
-
-    unit, method_name = pricing_first_positive(
-        pricing,
+    return PricingResolver(ctx).resolve_backup_storage_price(
+        region=region,
+        storage_class=storage_class,
+        fallback_usd=fallback_usd,
         method_names=(
             "backup_storage_gb_month",
             "backup_storage_gb_month_price",
@@ -129,15 +123,18 @@ def _pricing_backup_gb_month_price(
             "aws_backup_gb_month_price",
         ),
         kwargs_variants=(
-            {"region": region, "storage_class": storage_class},
-            {"region": region, "storage_class": tier},
-            {"region": region, "tier": tier},
+            {"region": "{region}", "storage_class": "{storage_class}"},
+            {"region": "{region}", "storage_class": "{tier}"},
+            {"region": "{region}", "tier": "{tier}"},
         ),
-        args_variants=((region, storage_class), (region, tier)),
+        args_variants=(("{region}", "{storage_class}"), ("{region}", "{tier}")),
+        resolved_confidence=70,
+        fallback_confidence_when_no_service=0,
+        fallback_confidence_when_lookup_fails=0,
+        no_service_note="Fallback pricing (no PricingService)",
+        lookup_failed_note="Fallback pricing (PricingService unavailable/unknown)",
+        resolved_note_template="PricingService ({method_name})",
     )
-    if unit is None:
-        return fallback_usd, "Fallback pricing (PricingService unavailable/unknown)", 0
-    return float(unit), f"PricingService ({method_name})", 70
 
 
 def _parse_account_id_from_principal(principal: str) -> Optional[str]:

@@ -61,6 +61,7 @@ from typing import Any, Iterable, Optional, Set, Tuple
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    PricingResolver,
     build_scope,
     AwsAccountContext,
     arn_region,
@@ -93,30 +94,10 @@ def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
     """
     Returns: (usd_per_gb_month, notes, confidence)
     """
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using default price.", 30)
-
-    try:
-        quote = pricing.rds_backup_storage_gb_month(region=region)
-    except (AttributeError, TypeError, ValueError, ClientError):
-        quote = None
-
-    if quote is None:
-        return (default_price, "Pricing lookup failed/unknown; using default price.", 30)
-
-    try:
-        price = float(getattr(quote, "unit_price_usd"))
-    except (AttributeError, TypeError, ValueError):
-        return (default_price, "Pricing lookup failed/unknown; using default price.", 30)
-    source = str(getattr(quote, "source", "pricing_service") or "pricing_service")
-    as_of = getattr(quote, "as_of", None)
-    unit = str(getattr(quote, "unit", "GB-Mo") or "GB-Mo")
-    as_of_txt = as_of.isoformat() if hasattr(as_of, "isoformat") else "unknown"
-    return (
-        price,
-        f"PricingService {source} as_of={as_of_txt} unit={unit}",
-        60 if source == "cache" else 70,
+    return PricingResolver(ctx).resolve_rds_snapshot_storage_price(
+        region=region,
+        default_price=default_price,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
     )
 
 

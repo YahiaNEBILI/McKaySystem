@@ -28,7 +28,7 @@ python -m apps.worker.runner --tenant acme --workspace prod
 python -m apps.worker.export_findings
 ```
 
-Note: `python -m apps.worker.export_findings` writes `webapp_data/findings.json` for the UI. DB ingestion reads Parquet via `run_manifest.json`.
+Note: `python -m apps.worker.export_findings` writes `run_manifest.json`. DB ingestion reads Parquet via `run_manifest.json`.
 Migrations: run `python -m apps.backend.db_migrate` (or `mckay migrate`) before first ingest.
 
 Monorepo separation:

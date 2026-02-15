@@ -45,6 +45,7 @@ from checks.aws._common import (
     is_suppressed,
     normalize_tags,
     now_utc,
+    percentile,
     safe_region_from_client,
 )
 from checks.aws.defaults import (
@@ -108,13 +109,10 @@ def _chunk(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 
 def _p95(values: Sequence[float]) -> float:
     """Compute p95 for a small sequence (no numpy dependency)."""
-    if not values:
+    p95_value = percentile(values, 95.0, method="nearest")
+    if p95_value is None:
         return 0.0
-    vals = sorted(float(v) for v in values)
-    # nearest-rank p95
-    k = int(round(0.95 * (len(vals) - 1)))
-    k = max(0, min(len(vals) - 1, k))
-    return float(vals[k])
+    return float(p95_value)
 
 
 def _extract_client_error_code(err: Exception) -> str:

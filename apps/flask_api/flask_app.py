@@ -23,16 +23,18 @@ FLASK_APP=flask_app.py flask run --host=0.0.0.0 --port=5000
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flask import Flask, Response, abort, jsonify, request
 from werkzeug.exceptions import BadRequest
@@ -46,6 +48,37 @@ from apps.backend.db import (
 
 app = Flask(__name__)
 _LOGGER = logging.getLogger(__name__)
+_API_VERSION_RE = re.compile(r"^v(?P<major>\d+)$")
+
+
+def _resolved_api_version() -> str:
+    raw = (os.getenv("API_VERSION") or "v1").strip().lower()
+    if _API_VERSION_RE.match(raw):
+        return raw
+    return "v1"
+
+
+_API_VERSION = _resolved_api_version()
+_API_PREFIX = f"/api/{_API_VERSION}"
+
+
+def _canonical_api_path(path: str) -> str:
+    """Normalize versioned API paths to canonical /api/* paths."""
+    value = str(path or "")
+    if not value.startswith("/api/"):
+        return value
+    m = re.match(r"^/api/v\d+(?P<rest>/.*|$)", value)
+    if not m:
+        return value
+    rest = m.group("rest") or ""
+    if not rest:
+        return "/api"
+    return f"/api{rest}"
+
+
+def _rule_to_openapi_path(path: str) -> str:
+    """Convert Flask route params (<id>, <int:id>) to OpenAPI style ({id})."""
+    return re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", str(path or ""))
 
 
 # --------------------
@@ -196,7 +229,7 @@ def _rate_limits() -> Tuple[Optional[float], Optional[float]]:
 
 def _rate_key() -> str:
     ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
-    path = request.path or ""
+    path = _canonical_api_path(request.path or "")
     if path.startswith("/api/lifecycle/"):
         group = "/api/lifecycle"
     elif path.startswith("/api/findings"):
@@ -212,7 +245,7 @@ def _rate_key() -> str:
 
 @app.before_request
 def _enforce_rate_limit() -> None:
-    path = request.path or ""
+    path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
         return
     if path in {"/api/health/db"}:
@@ -251,7 +284,7 @@ def _err(code: str, message: str, *, status: int, extra: Optional[Dict[str, Any]
 
 def _api_internal_error_response(exc: Exception) -> Any:
     """Map API internal errors to stable, route-specific response shapes."""
-    path = request.path or ""
+    path = _canonical_api_path(request.path or "")
     exc_text = str(exc)
 
     if path == "/api/health/db":
@@ -305,7 +338,7 @@ def _ensure_schema_gate() -> None:
 @app.before_request
 def _enforce_schema_gate() -> Optional[Any]:
     """Return 503 if the DB schema is behind local code migrations."""
-    path = request.path or ""
+    path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
         return None
     if path in {"/api/health/db"}:
@@ -371,7 +404,7 @@ def _enforce_api_auth() -> None:
     - All other /api/* routes require Authorization: Bearer ... when
       API_BEARER_TOKEN is set.
     """
-    path = request.path or ""
+    path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
         return
     if path in {"/api/health/db"}:

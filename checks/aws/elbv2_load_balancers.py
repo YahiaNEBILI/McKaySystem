@@ -37,6 +37,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from checks.aws._common import (
     AwsAccountContext,
+    PricingResolver,
     build_scope,
     get_logger,
     is_suppressed,
@@ -44,9 +45,7 @@ from checks.aws._common import (
     normalize_tags,
     now_utc,
     paginate_items,
-    pricing_location_for_region,
-    pricing_on_demand_first_positive,
-    pricing_service,
+    percentile,
     safe_float,
     safe_region_from_client,
 )
@@ -105,53 +104,13 @@ def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) ->
 
     Returns: (usd_per_hour, notes, confidence_0_100)
     """
-    fallback = _FALLBACK_ALB_HOURLY_USD if lb_type == "application" else _FALLBACK_NLB_HOURLY_USD
-    pricing = pricing_service(ctx)
-    if pricing is None:
-        return fallback, "PricingService unavailable; using fallback pricing.", 30
-
-    location = pricing_location_for_region(pricing, region)
-    if not location:
-        return fallback, "Pricing region mapping missing; using fallback pricing.", 30
-
-    # ELB pricing is in AmazonEC2 pricing catalog.
-    # Attributes vary; try a few reasonable filter sets.
-    attempts: List[List[Dict[str, str]]] = []
-    if lb_type == "application":
-        attempts = [
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "productFamily", "Value": "Load Balancer"},
-                {"Field": "group", "Value": "Application Load Balancer"},
-            ],
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "usagetype", "Value": "LoadBalancerUsage"},
-            ],
-        ]
-    else:
-        attempts = [
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "productFamily", "Value": "Load Balancer"},
-                {"Field": "group", "Value": "Network Load Balancer"},
-            ],
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "usagetype", "Value": "NetworkLoadBalancerUsage"},
-            ],
-        ]
-
-    hourly, _ = pricing_on_demand_first_positive(
-        pricing,
-        service_code="AmazonEC2",
-        attempts=[("Hrs", flt) for flt in attempts],
+    return PricingResolver(ctx).resolve_elb_hourly_price(
+        region=region,
+        lb_type=lb_type,
+        fallback_alb_hourly_usd=_FALLBACK_ALB_HOURLY_USD,
+        fallback_nlb_hourly_usd=_FALLBACK_NLB_HOURLY_USD,
         call_exceptions=(ClientError, BotoCoreError, AttributeError, TypeError, ValueError),
     )
-    if hourly and hourly > 0.0:
-        return float(hourly), "on-demand hourly price resolved via PricingService", 60
-
-    return float(fallback), "using fallback pricing", 30
 
 
 # -----------------------------
@@ -198,11 +157,10 @@ def _lb_metric_dimension_value(lb_arn: str) -> str:
 def _p95(values: Sequence[float]) -> float:
     vals = [safe_float(v) for v in values if safe_float(v) is not None]
     vals2 = [v for v in vals if v is not None]
-    if not vals2:
+    p95_value = percentile(vals2, 95.0, method="floor")
+    if p95_value is None:
         return 0.0
-    vals2.sort()
-    idx = int(0.95 * (len(vals2) - 1))
-    return float(vals2[idx])
+    return float(p95_value)
 
 
 class _ElbCloudWatch:

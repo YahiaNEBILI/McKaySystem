@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    PricingResolver,
     build_scope,
     AwsAccountContext,
     now_utc,
@@ -449,52 +451,13 @@ class S3StorageChecker:
         fallback_usd_per_gb_month: float,
     ) -> Tuple[float, str, int, str]:
         """Return (usd_per_gb_month, notes, confidence, price_source)."""
-        fallback = (
-            float(fallback_usd_per_gb_month),
-            f"Fallback pricing used (no PricingService quote) for {pricing_storage_class}.",
-            55,
-            "fallback",
+        pricing_ctx = SimpleNamespace(services=SimpleNamespace(pricing=pricing))
+        return PricingResolver(pricing_ctx).resolve_s3_storage_price(
+            region=region,
+            pricing_storage_class=pricing_storage_class,
+            fallback_usd_per_gb_month=fallback_usd_per_gb_month,
+            call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
         )
-        if pricing is None:
-            return fallback
-
-        location = getattr(pricing, "location_for_region", lambda _r: None)(region)
-        if not location:
-            return fallback
-
-        # Pricing API can be finicky; try a small set of common attributes deterministically.
-        attempts: List[List[Dict[str, str]]] = [
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "productFamily", "Value": "Storage"},
-                {"Field": "storageClass", "Value": pricing_storage_class},
-            ],
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "productFamily", "Value": "Storage"},
-                {"Field": "volumeType", "Value": pricing_storage_class},
-            ],
-        ]
-
-        for flt in attempts:
-            quote = pricing.get_on_demand_unit_price(
-                service_code="AmazonS3",
-                filters=flt,
-                unit="GB-Mo",
-            )
-            if quote is None:
-                continue
-            unit_price = float(getattr(quote, "unit_price_usd", fallback_usd_per_gb_month))
-            if unit_price <= 0:
-                continue
-            return (
-                unit_price,
-                f"PricingService quote for S3 {pricing_storage_class} in {location} ({quote.source}).",
-                80,
-                str(getattr(quote, "source", "pricing_service") or "pricing_service"),
-            )
-
-        return fallback
 
     def _bucket_storage_breakdown_best_effort(
         self,

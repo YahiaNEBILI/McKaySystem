@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from checks.aws._common import pricing_first_positive, pricing_service
+from checks.aws._common import PricingResolver, percentile, pricing_first_positive, pricing_service
 
 
 @dataclass
@@ -85,3 +85,42 @@ def test_pricing_first_positive_returns_none_for_non_positive_or_errors() -> Non
     )
     assert price is None
     assert method == ""
+
+
+def test_percentile_supports_linear_floor_and_nearest_methods() -> None:
+    values = [0.0, 10.0, 20.0, 30.0, 40.0]
+    assert percentile(values, 95.0, method="linear") == 38.0
+    assert percentile(values, 95.0, method="floor") == 30.0
+    assert percentile(values, 95.0, method="nearest") == 40.0
+
+
+def test_percentile_returns_none_for_empty_values() -> None:
+    assert percentile([], 95.0) is None
+
+
+def test_pricing_resolver_backup_storage_substitutes_tier_placeholders() -> None:
+    class _Pricing:
+        def backup_storage_gb_month_price(self, *, region: str, tier: str) -> float:
+            assert region == "eu-west-1"
+            assert tier == "cold"
+            return 0.011
+
+    ctx = _Ctx(services=type("S", (), {"pricing": _Pricing()})())
+    resolver = PricingResolver(ctx)
+    price, notes, confidence = resolver.resolve_backup_storage_price(
+        region="eu-west-1",
+        storage_class="COLD_STORAGE",
+        fallback_usd=0.02,
+        method_names=("backup_storage_gb_month_price",),
+        kwargs_variants=({"region": "{region}", "tier": "{tier}"},),
+        args_variants=(),
+        resolved_confidence=60,
+        fallback_confidence_when_no_service=10,
+        fallback_confidence_when_lookup_fails=15,
+        no_service_note="no service",
+        lookup_failed_note="fallback",
+        resolved_note_template="resolved via {method_name} ({tier})",
+    )
+    assert price == 0.011
+    assert confidence == 60
+    assert "backup_storage_gb_month_price" in notes
