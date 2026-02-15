@@ -5,7 +5,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from services.remediation.preconditions import ActionPrecondition
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ class ActionContext:
     fingerprint: str
     check_id: str
     run_id: str = ""
+    services: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,7 @@ class RemediationAction(ABC):
     action_type: str = ""
     check_ids: tuple[str, ...] = ()
     retry_policy: RetryPolicy = RetryPolicy()
+    preconditions: tuple[ActionPrecondition, ...] = ()
 
     def validate_payload(self, payload: Mapping[str, Any]) -> None:
         """Validate action payload before dry-run/execute."""

@@ -15,6 +15,8 @@ def test_registry_discovery_lists_builtin_actions() -> None:
 
     action_types = registry.list_types()
     assert "noop" in action_types
+    assert "stop" in action_types
+    assert "delete_snapshot" in action_types
     assert action_types == sorted(action_types)
 
 
