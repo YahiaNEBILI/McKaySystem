@@ -33,9 +33,11 @@ from apps.backend.run_state import (
 )
 from infra.config import get_settings
 from pipeline.run_manifest import find_manifest, load_manifest
+from services.remediation.impact import refresh_scope_action_impacts
 from version import SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
+_IMPACT_REFRESH_LIMIT = 500
 
 
 def _lock_ttl_seconds() -> int:
@@ -437,6 +439,82 @@ def _refresh_aggregates_with_cursor(cur, *, tenant_id: str, workspace: str) -> N
     cur.execute(_AGG_INSERT_SQL, _aggregate_params(tenant_id, workspace))
 
 
+def _refresh_remediation_impacts_best_effort(
+    *,
+    tenant_id: str,
+    workspace: str,
+    run_id: str,
+    actor: str,
+) -> int:
+    """Refresh remediation impact snapshots after a run reaches ready state.
+
+    This runs outside the ingest transaction to avoid coupling core ingestion
+    success to remediation impact refresh failures.
+
+    Args:
+        tenant_id: Tenant scope.
+        workspace: Workspace scope.
+        run_id: Run identifier associated with this refresh.
+        actor: System actor attributed in run event logs.
+
+    Returns:
+        Number of refreshed impact rows. Returns ``0`` when refresh fails.
+    """
+    try:
+        with db_conn() as conn:
+            refreshed = refresh_scope_action_impacts(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                limit=_IMPACT_REFRESH_LIMIT,
+            )
+            append_run_event(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                run_id=run_id,
+                event_type="run.remediation_impact.refresh.completed",
+                actor=actor,
+                payload={
+                    "refreshed_count": refreshed,
+                    "limit": _IMPACT_REFRESH_LIMIT,
+                },
+            )
+            conn.commit()
+        return refreshed
+    except Exception as exc:  # pragma: no cover - defensive logging path
+        logger.warning(
+            "Skipped remediation impact refresh for %s/%s: %s",
+            tenant_id,
+            workspace,
+            exc,
+        )
+        try:
+            with db_conn() as conn:
+                append_run_event(
+                    conn,
+                    tenant_id=tenant_id,
+                    workspace=workspace,
+                    run_id=run_id,
+                    event_type="run.remediation_impact.refresh.failed",
+                    actor=actor,
+                    payload={
+                        "error": str(exc),
+                        "limit": _IMPACT_REFRESH_LIMIT,
+                    },
+                )
+                conn.commit()
+        except Exception as event_exc:  # pragma: no cover - defensive logging path
+            logger.warning(
+                "Failed to persist remediation impact refresh failure event for %s/%s/%s: %s",
+                tenant_id,
+                workspace,
+                run_id,
+                event_exc,
+            )
+        return 0
+
+
 def ingest_from_manifest(
     manifest_path: Path,
     *,
@@ -739,6 +817,13 @@ def ingest_from_manifest(
                 manifest.run_id,
             ),
         )
+        if db_api is None:
+            _refresh_remediation_impacts_best_effort(
+                tenant_id=manifest.tenant_id,
+                workspace=manifest.workspace,
+                run_id=manifest.run_id,
+                actor=default_owner("ingest_parquet"),
+            )
     except Exception as exc:
         logger.exception(
             "Ingest failed for %s/%s/%s: %s",
@@ -1167,6 +1252,19 @@ def _ingest_with_copy(
         total_presence,
         total_latest,
     )
+    refreshed = _refresh_remediation_impacts_best_effort(
+        tenant_id=manifest.tenant_id,
+        workspace=manifest.workspace,
+        run_id=manifest.run_id,
+        actor=lock_owner,
+    )
+    if refreshed:
+        logger.info(
+            "Refreshed remediation impacts after run ready: %s/%s (%s rows)",
+            manifest.tenant_id,
+            manifest.workspace,
+            refreshed,
+        )
 
     return IngestStats(
         dataset_used=dataset_label,

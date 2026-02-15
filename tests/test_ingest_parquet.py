@@ -6,13 +6,14 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Literal, Optional, Sequence, Tuple
 
 import pytest
 
 from apps.backend import db_migrate
 from contracts.finops_contracts import build_ids_and_validate
 from apps.backend.db import db_conn
+from apps.worker import ingest_parquet
 from apps.worker.ingest_parquet import DbApi, ingest_from_manifest
 from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
@@ -96,6 +97,30 @@ class _FakeDb:
         return None
 
 
+class _ConnCtx:
+    """Simple context manager wrapper for fake DB connections."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> Any:
+        return self._conn
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
+        _ = (exc_type, exc, tb)
+        return False
+
+
+class _ImpactConn:
+    """Fake connection tracking commit calls."""
+
+    def __init__(self) -> None:
+        self.commits = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
 def test_ingest_parquet_from_manifest(tmp_path: Path) -> None:
     base_dir = tmp_path / "finops_findings"
 
@@ -143,6 +168,99 @@ def test_ingest_parquet_from_manifest(tmp_path: Path) -> None:
     assert stats.latest_rows == 2
     assert presence_count == 2
     assert latest_count == 2
+
+
+def test_refresh_remediation_impacts_best_effort_updates_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh helper should run scoped impact refresh and commit once."""
+    conn = _ImpactConn()
+    calls: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(ingest_parquet, "db_conn", lambda: _ConnCtx(conn))
+
+    def _fake_refresh(_conn: Any, **kwargs: Any) -> int:
+        calls.append(kwargs)
+        return 3
+
+    monkeypatch.setattr(
+        ingest_parquet,
+        "refresh_scope_action_impacts",
+        _fake_refresh,
+    )
+    monkeypatch.setattr(
+        ingest_parquet,
+        "append_run_event",
+        lambda _conn, **kwargs: events.append(kwargs),
+    )
+
+    refreshed = ingest_parquet._refresh_remediation_impacts_best_effort(
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-1",
+        actor="worker:pid",
+    )
+
+    assert refreshed == 3
+    assert conn.commits == 1
+    assert events == [
+        {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "run_id": "run-1",
+            "event_type": "run.remediation_impact.refresh.completed",
+            "actor": "worker:pid",
+            "payload": {"refreshed_count": 3, "limit": ingest_parquet._IMPACT_REFRESH_LIMIT},
+        }
+    ]
+    assert calls == [
+        {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "limit": ingest_parquet._IMPACT_REFRESH_LIMIT,
+        }
+    ]
+
+
+def test_refresh_remediation_impacts_best_effort_is_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh helper should never raise when impact refresh fails."""
+    conn = _ImpactConn()
+    events: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(ingest_parquet, "db_conn", lambda: _ConnCtx(conn))
+
+    def _raise_refresh(_conn: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ingest_parquet, "refresh_scope_action_impacts", _raise_refresh)
+    monkeypatch.setattr(
+        ingest_parquet,
+        "append_run_event",
+        lambda _conn, **kwargs: events.append(kwargs),
+    )
+
+    refreshed = ingest_parquet._refresh_remediation_impacts_best_effort(
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-2",
+        actor="worker:pid",
+    )
+
+    assert refreshed == 0
+    assert conn.commits == 1
+    assert events == [
+        {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "run_id": "run-2",
+            "event_type": "run.remediation_impact.refresh.failed",
+            "actor": "worker:pid",
+            "payload": {"error": "boom", "limit": ingest_parquet._IMPACT_REFRESH_LIMIT},
+        }
+    ]
 
 
 def test_ingest_parquet_merges_raw_and_correlated_from_manifest(tmp_path: Path) -> None:
