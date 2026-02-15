@@ -234,6 +234,8 @@ def _rate_key() -> str:
         group = "/api/lifecycle"
     elif path.startswith("/api/findings"):
         group = "/api/findings"
+    elif path.startswith("/api/recommendations"):
+        group = "/api/recommendations"
     elif path.startswith("/api/groups"):
         group = "/api/groups"
     elif path.startswith("/api/runs"):
@@ -824,6 +826,274 @@ def api_runs_diff_latest() -> Any:
         )
     except ValueError as exc:
         return _json({"error": "bad_request", "message": str(exc)}, status=400)
+
+# --------------------
+# Recommendations (derived from finding_current)
+# --------------------
+
+_RECOMMENDATION_RULES: Dict[str, Dict[str, str]] = {
+    "aws.ec2.instances.underutilized": {
+        "recommendation_type": "rightsizing.ec2.instance",
+        "action": "Downsize EC2 instance to a smaller family/size based on sustained utilization.",
+        "priority": "p1",
+    },
+    "aws.rds.storage.overprovisioned": {
+        "recommendation_type": "rightsizing.rds.storage",
+        "action": "Reduce allocated RDS storage to match observed baseline plus safety headroom.",
+        "priority": "p1",
+    },
+    "aws.ec2.nat.gateways.idle": {
+        "recommendation_type": "cleanup.nat.gateway",
+        "action": "Delete idle NAT Gateway after dependency validation to remove fixed hourly cost.",
+        "priority": "p1",
+    },
+    "aws.s3.governance.lifecycle.missing": {
+        "recommendation_type": "storage.lifecycle.s3",
+        "action": "Add S3 lifecycle transitions/expiration for cold or stale data classes.",
+        "priority": "p2",
+    },
+    "aws.lambda.functions.unused": {
+        "recommendation_type": "cleanup.lambda.function",
+        "action": "Disable triggers or remove unused Lambda functions after owner confirmation.",
+        "priority": "p1",
+    },
+    "aws.lambda.functions.memory.overprovisioned": {
+        "recommendation_type": "rightsizing.lambda.memory",
+        "action": "Lower Lambda memory configuration based on p95 memory usage and latency guardrails.",
+        "priority": "p1",
+    },
+}
+_RECOMMENDATION_CHECK_IDS = sorted(_RECOMMENDATION_RULES)
+
+
+def _as_float(value: Any, *, default: float = 0.0) -> float:
+    """Best-effort float conversion for API payload values."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_recommendations_where(tenant_id: str, workspace: str) -> Tuple[List[str], List[Any]]:
+    """Build scoped SQL filters for recommendations endpoints."""
+    effective_states = _parse_csv_list(_q("state", "open"))
+    severities = _parse_csv_list(_q("severity"))
+    services = _parse_csv_list(_q("service"))
+    check_ids = _parse_csv_list(_q("check_id"))
+    categories = _parse_csv_list(_q("category"))
+    regions = _parse_csv_list(_q("region"))
+    account_ids = _parse_csv_list(_q("account_id"))
+    query_str = _q("q")
+
+    where = ["tenant_id = %s", "workspace = %s", "check_id = ANY(%s)"]
+    params: List[Any] = [tenant_id, workspace, _RECOMMENDATION_CHECK_IDS]
+
+    def _add_any(field: str, values: Optional[List[str]]) -> None:
+        if not values:
+            return
+        where.append(f"{field} = ANY(%s)")
+        params.append(values)
+
+    _add_any("effective_state", effective_states)
+    _add_any("severity", severities)
+    _add_any("service", services)
+    _add_any("check_id", check_ids)
+    _add_any("category", categories)
+    _add_any("region", regions)
+    _add_any("account_id", account_ids)
+
+    if query_str:
+        where.append("title ILIKE %s")
+        params.append(f"%{query_str}%")
+
+    min_savings_raw = _q("min_savings")
+    if min_savings_raw is not None:
+        try:
+            min_savings = float(min_savings_raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid min_savings: {min_savings_raw}") from exc
+        where.append("COALESCE(estimated_monthly_savings, 0) >= %s")
+        params.append(min_savings)
+
+    return where, params
+
+
+def _recommendation_type_case_sql() -> str:
+    """Return SQL CASE expression that maps check_id to recommendation_type."""
+    clauses: List[str] = []
+    for check_id in _RECOMMENDATION_CHECK_IDS:
+        rec_type = _RECOMMENDATION_RULES[check_id]["recommendation_type"]
+        clauses.append(f"WHEN check_id = '{check_id}' THEN '{rec_type}'")
+    return "CASE " + " ".join(clauses) + " ELSE 'other' END"
+
+
+def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a finding_current row to a recommendation item payload."""
+    check_id = str(row.get("check_id") or "")
+    rule = _RECOMMENDATION_RULES.get(
+        check_id,
+        {
+            "recommendation_type": "other",
+            "action": "Review finding details and define a remediation plan.",
+            "priority": "p2",
+        },
+    )
+    monthly_savings = _as_float(row.get("estimated_monthly_savings"), default=0.0)
+    annual_savings = round(monthly_savings * 12.0, 2)
+    return {
+        "fingerprint": row.get("fingerprint"),
+        "check_id": check_id,
+        "service": row.get("service"),
+        "severity": row.get("severity"),
+        "category": row.get("category"),
+        "title": row.get("title"),
+        "recommendation_type": rule["recommendation_type"],
+        "action": rule["action"],
+        "priority": rule["priority"],
+        "estimated_monthly_savings": monthly_savings,
+        "estimated_annual_savings": annual_savings,
+        "region": row.get("region"),
+        "account_id": row.get("account_id"),
+        "detected_at": row.get("detected_at"),
+        "effective_state": row.get("effective_state"),
+    }
+
+
+@app.get("/api/recommendations")
+def api_recommendations() -> Any:
+    """List actionable recommendations derived from current scoped findings."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        order = (_q("order", "savings_desc") or "savings_desc").lower()
+        if order not in {"savings_desc", "detected_desc"}:
+            raise ValueError("order must be 'savings_desc' or 'detected_desc'")
+
+        where, params = _build_recommendations_where(tenant_id, workspace)
+        order_sql = (
+            "estimated_monthly_savings DESC NULLS LAST, detected_at DESC, fingerprint"
+            if order == "savings_desc"
+            else "detected_at DESC, fingerprint"
+        )
+
+        sql = f"""
+            SELECT
+              tenant_id, workspace, fingerprint, check_id, service, severity,
+              category, title, estimated_monthly_savings, region, account_id,
+              detected_at, effective_state
+            FROM finding_current
+            WHERE {' AND '.join(where)}
+            ORDER BY {order_sql}
+            LIMIT %s OFFSET %s
+        """
+        params2 = params + [limit, offset]
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(conn, sql, params2)
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                params,
+            )
+
+        items = [_build_recommendation_item(row) for row in rows]
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": items,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@app.get("/api/recommendations/composite")
+def api_recommendations_composite() -> Any:
+    """Aggregate recommendation opportunities for portfolio-level prioritization."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        group_by = (_q("group_by", "recommendation_type") or "recommendation_type").strip().lower()
+        group_expr_map = {
+            "recommendation_type": _recommendation_type_case_sql(),
+            "service": "COALESCE(service, 'unknown')",
+            "check_id": "check_id",
+            "category": "COALESCE(category, 'unknown')",
+            "region": "COALESCE(region, 'unknown')",
+        }
+        group_expr = group_expr_map.get(group_by)
+        if not group_expr:
+            raise ValueError("group_by must be one of: recommendation_type, service, check_id, category, region")
+
+        order = (_q("order", "savings_desc") or "savings_desc").lower()
+        if order not in {"savings_desc", "count_desc"}:
+            raise ValueError("order must be 'savings_desc' or 'count_desc'")
+        order_sql = "total_monthly_savings DESC NULLS LAST, finding_count DESC, group_key"
+        if order == "count_desc":
+            order_sql = "finding_count DESC, total_monthly_savings DESC NULLS LAST, group_key"
+
+        where, params = _build_recommendations_where(tenant_id, workspace)
+        sql = f"""
+            SELECT
+              {group_expr} AS group_key,
+              COUNT(*)::bigint AS finding_count,
+              SUM(COALESCE(estimated_monthly_savings, 0))::double precision AS total_monthly_savings,
+              (SUM(COALESCE(estimated_monthly_savings, 0)) * 12.0)::double precision AS total_annual_savings
+            FROM finding_current
+            WHERE {' AND '.join(where)}
+            GROUP BY group_key
+            ORDER BY {order_sql}
+            LIMIT %s OFFSET %s
+        """
+        params2 = params + [limit, offset]
+
+        count_sql = f"""
+            SELECT COUNT(*) AS n
+            FROM (
+              SELECT {group_expr} AS group_key
+              FROM finding_current
+              WHERE {' AND '.join(where)}
+              GROUP BY group_key
+            ) grouped
+        """
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(conn, sql, params2)
+            count_row = fetch_one_dict_conn(conn, count_sql, params)
+
+        items = []
+        for row in rows:
+            items.append(
+                {
+                    "group_key": row.get("group_key"),
+                    "finding_count": int(row.get("finding_count") or 0),
+                    "total_monthly_savings": _as_float(row.get("total_monthly_savings"), default=0.0),
+                    "total_annual_savings": _as_float(row.get("total_annual_savings"), default=0.0),
+                }
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "group_by": group_by,
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "items": items,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
 
 # --------------------
 # Findings (canonical)

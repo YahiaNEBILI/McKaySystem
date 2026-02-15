@@ -29,17 +29,69 @@ If a term is not defined here, it should not be relied upon as stable.
 
 ### Finding
 
-A **Finding** is a detected condition on a cloud resource that:
-- violates a rule
-- represents a risk
-- or exposes an optimization opportunity
+A **Finding** is a deterministic, run-scoped observation about a cloud resource that indicates:
 
-Examples:
-- S3 bucket without lifecycle policy
-- EC2 instance oversized
-- Unused load balancer
+- a policy violation,
+- a risk,
+- or an optimization opportunity.
 
-A finding is **immutable** once written.
+A finding describes **what is true**, not what should be done.
+
+It is factual, measurable, and derived solely from observed infrastructure state, metrics, and rules defined in the system.
+
+#### Examples
+
+- “S3 bucket has no lifecycle policy.”
+- “EC2 instance CPU p95 is 12% over the last 30 days.”
+- “Load balancer has processed 0 requests for 30 days.”
+- “RDS allocated storage is 500GB, used storage is 120GB.”
+
+#### Immutability Rule
+
+A finding is **immutable within a given run**.
+
+- Its content (rule result, metrics, computed values) cannot be modified once written.
+- Any user actions (ignore, snooze, resolve, owner assignment, notes) are stored in a separate lifecycle overlay keyed by the finding fingerprint.
+- If infrastructure state changes, a new run generates a new finding record.
+
+This guarantees:
+- Determinism
+- Auditability
+- Reproducibility
+- Clean separation between detection and workflow state
+
+
+---
+
+### Recommendation
+
+A **Recommendation** is a derived, strategic proposal associated with a finding that suggests a specific action to improve cost efficiency, reduce risk, or correct a violation.
+
+A recommendation describes **what should be done**, based on the finding.
+
+It is prescriptive and may evolve as:
+- pricing models change,
+- optimization strategies improve,
+- risk tolerance shifts,
+- or new business logic is introduced.
+
+#### Examples
+
+- “Downsize from m5.2xlarge to m5.xlarge — estimated savings $3,200/year.”
+- “Reduce allocated RDS storage from 500GB to 200GB.”
+- “Delete idle NAT Gateway — estimated savings $380/month.”
+- “Purchase 1-year Reserved Instance for m5 family based on steady usage.”
+
+#### Key Properties
+
+- A recommendation is derived from a finding.
+- It includes cost impact estimates.
+- It includes confidence or risk indicators.
+- It may vary depending on optimization strategy (e.g., conservative vs aggressive).
+- It does not exist independently of findings.
+
+A finding represents the **diagnosis**.  
+A recommendation represents the **treatment plan**.
 
 ---
 
