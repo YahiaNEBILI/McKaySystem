@@ -69,6 +69,27 @@ class FakePricing:
         return FakePriceQuote(0.1)
 
 
+class FakePricingByType:
+    """Pricing fake that returns deterministic hourly prices by EC2 instance type."""
+
+    def __init__(self, hourly_by_instance_type: Dict[str, float]) -> None:
+        self._hourly_by_instance_type = dict(hourly_by_instance_type)
+
+    def location_for_region(self, region: str) -> str:
+        assert region
+        return "EU (Paris)"
+
+    def get_on_demand_unit_price(self, *, service_code: str, filters: Any, unit: str) -> FakePriceQuote:
+        assert service_code == "AmazonEC2"
+        assert unit == "Hrs"
+        instance_type = ""
+        for filt in list(filters or []):
+            if str((filt or {}).get("Field") or "") == "instanceType":
+                instance_type = str((filt or {}).get("Value") or "")
+                break
+        return FakePriceQuote(float(self._hourly_by_instance_type.get(instance_type, 0.1)))
+
+
 def _mk_ctx(*, ec2: FakeEC2, cloudwatch: Optional[FakeCloudWatch] = None, pricing: Optional[Any] = None) -> RunContext:
     return cast(
         RunContext,
@@ -119,6 +140,50 @@ def test_underutilized_running_instance_emits(monkeypatch: pytest.MonkeyPatch) -
     assert f.scope.resource_id == "i-1"
     # 0.1 $/hr * 730 = 73
     assert float(f.estimated_monthly_cost or 0.0) == pytest.approx(73.0, rel=1e-6)
+
+
+def test_underutilized_includes_rightsizing_target_and_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.ec2_instances as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc))
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_instances": [
+                {
+                    "Reservations": [
+                        {
+                            "Instances": [
+                                {
+                                    "InstanceId": "i-rightsize",
+                                    "InstanceType": "m5.2xlarge",
+                                    "State": {"Name": "running"},
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "describe_security_groups": [{"SecurityGroups": []}],
+            "describe_network_interfaces": [{"NetworkInterfaces": []}],
+        },
+    )
+
+    cw = FakeCloudWatch(results_by_id={"cpu0": [1.0, 2.0], "ni0": [1024.0], "no0": [1024.0]})
+    pricing = FakePricingByType({"m5.2xlarge": 0.40, "m5.xlarge": 0.20})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=pricing)
+
+    checker = EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
+    findings = list(checker.run(ctx))
+    hits = [f for f in findings if f.check_id == "aws.ec2.instances.underutilized"]
+    assert len(hits) == 1
+    f = hits[0]
+    assert "m5.2xlarge to m5.xlarge" in f.recommendation
+    assert float(f.estimated_monthly_cost or 0.0) == pytest.approx(292.0, rel=1e-6)
+    assert float(f.estimated_monthly_savings or 0.0) == pytest.approx(146.0, rel=1e-6)
+    assert (f.dimensions or {}).get("recommended_instance_type") == "m5.xlarge"
+    assert (f.dimensions or {}).get("rightsizing_monthly_savings_usd") == "146.00"
 
 
 def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatch) -> None:

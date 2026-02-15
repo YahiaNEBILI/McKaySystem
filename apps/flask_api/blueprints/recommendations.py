@@ -3,7 +3,6 @@
 Provides recommendation endpoints for FinOps optimization opportunities.
 """
 
-import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, request
@@ -12,7 +11,6 @@ from apps.backend.db import db_conn, fetch_one_dict_conn, fetch_all_dict_conn
 from apps.flask_api.utils import (
     _ok,
     _err,
-    _json,
     _q,
     _require_scope_from_query,
     _require_scope_from_json,
@@ -23,8 +21,6 @@ from apps.flask_api.utils import (
     _coerce_positive_int,
     _coerce_text_list,
     _coerce_non_negative_int,
-    _MISSING,
-    _payload_optional_text,
 )
 from apps.flask_api.utils.payload import (
     _as_float,
@@ -268,6 +264,9 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
     rule = _RECOMMENDATION_RULES.get(check_id, _RECOMMENDATION_DEFAULT_RULE)
     payload = _payload_dict(row.get("payload"))
     run_meta = _payload_dict(row.get("run_meta"))
+    dimensions = payload.get("dimensions")
+    if not isinstance(dimensions, dict):
+        dimensions = {}
 
     monthly_savings = _as_float(row.get("estimated_monthly_savings"), default=0.0)
     annual_savings = round(monthly_savings * 12.0, 2)
@@ -282,7 +281,43 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
 
     pricing_version = _payload_pricing_version(payload)
     if not pricing_version:
+        pricing_version_raw = dimensions.get("pricing_version")
+        pricing_version = str(pricing_version_raw).strip() if pricing_version_raw is not None else None
+    if not pricing_version:
         pricing_version = _run_meta_pricing_version(run_meta)
+
+    action = str(rule["action"])
+    target_kind = str(rule["target_kind"])
+    target_value = str(rule["target_value"])
+    current_kind = str(rule["current_kind"])
+    current_value = str(rule["current_value"])
+
+    if check_id == "aws.ec2.instances.underutilized":
+        current_instance_type = str(dimensions.get("instance_type") or "").strip()
+        target_instance_type = str(dimensions.get("recommended_instance_type") or "").strip()
+        if current_instance_type:
+            current_value = current_instance_type
+        if target_instance_type:
+            target_value = target_instance_type
+        if current_instance_type and target_instance_type:
+            action = (
+                f"Downsize EC2 instance from {current_instance_type} to {target_instance_type} "
+                "based on sustained utilization."
+            )
+
+    if check_id == "aws.rds.storage.overprovisioned":
+        allocated_gb = str(dimensions.get("allocated_gb") or "").strip()
+        estimated_used_gb = str(dimensions.get("estimated_used_gb") or "").strip()
+        if allocated_gb:
+            current_value = f"{allocated_gb}gb"
+        if estimated_used_gb:
+            target_value = f"{estimated_used_gb}gb"
+        if allocated_gb and estimated_used_gb:
+            action = (
+                f"Reduce allocated RDS storage from {allocated_gb} GB toward observed baseline "
+                f"({estimated_used_gb} GB) after validating growth headroom."
+            )
+
     return {
         "fingerprint": row.get("fingerprint"),
         "check_id": check_id,
@@ -291,16 +326,16 @@ def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
         "category": row.get("category"),
         "title": row.get("title"),
         "recommendation_type": rule["recommendation_type"],
-        "action": rule["action"],
+        "action": action,
         "priority": rule["priority"],
         "action_type": rule["action_type"],
         "target": {
-            "kind": rule["target_kind"],
-            "value": rule["target_value"],
+            "kind": target_kind,
+            "value": target_value,
         },
         "current": {
-            "kind": rule["current_kind"],
-            "value": rule["current_value"],
+            "kind": current_kind,
+            "value": current_value,
         },
         "estimated_monthly_savings": monthly_savings,
         "estimated_annual_savings": annual_savings,

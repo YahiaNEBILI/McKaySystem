@@ -174,11 +174,66 @@ _OLD_FAMILIES: Set[str] = {
 }
 
 
+_INSTANCE_SIZE_ORDER: Tuple[str, ...] = (
+    "nano",
+    "micro",
+    "small",
+    "medium",
+    "large",
+    "xlarge",
+    "2xlarge",
+    "3xlarge",
+    "4xlarge",
+    "6xlarge",
+    "8xlarge",
+    "9xlarge",
+    "10xlarge",
+    "12xlarge",
+    "16xlarge",
+    "18xlarge",
+    "24xlarge",
+    "32xlarge",
+    "48xlarge",
+    "56xlarge",
+)
+_INSTANCE_SIZE_INDEX: Dict[str, int] = {name: idx for idx, name in enumerate(_INSTANCE_SIZE_ORDER)}
+
+
 def _instance_family(instance_type: str) -> str:
     t = str(instance_type or "").strip().lower()
     if not t:
         return ""
     return t.split(".", 1)[0]
+
+
+def _split_instance_type(instance_type: str) -> Tuple[str, str]:
+    """Split an EC2 instance type into (family, size), e.g. m5.2xlarge."""
+    t = str(instance_type or "").strip().lower()
+    if "." not in t:
+        return "", ""
+    family, size = t.split(".", 1)
+    if not family or not size:
+        return "", ""
+    return family, size
+
+
+def _previous_instance_size(size: str) -> Optional[str]:
+    """Return the next-smaller known size token, if one exists."""
+    idx = _INSTANCE_SIZE_INDEX.get(str(size or "").strip().lower())
+    if idx is None or idx <= 0:
+        return None
+    return _INSTANCE_SIZE_ORDER[idx - 1]
+
+
+def _recommended_smaller_instance_type(instance_type: str) -> Optional[str]:
+    """Return a deterministic same-family one-step downsize recommendation."""
+    family, size = _split_instance_type(instance_type)
+    if not family or not size:
+        return None
+    prev_size = _previous_instance_size(size)
+    if not prev_size:
+        return None
+    return f"{family}.{prev_size}"
 
 
 def _to_int(value: Any) -> Optional[int]:
@@ -462,6 +517,38 @@ class EC2InstancesChecker:
 
             itype = str(ins.get("InstanceType") or "")
             cost, conf, note = _estimate_instance_monthly_cost_usd(ctx, region=region, instance_type=itype)
+            rec_type = _recommended_smaller_instance_type(itype)
+            rec_cost: Optional[float] = None
+            rec_conf = conf
+            rec_note = ""
+            rightsizing_savings: Optional[float] = None
+
+            if rec_type:
+                rec_cost, rec_conf, rec_note = _estimate_instance_monthly_cost_usd(
+                    ctx,
+                    region=region,
+                    instance_type=rec_type,
+                )
+                if rec_cost is not None and cost is not None and rec_cost < cost:
+                    rightsizing_savings = money(cost - rec_cost)
+
+            recommendation = "Consider rightsizing, scheduling, or stopping this instance."
+            if rec_type:
+                recommendation = (
+                    f"Downsize from {itype} to {rec_type} after validating workload headroom; "
+                    "alternatively schedule or stop this instance if it is not needed."
+                )
+                if rightsizing_savings is not None:
+                    recommendation = (
+                        f"Downsize from {itype} to {rec_type} after validating workload headroom "
+                        f"(estimated savings ~${rightsizing_savings:.2f}/month); alternatively "
+                        "schedule or stop this instance if it is not needed."
+                    )
+
+            estimate_notes_parts = [part for part in (note, rec_note) if part]
+            estimate_notes = "; ".join(estimate_notes_parts)
+            estimate_confidence = min(int(conf), int(rec_conf)) if rec_type else int(conf)
+            estimated_savings = rightsizing_savings if rightsizing_savings is not None else cost
 
             scope = build_scope(
                 ctx,
@@ -486,13 +573,18 @@ class EC2InstancesChecker:
                         f"Average CPU {cpu:.1f}% and network {net_kib_h:.1f} KiB/h over the last "
                         f"{cfg.underutilized_lookback_days} days."  # deterministic
                     ),
-                    recommendation="Consider rightsizing, scheduling, or stopping this instance.",
+                    recommendation=recommendation,
                     estimated_monthly_cost=cost,
-                    estimated_monthly_savings=cost,
-                    estimate_confidence=int(conf),
-                    estimate_notes=note,
+                    estimated_monthly_savings=estimated_savings,
+                    estimate_confidence=estimate_confidence,
+                    estimate_notes=estimate_notes,
                     dimensions={
                         "instance_type": itype,
+                        "recommended_instance_type": rec_type or "",
+                        "recommended_monthly_cost_usd": (f"{rec_cost:.2f}" if rec_cost is not None else ""),
+                        "rightsizing_monthly_savings_usd": (
+                            f"{rightsizing_savings:.2f}" if rightsizing_savings is not None else ""
+                        ),
                         "cpu_avg": f"{cpu:.2f}",
                         "net_kib_per_hour": f"{net_kib_h:.2f}",
                         "lookback_days": str(cfg.underutilized_lookback_days),

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import apps.flask_api.flask_app as flask_app
+import apps.flask_api.blueprints.recommendations as recommendations_blueprint
 
 
 class _DummyConn:
@@ -27,6 +28,17 @@ def _disable_runtime_guards(monkeypatch) -> None:  # type: ignore[no-untyped-def
     monkeypatch.setattr(flask_app, "_schema_gate_checked", True)
     monkeypatch.setattr(flask_app, "_API_BEARER_TOKEN", "")
     monkeypatch.setattr(flask_app, "db_conn", lambda: _DummyConn())
+    monkeypatch.setattr(recommendations_blueprint, "db_conn", lambda: _DummyConn())
+    monkeypatch.setattr(
+        recommendations_blueprint,
+        "fetch_all_dict_conn",
+        lambda conn, sql, params=None: flask_app.fetch_all_dict_conn(conn, sql, params),  # type: ignore[no-untyped-def]
+    )
+    monkeypatch.setattr(
+        recommendations_blueprint,
+        "fetch_one_dict_conn",
+        lambda conn, sql, params=None: flask_app.fetch_one_dict_conn(conn, sql, params),  # type: ignore[no-untyped-def]
+    )
 
 
 def test_recommendations_query_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -83,7 +95,11 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
                         "confidence": 91,
                         "pricing_source": "snapshot",
                         "pricing_version": "aws_2026_02_01",
-                    }
+                    },
+                    "dimensions": {
+                        "instance_type": "m5.2xlarge",
+                        "recommended_instance_type": "m5.xlarge",
+                    },
                 },
             }
         ]
@@ -105,7 +121,10 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
     assert item.get("recommendation_type") == "rightsizing.ec2.instance"
     assert item.get("priority") == "p1"
     assert item.get("action_type") == "rightsize"
+    assert item.get("action") == "Downsize EC2 instance from m5.2xlarge to m5.xlarge based on sustained utilization."
     assert (item.get("target") or {}).get("kind") == "instance_type"
+    assert (item.get("target") or {}).get("value") == "m5.xlarge"
+    assert (item.get("current") or {}).get("value") == "m5.2xlarge"
     assert item.get("confidence") == 91
     assert item.get("confidence_label") == "high"
     assert item.get("pricing_source") == "snapshot"
