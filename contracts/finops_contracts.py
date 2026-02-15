@@ -20,20 +20,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any
 
 # -----------------------------
 # Contract constants / enums
 # -----------------------------
 
-FINDING_STATUS_VALUES: Tuple[str, ...] = ("pass", "fail", "info", "unknown")
-SEVERITY_LEVEL_VALUES: Tuple[str, ...] = ("info", "low", "medium", "high", "critical")
-LIFECYCLE_STATUS_VALUES: Tuple[str, ...] = ("open", "acknowledged", "snoozed", "resolved", "ignored")
+FINDING_STATUS_VALUES: tuple[str, ...] = ("pass", "fail", "info", "unknown")
+SEVERITY_LEVEL_VALUES: tuple[str, ...] = ("info", "low", "medium", "high", "critical")
+LIFECYCLE_STATUS_VALUES: tuple[str, ...] = ("open", "acknowledged", "snoozed", "resolved", "ignored")
 
-ATTRIBUTION_METHOD_VALUES: Tuple[str, ...] = (
+ATTRIBUTION_METHOD_VALUES: tuple[str, ...] = (
     "exact_resource_id",
     "tag",
     "heuristic",
@@ -41,10 +42,10 @@ ATTRIBUTION_METHOD_VALUES: Tuple[str, ...] = (
     "none",
 )
 
-COST_MODEL_VALUES: Tuple[str, ...] = ("unblended", "amortized", "net", "blended")
+COST_MODEL_VALUES: tuple[str, ...] = ("unblended", "amortized", "net", "blended")
 
 # Required fields for a record to be considered valid (minimal contract)
-REQUIRED_FIELDS: Tuple[str, ...] = (
+REQUIRED_FIELDS: tuple[str, ...] = (
     "tenant_id",
     "finding_id",
     "fingerprint",
@@ -89,8 +90,8 @@ def _to_json_compatible(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(timezone.utc)
+        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+        dt = dt.astimezone(UTC)
         return dt.isoformat().replace("+00:00", "Z")
     if isinstance(value, date) and not isinstance(value, datetime):
         return value.isoformat()
@@ -141,7 +142,7 @@ class ScopeKey:
     resource_id: str
     resource_arn: str = ""
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return {
             "cloud": self.cloud,
             "billing_account_id": self.billing_account_id,
@@ -179,11 +180,11 @@ def canonicalize_scope(scope: Mapping[str, Any]) -> ScopeKey:
     )
 
 
-def canonicalize_issue_key(issue_key: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+def canonicalize_issue_key(issue_key: Mapping[str, Any] | None) -> dict[str, str]:
     """Canonicalize issue_key as sorted dict[str,str]."""
     if not issue_key:
         return {}
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for k, v in issue_key.items():
         key = normalize_str(k)
         out[key] = normalize_str(v, lower=False)
@@ -200,7 +201,7 @@ def compute_fingerprint(
     tenant_id: str,
     check_id: str,
     scope: Mapping[str, Any],
-    issue_key: Optional[Mapping[str, Any]] = None,
+    issue_key: Mapping[str, Any] | None = None,
 ) -> str:
     """fingerprint = stable identity of an issue on a target across runs."""
     payload = {
@@ -216,7 +217,7 @@ def compute_finding_id(
     *,
     tenant_id: str,
     fingerprint: str,
-    id_salt: Optional[str] = None,
+    id_salt: str | None = None,
 ) -> str:
     """finding_id = storage id derived from fingerprint, optionally salted."""
     payload = {
@@ -248,7 +249,7 @@ def _is_non_empty_string(value: Any) -> bool:
     return isinstance(value, str) and normalize_str(value, lower=False) != ""
 
 
-def _parse_datetime(value: Any) -> Optional[datetime]:
+def _parse_datetime(value: Any) -> datetime | None:
     """
     Accept datetime or ISO-8601 string. Return UTC datetime.
     Supported string forms:
@@ -258,8 +259,8 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
     if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -269,14 +270,14 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
             if text.endswith("Z"):
                 text = text[:-1] + "+00:00"
             dt = datetime.fromisoformat(text)
-            dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
         except ValueError:
             return None
     return None
 
 
-def _parse_decimal(value: Any) -> Optional[Decimal]:
+def _parse_decimal(value: Any) -> Decimal | None:
     """
     Accept Decimal, int, float, or numeric string. Return Decimal.
     Empty string -> None.
@@ -306,9 +307,9 @@ def _parse_decimal(value: Any) -> Optional[Decimal]:
 # -----------------------------
 
 
-def validate_required_fields(record: Mapping[str, Any]) -> List[str]:
+def validate_required_fields(record: Mapping[str, Any]) -> list[str]:
     """Validate presence (non-empty) of REQUIRED_FIELDS. Return list of missing paths."""
-    missing: List[str] = []
+    missing: list[str] = []
     for field_path in REQUIRED_FIELDS:
         value = _get_nested(record, field_path)
         if value is None:
@@ -319,9 +320,9 @@ def validate_required_fields(record: Mapping[str, Any]) -> List[str]:
     return missing
 
 
-def validate_enums(record: Mapping[str, Any]) -> List[str]:
+def validate_enums(record: Mapping[str, Any]) -> list[str]:
     """Validate enum constraints. Return list of error strings."""
-    errors: List[str] = []
+    errors: list[str] = []
 
     status = _get_nested(record, "status")
     if status is not None:
@@ -368,12 +369,12 @@ def validate_enums(record: Mapping[str, Any]) -> List[str]:
     return errors
 
 
-def validate_types_and_coherence(record: Mapping[str, Any]) -> List[str]:
+def validate_types_and_coherence(record: Mapping[str, Any]) -> list[str]:
     """
     Validate basic types and cross-field coherence. Return list of error strings.
     This is intentionally pragmatic (not full schema enforcement).
     """
-    errors: List[str] = []
+    errors: list[str] = []
 
     # run_ts must be parseable datetime
     run_ts = _get_nested(record, "run_ts")
@@ -468,7 +469,7 @@ def validate_record_or_raise(record: Mapping[str, Any]) -> None:
     coherence_errors = validate_types_and_coherence(record)
 
     if missing or enum_errors or coherence_errors:
-        parts: List[str] = []
+        parts: list[str] = []
         if missing:
             parts.append(f"Missing/empty required fields: {missing}")
         if enum_errors:
@@ -484,11 +485,11 @@ def validate_record_or_raise(record: Mapping[str, Any]) -> None:
 
 
 def build_ids_and_validate(
-    record: Dict[str, Any],
+    record: dict[str, Any],
     *,
-    issue_key: Optional[Mapping[str, Any]] = None,
-    finding_id_salt: Optional[str] = None,
-) -> Dict[str, Any]:
+    issue_key: Mapping[str, Any] | None = None,
+    finding_id_salt: str | None = None,
+) -> dict[str, Any]:
     """
     Convenience helper:
     - Compute fingerprint from tenant_id, check_id, scope, issue_key

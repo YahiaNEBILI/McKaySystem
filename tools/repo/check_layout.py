@@ -31,6 +31,7 @@ ROOT_ALLOWED = {
 }
 
 ROOT_IGNORED_PREFIXES = (
+    ".hypothesis",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",

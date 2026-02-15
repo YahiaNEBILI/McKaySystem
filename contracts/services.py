@@ -9,6 +9,10 @@ Goals:
 - Enable multi-region runs without checkers creating clients:
     factory.for_region("eu-west-3") -> Services (cached)
 - Keep it lightweight and pylint-friendly.
+
+Note:
+    For type safety in tests, use the Protocol definitions from interfaces.py:
+    from contracts.interfaces import EC2ClientProtocol, S3ClientProtocol, ...
 """
 
 from __future__ import annotations

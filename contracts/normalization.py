@@ -10,17 +10,19 @@ fills in missing fields with ‘’ / {} / [] according to the contract """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Dict, Mapping
+from typing import Any
+
 
 # Reuse helpers from finops_contracts.py (or keep these local)
 def _dt_to_utc_iso(value: Any) -> str:
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return ""
     if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(timezone.utc)
+        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+        dt = dt.astimezone(UTC)
         return dt.isoformat().replace("+00:00", "Z")
     if isinstance(value, str):
         txt = value.strip()
@@ -31,17 +33,17 @@ def _dt_to_utc_iso(value: Any) -> str:
             if txt.endswith("Z"):
                 txt = txt[:-1] + "+00:00"
             dt = datetime.fromisoformat(txt)
-            dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            dt = dt.astimezone(timezone.utc)
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+            dt = dt.astimezone(UTC)
             return dt.isoformat().replace("+00:00", "Z")
         except ValueError:
             return ""
     return ""
 
-def _to_str_map(value: Any) -> Dict[str, str]:
+def _to_str_map(value: Any) -> dict[str, str]:
     if not isinstance(value, Mapping):
         return {}
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for k, v in value.items():
         if k is None:
             continue
@@ -71,14 +73,14 @@ def _to_decimal_str(value: Any) -> str:
         return str(Decimal(str(value)))
     return ""
 
-def _ensure_dict(record: Dict[str, Any], key: str) -> Dict[str, Any]:
+def _ensure_dict(record: dict[str, Any], key: str) -> dict[str, Any]:
     val = record.get(key)
     if isinstance(val, dict):
         return val
     record[key] = {}
     return record[key]
 
-def normalize_for_arrow(record: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_for_arrow(record: dict[str, Any]) -> dict[str, Any]:
     """
     Make record safe for Arrow schema materialization:
     - ensure required structs exist
@@ -190,7 +192,7 @@ def normalize_for_arrow(record: Dict[str, Any]) -> Dict[str, Any]:
         record["metrics"] = {}
     else:
         # normalize numeric metric values to decimal strings too (if you store MONEY in schema)
-        norm_metrics: Dict[str, str] = {}
+        norm_metrics: dict[str, str] = {}
         for k, v in metrics.items():
             if k is None:
                 continue

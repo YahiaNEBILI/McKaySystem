@@ -6,27 +6,24 @@ order or internal iteration ordering.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from contracts.finops_checker_pattern import FindingDraft
 from tests._determinism import canonical_hash, shuffled
 from tests.correlation._harness import make_ctx, read_parquet_rows_duckdb, write_input_parquet_single_file
+from tests.factories import make_finding_draft, make_scope, make_severity
 
 
 def _drafts_fixture() -> list[FindingDraft]:
     return [
-        FindingDraft(
+        make_finding_draft(
             check_id="aws.backup.vaults.audit",
             check_name="AWS Backup vaults audit",
             category="backup",
-            status="fail",
-            severity=Severity(level="medium", score=60),
             title="Vault missing lock",
-            scope=Scope(
-                cloud="aws",
-                account_id="111111111111",
-                region="eu-west-1",
+            severity=make_severity(level="medium", score=60),
+            scope=make_scope(
                 service="AWSBackup",
                 resource_type="backup_vault",
                 resource_id="vault/a",
@@ -34,17 +31,13 @@ def _drafts_fixture() -> list[FindingDraft]:
             issue_key={"type": "vault_lock", "vault": "a"},
             message="Vault a has no lock",
         ),
-        FindingDraft(
+        make_finding_draft(
             check_id="aws.backup.governance.plans.audit",
             check_name="AWS Backup plans audit",
             category="backup",
-            status="fail",
-            severity=Severity(level="low", score=30),
             title="Plan missing tag",
-            scope=Scope(
-                cloud="aws",
-                account_id="111111111111",
-                region="eu-west-1",
+            severity=make_severity(level="low", score=30),
+            scope=make_scope(
                 service="AWSBackup",
                 resource_type="backup_plan",
                 resource_id="plan/p1",
@@ -52,17 +45,13 @@ def _drafts_fixture() -> list[FindingDraft]:
             issue_key={"type": "plan_tag", "plan": "p1"},
             message="Plan p1 missing required tag",
         ),
-        FindingDraft(
+        make_finding_draft(
             check_id="aws.ec2.ebs.storage",
             check_name="EBS storage checks",
             category="storage",
-            status="fail",
-            severity=Severity(level="high", score=80),
             title="Unencrypted volume",
-            scope=Scope(
-                cloud="aws",
-                account_id="111111111111",
-                region="eu-west-1",
+            severity=make_severity(level="high", score=80),
+            scope=make_scope(
                 service="AmazonEC2",
                 resource_type="ebs_volume",
                 resource_id="vol-123",
@@ -80,7 +69,7 @@ def test_same_input_shuffled_produces_identical_logical_hash(tmp_path: Path) -> 
 
     We hash canonicalized row dicts read via DuckDB (not raw parquet bytes).
     """
-    fixed_ts = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    fixed_ts = datetime(2026, 1, 24, 12, 0, 0, tzinfo=UTC)
     corr_run = make_ctx(tenant_id="acme", workspace_id="prod", run_id="test-run-fixed", run_ts=fixed_ts)
 
     drafts = _drafts_fixture()

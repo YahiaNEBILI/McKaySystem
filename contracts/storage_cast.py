@@ -7,9 +7,10 @@ surfaced early (tests/CI) rather than silently drifting.
 # finops/contracts/storage_cast.py
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Mapping, Optional
+from typing import Any
 
 import pyarrow as pa
 
@@ -18,7 +19,7 @@ class StorageCastError(ValueError):
     """Raised when a wire record cannot be cast to the Arrow storage schema."""
 
 
-def _parse_datetime_utc(value: Any) -> Optional[datetime]:
+def _parse_datetime_utc(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -31,15 +32,15 @@ def _parse_datetime_utc(value: Any) -> Optional[datetime]:
             dt = datetime.fromisoformat(txt)
         except ValueError:
             return None
-        dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     return None
 
 
-def _parse_date(value: Any) -> Optional[date]:
+def _parse_date(value: Any) -> date | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -57,7 +58,7 @@ def _parse_date(value: Any) -> Optional[date]:
     return None
 
 
-def _parse_decimal(value: Any) -> Optional[Decimal]:
+def _parse_decimal(value: Any) -> Decimal | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -133,7 +134,7 @@ def cast_value(value: Any, field_type: pa.DataType) -> Any:
         if dt is None:
             raise StorageCastError(f"Cannot cast {value!r} to datetime")
         # Ensure tz is UTC for consistency
-        return dt.astimezone(timezone.utc)
+        return dt.astimezone(UTC)
 
     # Date32/Date64
     if pa.types.is_date(field_type):
@@ -146,7 +147,7 @@ def cast_value(value: Any, field_type: pa.DataType) -> Any:
     if pa.types.is_struct(field_type):
         if not isinstance(value, Mapping):
             raise StorageCastError(f"Cannot cast {value!r} to struct")
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for subfield in field_type:
             out[subfield.name] = cast_value(value.get(subfield.name), subfield.type)
         return out
@@ -167,7 +168,7 @@ def cast_value(value: Any, field_type: pa.DataType) -> Any:
             raise StorageCastError(f"Cannot cast {value!r} to map")
         key_type = field_type.key_type
         item_type = field_type.item_type
-        out_map: Dict[Any, Any] = {}
+        out_map: dict[Any, Any] = {}
         for k, v in value.items():
             ck = cast_value(k, key_type)
             cv = cast_value(v, item_type)
@@ -178,13 +179,13 @@ def cast_value(value: Any, field_type: pa.DataType) -> Any:
     return value
 
 
-def cast_for_storage(wire_record: Mapping[str, Any], schema: pa.Schema) -> Dict[str, Any]:
+def cast_for_storage(wire_record: Mapping[str, Any], schema: pa.Schema) -> dict[str, Any]:
     """
     Cast a wire-format record into a storage-format record that matches the given Arrow schema.
     Unknown fields are ignored (schema is the contract for storage).
     Missing fields are set to None (or nested None) as appropriate.
     """
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for field in schema:
         out[field.name] = cast_value(wire_record.get(field.name), field.type)
     return out
