@@ -27,6 +27,8 @@ import os
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional, Sequence, Tuple
 
+from apps.backend.db_metrics import measure_query
+
 
 def _db_url() -> str:
     url = os.getenv("DB_URL")
@@ -109,24 +111,36 @@ def db_conn() -> Iterator[Any]:
 # Low-level *_conn primitives
 # ---------------------------
 
+def _query_name(sql: str, *, operation: str) -> str:
+    """Return a stable query operation label for metrics/logging."""
+    text = " ".join(str(sql or "").strip().split())
+    if not text:
+        return operation
+    first_token = text.split(" ", 1)[0].lower()
+    return f"{operation}:{first_token}"
+
+
 def fetch_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tuple[Any, ...]]:
     """Execute a query on an existing connection and return one row (or None)."""
     with conn.cursor() as cur:
-        cur.execute(sql, params or ())
+        with measure_query(_query_name(sql, operation="fetch_one_conn")):
+            cur.execute(sql, params or ())
         return cur.fetchone()
 
 
 def fetch_all_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[Tuple[Any, ...]]:
     """Execute a query on an existing connection and return all rows."""
     with conn.cursor() as cur:
-        cur.execute(sql, params or ())
+        with measure_query(_query_name(sql, operation="fetch_all_conn")):
+            cur.execute(sql, params or ())
         return cur.fetchall()
 
 
 def execute_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> None:
     """Execute a statement on an existing connection (no returned rows)."""
     with conn.cursor() as cur:
-        cur.execute(sql, params or ())
+        with measure_query(_query_name(sql, operation="execute_conn")):
+            cur.execute(sql, params or ())
 
 
 def execute_many_conn(conn: Any, sql: str, seq_of_params: list[Sequence[Any]]) -> None:
@@ -134,7 +148,8 @@ def execute_many_conn(conn: Any, sql: str, seq_of_params: list[Sequence[Any]]) -
     if not seq_of_params:
         return
     with conn.cursor() as cur:
-        cur.executemany(sql, seq_of_params)
+        with measure_query(_query_name(sql, operation="execute_many_conn")):
+            cur.executemany(sql, seq_of_params)
 
 
 # ---------------------------
@@ -259,7 +274,8 @@ def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, A
 def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[dict[str, Any]]:
     """Execute a query and return one row as a dict (or None)."""
     with conn.cursor() as cur:
-        cur.execute(sql, params or ())
+        with measure_query(_query_name(sql, operation="fetch_one_dict_conn")):
+            cur.execute(sql, params or ())
         row = cur.fetchone()
         if row is None:
             return None
@@ -272,6 +288,7 @@ def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = N
 def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
     """Execute a query and return all rows as dicts."""
     with conn.cursor() as cur:
-        cur.execute(sql, params or ())
+        with measure_query(_query_name(sql, operation="fetch_all_dict_conn")):
+            cur.execute(sql, params or ())
         rows = cur.fetchall()
         return _rows_to_dicts(cur, rows)
