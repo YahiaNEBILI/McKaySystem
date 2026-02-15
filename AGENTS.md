@@ -22,7 +22,6 @@
 
 Lifecycle priority:
 
-
 Do not reimplement lifecycle logic in Python.
 
 ---
@@ -33,7 +32,7 @@ Do not reimplement lifecycle logic in Python.
 - Use `INSERT ... ON CONFLICT`.
 - Update `runs` table last.
 - No partial inconsistent commits.
-- Code must remain compatible with future:
+- Code must remain compatible with future schema changes and API versions.
 
 
 ---
@@ -74,13 +73,12 @@ Do not reimplement lifecycle logic in Python.
 - No hardcoded values.
 - Write docstring for all functions.
 - Use 'mypy' for type checking.
-- use 'ruff' for litting.
+- use 'ruff' for linting.
 - No `print()` statements in production code. Use logging.
 
 Before committing:
 
-
-Both must pass.
+Both pylint and tests must pass.
 
 ---
 
@@ -125,38 +123,60 @@ If unsure, choose:
 - explicitness
 - migration-first approach
 
-- test coverage define strict production constraints for codebase. Here's a summary of the key requirements:
+---
 
-1. **Database Ingestion Rules**:
-   - Must be idempotent per run_id
-   - Use INSERT ... ON CONFLICT
-   - Update runs table last
-   - No partial inconsistent commits
+## Documentation Standards
 
-2. **Checker Requirements**:
-   - Deterministic output
-   - Stable fingerprint
-   - No randomness or timestamps in fingerprints
-   - Must handle malformed data and empty inputs
+- All public functions MUST have docstrings following Google style.
+- Include: Purpose, Args, Returns, Raises, and Examples where helpful.
+- Module-level docstrings should describe the module's purpose and key entities.
+- README files are required for major components (apps/, services/, checks/).
 
-3. **API Guidelines**:
-   - Only query finding_current for findings
-   - No SELECT *
-   - Always filter by tenant/workspace
-   - Avoid full table scans and N+1 queries
+## Error Handling
 
-4. **Code Quality Standards**:
-   - Must pass pylint with no new warnings
-   - No broad exception handling
-   - Proper typing and documentation
-   - No dead code or unused imports
-   - Must use mypy and ruff
+- Use specific exception types from `contracts/exceptions.py` when available.
+- Always log errors before re-raising with context.
+- API endpoints must return proper HTTP status codes (400 for bad request, 404 for not found, 500 for server errors).
+- Validate all input payloads using `contracts/schema.py` validators.
 
-5. **Testing Requirements**:
-   - All changes must be deterministic and idempotent
-   - Must preserve tenant isolation
-   - Must include tests for behavior changes
-   - Cannot reduce test coverage
+## Logging
 
-6. **Forbidden Changes**:
-   - No tenant
+- Use `infra/logging_config.py` to configure logging.
+- Use structured logging with context: `logger.info("message", extra={"key": "value"})`.
+- Log at appropriate levels: ERROR for failures, INFO for significant operations, DEBUG for details.
+- Never log sensitive data (credentials, PII, tenant data).
+
+## Configuration
+
+- All configuration MUST use `infra/config.py` or environment variables.
+- Never hardcode values - use config files or env vars.
+- Secrets must come from environment, never from config files.
+
+## Database Access
+
+- Use connection pooling via `apps/backend/db.py`.
+- Always use parameterized queries - never string concatenation.
+- Close connections in finally blocks or use context managers.
+- Queries must include tenant_id and workspace filters.
+
+## Testing Patterns
+
+- Tests go in `tests/` directory, mirroring source structure.
+- Use pytest fixtures from `tests/conftest.py`.
+- Mock external services (AWS, Postgres) in tests.
+- Each check must have corresponding tests in `tests/checks/`.
+
+## API Design
+
+- All endpoints must be versioned under `/api/v1/`.
+- Use consistent response format from `apps/flask_api/utils/responses.py`.
+- Query parameters must be validated using `apps/flask_api/utils/params.py`.
+- All endpoints require tenant_id and workspace authentication headers.
+
+## File Organization
+
+- Business logic in `services/` or `contracts/`.
+- API routes in `apps/flask_api/blueprints/`.
+- Background workers in `apps/worker/`.
+- Database migrations in `migrations/`.
+- Shared utilities in `infra/`.

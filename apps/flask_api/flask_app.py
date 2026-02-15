@@ -51,6 +51,7 @@ from apps.flask_api.blueprints import findings as findings_module
 from apps.flask_api.blueprints import groups as groups_module
 from apps.flask_api.blueprints import health as health_module
 from apps.flask_api.blueprints import lifecycle as lifecycle_module
+from apps.flask_api.blueprints import remediations as remediations_module
 from apps.flask_api.blueprints import recommendations as recommendations_module
 from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
@@ -741,6 +742,7 @@ def _install_blueprint_backcompat_shims() -> None:
         runs_module,
         findings_module,
         recommendations_module,
+        remediations_module,
         teams_module,
         sla_policies_module,
         lifecycle_module,
@@ -801,6 +803,7 @@ app.register_blueprint(health_module.health_bp)
 app.register_blueprint(runs_module.runs_bp)
 app.register_blueprint(findings_module.findings_bp)
 app.register_blueprint(recommendations_module.recommendations_bp)
+app.register_blueprint(remediations_module.remediations_bp)
 app.register_blueprint(teams_module.teams_bp)
 app.register_blueprint(sla_policies_module.sla_policies_bp)
 app.register_blueprint(lifecycle_module.lifecycle_bp)

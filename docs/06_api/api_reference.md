@@ -12,6 +12,7 @@ The API is organized into Flask Blueprints, each handling a specific domain:
 - `runs` - Run management and diffs
 - `findings` - Finding queries and governance
 - `recommendations` - FinOps optimization recommendations
+- `remediations` - Remediation action approval and queue views
 - `teams` - Team and member management
 - `sla_policies` - SLA policy management
 - `lifecycle` - Finding lifecycle actions
@@ -125,6 +126,45 @@ Body params for `/api/recommendations/estimate`:
 - `tenant_id`, `workspace` required
 - `fingerprints` - list of finding fingerprints
 - Optional: `limit`, `offset`, `order`, `state`, `severity`, `service`, `check_id`, `category`, `region`, `account_id`, `q`, `min_savings`
+
+## Remediations
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/remediations` | List remediation actions |
+| POST | `/api/remediations/approve` | Approve one pending remediation action |
+| POST | `/api/remediations/reject` | Reject one pending remediation action |
+
+Scope:
+- `tenant_id`, `workspace` are required for all remediation routes.
+
+### GET /api/remediations
+
+Optional filters:
+- `status`, `action_type`, `check_id`, `fingerprint` (CSV)
+- `limit`, `offset`
+
+### POST /api/remediations/approve
+
+Body:
+- `tenant_id`, `workspace`, `action_id`, `approved_by` required
+- `reason` optional
+
+Errors:
+- `404` action missing in scope
+- `409` action is not in `pending_approval`
+- `400` invalid payload
+
+### POST /api/remediations/reject
+
+Body:
+- `tenant_id`, `workspace`, `action_id`, `rejected_by` required
+- `reason` optional
+
+Errors:
+- `404` action missing in scope
+- `409` action is not in `pending_approval`
+- `400` invalid payload
 
 ## Finding governance mutation routes
 
