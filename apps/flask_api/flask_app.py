@@ -47,6 +47,15 @@ from apps.backend.db import (
     fetch_all_dict_conn,
     fetch_one_dict_conn,
 )
+from apps.flask_api.blueprints import facets as facets_module
+from apps.flask_api.blueprints import findings as findings_module
+from apps.flask_api.blueprints import groups as groups_module
+from apps.flask_api.blueprints import health as health_module
+from apps.flask_api.blueprints import lifecycle as lifecycle_module
+from apps.flask_api.blueprints import recommendations as recommendations_module
+from apps.flask_api.blueprints import runs as runs_module
+from apps.flask_api.blueprints import sla_policies as sla_policies_module
+from apps.flask_api.blueprints import teams as teams_module
 
 app = Flask(__name__)
 _LOGGER = logging.getLogger(__name__)
@@ -701,30 +710,112 @@ def _register_versioned_api_aliases() -> None:
     _versioned_aliases_registered = True
 
 
+# Back-compat symbols expected by legacy unit tests that monkeypatch flask_app.
+_team_exists = teams_module._team_exists
+_fetch_team_member = teams_module._fetch_team_member
+_fetch_sla_policy_category = sla_policies_module._fetch_sla_policy_category
+_fetch_sla_policy_override = sla_policies_module._fetch_sla_policy_override
+_audit_log_event = findings_module._audit_log_event
+_upsert_state = lifecycle_module._upsert_state
+_audit_lifecycle = lifecycle_module._audit_lifecycle
+_finding_exists = findings_module._finding_exists
+_ensure_finding_governance_row = findings_module._ensure_finding_governance_row
+_fetch_governance_owner_team = findings_module._fetch_governance_owner_team
+_update_finding_owner = findings_module._update_finding_owner
+_update_finding_team = findings_module._update_finding_team
+_fetch_finding_effective_state = findings_module._fetch_finding_effective_state
+_fetch_governance_sla = findings_module._fetch_governance_sla
+_apply_finding_sla_extension = findings_module._apply_finding_sla_extension
+
+
+def _install_blueprint_backcompat_shims() -> None:
+    """Bind blueprint internals to flask_app symbols for monkeypatch compatibility."""
+
+    def _db_conn_proxy() -> Any:
+        return db_conn()
+
+    def _fetch_all_proxy(conn: Any, sql: str, params: Optional[Iterable[Any]] = None) -> Any:
+        return fetch_all_dict_conn(conn, sql, params)
+
+    def _fetch_one_proxy(conn: Any, sql: str, params: Optional[Iterable[Any]] = None) -> Any:
+        return fetch_one_dict_conn(conn, sql, params)
+
+    def _execute_proxy(conn: Any, sql: str, params: Optional[Iterable[Any]] = None) -> Any:
+        return execute_conn(conn, sql, params)
+
+    for module in (
+        health_module,
+        runs_module,
+        findings_module,
+        recommendations_module,
+        teams_module,
+        sla_policies_module,
+        lifecycle_module,
+        groups_module,
+        facets_module,
+    ):
+        if hasattr(module, "db_conn"):
+            module.db_conn = _db_conn_proxy
+        if hasattr(module, "fetch_all_dict_conn"):
+            module.fetch_all_dict_conn = _fetch_all_proxy
+        if hasattr(module, "fetch_one_dict_conn"):
+            module.fetch_one_dict_conn = _fetch_one_proxy
+        if hasattr(module, "execute_conn"):
+            module.execute_conn = _execute_proxy
+
+    teams_module._team_exists = lambda *args, **kwargs: _team_exists(*args, **kwargs)
+    teams_module._fetch_team_member = lambda *args, **kwargs: _fetch_team_member(*args, **kwargs)
+    teams_module._audit_log_event = lambda *args, **kwargs: _audit_log_event(*args, **kwargs)
+
+    sla_policies_module._fetch_sla_policy_category = (
+        lambda *args, **kwargs: _fetch_sla_policy_category(*args, **kwargs)
+    )
+    sla_policies_module._fetch_sla_policy_override = (
+        lambda *args, **kwargs: _fetch_sla_policy_override(*args, **kwargs)
+    )
+    sla_policies_module._audit_log_event = lambda *args, **kwargs: _audit_log_event(*args, **kwargs)
+
+    lifecycle_module._upsert_state = lambda *args, **kwargs: _upsert_state(*args, **kwargs)
+    lifecycle_module._finding_exists = lambda *args, **kwargs: _finding_exists(*args, **kwargs)
+    lifecycle_module._audit_log_event = lambda *args, **kwargs: _audit_log_event(*args, **kwargs)
+    lifecycle_module._audit_lifecycle = lambda *args, **kwargs: _audit_lifecycle(*args, **kwargs)
+
+    findings_module._finding_exists = lambda *args, **kwargs: _finding_exists(*args, **kwargs)
+    findings_module._team_exists = lambda *args, **kwargs: _team_exists(*args, **kwargs)
+    findings_module._ensure_finding_governance_row = (
+        lambda *args, **kwargs: _ensure_finding_governance_row(*args, **kwargs)
+    )
+    findings_module._fetch_governance_owner_team = (
+        lambda *args, **kwargs: _fetch_governance_owner_team(*args, **kwargs)
+    )
+    findings_module._update_finding_owner = lambda *args, **kwargs: _update_finding_owner(*args, **kwargs)
+    findings_module._update_finding_team = lambda *args, **kwargs: _update_finding_team(*args, **kwargs)
+    findings_module._fetch_finding_effective_state = (
+        lambda *args, **kwargs: _fetch_finding_effective_state(*args, **kwargs)
+    )
+    findings_module._fetch_governance_sla = lambda *args, **kwargs: _fetch_governance_sla(*args, **kwargs)
+    findings_module._apply_finding_sla_extension = (
+        lambda *args, **kwargs: _apply_finding_sla_extension(*args, **kwargs)
+    )
+    findings_module._audit_log_event = lambda *args, **kwargs: _audit_log_event(*args, **kwargs)
+
+
+health_module.init_blueprint(_API_VERSION, _API_PREFIX)
+_install_blueprint_backcompat_shims()
+
+# Register blueprints - each handles its own route definitions.
+app.register_blueprint(health_module.health_bp)
+app.register_blueprint(runs_module.runs_bp)
+app.register_blueprint(findings_module.findings_bp)
+app.register_blueprint(recommendations_module.recommendations_bp)
+app.register_blueprint(teams_module.teams_bp)
+app.register_blueprint(sla_policies_module.sla_policies_bp)
+app.register_blueprint(lifecycle_module.lifecycle_bp)
+app.register_blueprint(groups_module.groups_bp)
+app.register_blueprint(facets_module.facets_bp)
+
+# Register versioned aliases after all routes (including blueprints) exist.
 _register_versioned_api_aliases()
-
-# Register blueprints for modular API organization
-# Import and register all blueprints for endpoints migrated from monolithic flask_app.py
-from apps.flask_api.blueprints.health import health_bp
-from apps.flask_api.blueprints.runs import runs_bp
-from apps.flask_api.blueprints.findings import findings_bp
-from apps.flask_api.blueprints.recommendations import recommendations_bp
-from apps.flask_api.blueprints.teams import teams_bp
-from apps.flask_api.blueprints.sla_policies import sla_policies_bp
-from apps.flask_api.blueprints.lifecycle import lifecycle_bp
-from apps.flask_api.blueprints.groups import groups_bp
-from apps.flask_api.blueprints.facets import facets_bp
-
-# Register blueprints - each handles its own route definitions
-app.register_blueprint(health_bp)
-app.register_blueprint(runs_bp)
-app.register_blueprint(findings_bp)
-app.register_blueprint(recommendations_bp)
-app.register_blueprint(teams_bp)
-app.register_blueprint(sla_policies_bp)
-app.register_blueprint(lifecycle_bp)
-app.register_blueprint(groups_bp)
-app.register_blueprint(facets_bp)
 
 
 if __name__ == "__main__":

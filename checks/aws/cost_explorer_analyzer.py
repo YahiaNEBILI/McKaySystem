@@ -19,12 +19,12 @@ Emitted check_ids:
 
 from __future__ import annotations
 
-import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from math import sqrt  # Add sqrt import
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any
 
 from botocore.exceptions import ClientError
 
@@ -36,7 +36,6 @@ from checks.aws._common import (
 from checks.aws.defaults import (
     COST_EXPLORER_CE_FRESHNESS_MONTHS,
     COST_EXPLORER_DROP_THRESHOLD_PCT,
-    COST_EXPLORER_ENABLE_CUR_BACKFILL,
     COST_EXPLORER_ENABLE_YOY,
     COST_EXPLORER_ENABLE_ZSCORE,
     COST_EXPLORER_LOOKBACK_MONTHS,
@@ -87,8 +86,8 @@ class CostRecord:
     period_start: date
     period_end: date
     unblended_cost: Decimal
-    blended_cost: Optional[Decimal]
-    amortized_cost: Optional[Decimal]
+    blended_cost: Decimal | None
+    amortized_cost: Decimal | None
     currency: str
     source: str  # "ce" or "cur"
 
@@ -104,7 +103,7 @@ def _round_cost(value: Any) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.000001"))
 
 
-def _get_previous_months(period: date, count: int) -> List[date]:
+def _get_previous_months(period: date, count: int) -> list[date]:
     """Get the previous 'count' months before the given period."""
     result = []
     current = period
@@ -189,7 +188,7 @@ class CostExplorerAnalyzerChecker(Checker):
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         """Run the Cost Explorer analyzer."""
         # Try to fetch fresh data from Cost Explorer
-        ce_records: List[CostRecord] = []
+        ce_records: list[CostRecord] = []
         access_error = False
 
         if self._ce_client is not None:
@@ -237,12 +236,12 @@ class CostExplorerAnalyzerChecker(Checker):
         # Run detection layers
         yield from self._run_detection(ctx, history)
 
-    def _fetch_from_ce(self, ctx: RunContext) -> List[CostRecord]:
+    def _fetch_from_ce(self, ctx: RunContext) -> list[CostRecord]:
         """Fetch cost data from AWS Cost Explorer API."""
-        records: List[CostRecord] = []
+        records: list[CostRecord] = []
 
         # Calculate the time period to fetch
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         end_month = _get_month_start(today)
         start_month = _get_previous_months(end_month, self._freshness_months - 1)[0]
 
@@ -312,7 +311,7 @@ class CostExplorerAnalyzerChecker(Checker):
         return records
 
     def _upsert_to_postgres(
-        self, ctx: RunContext, records: List[CostRecord]
+        self, ctx: RunContext, records: list[CostRecord]
     ) -> None:
         """Upsert cost records to Postgres cost_service_monthly table."""
         # Import here to avoid circular imports
@@ -322,7 +321,6 @@ class CostExplorerAnalyzerChecker(Checker):
             return
 
         # Import psycopg2
-        import psycopg2
         from psycopg2 import sql
 
         try:
@@ -366,7 +364,7 @@ class CostExplorerAnalyzerChecker(Checker):
                                 record.amortized_cost,
                                 record.currency,
                                 record.source,
-                                datetime.now(timezone.utc),
+                                datetime.now(UTC),
                             ),
                         )
 
@@ -384,14 +382,13 @@ class CostExplorerAnalyzerChecker(Checker):
             )
             raise
 
-    def _load_history_from_postgres(self, ctx: RunContext) -> List[CostRecord]:
+    def _load_history_from_postgres(self, ctx: RunContext) -> list[CostRecord]:
         """Load cost history from Postgres for detection."""
-        from apps.backend.db import db_conn
-
-        import psycopg2
         from psycopg2 import sql
 
-        records: List[CostRecord] = []
+        from apps.backend.db import db_conn
+
+        records: list[CostRecord] = []
 
         try:
             with db_conn() as conn:
@@ -454,12 +451,12 @@ class CostExplorerAnalyzerChecker(Checker):
         return records
 
     def _run_detection(
-        self, ctx: RunContext, history: List[CostRecord]
+        self, ctx: RunContext, history: list[CostRecord]
     ) -> Iterable[FindingDraft]:
         """Run all detection layers on the cost history."""
 
         # Group by service for easier processing
-        by_service: Dict[str, List[CostRecord]] = {}
+        by_service: dict[str, list[CostRecord]] = {}
         for record in history:
             if record.service not in by_service:
                 by_service[record.service] = []
@@ -570,11 +567,16 @@ class CostExplorerAnalyzerChecker(Checker):
         ctx: RunContext,
         service: str,
         current: CostRecord,
-        records: List[CostRecord],
+        records: list[CostRecord],
     ) -> Iterable[FindingDraft]:
         """Moving average / Z-score based detection."""
         # Get the window of previous months (excluding current)
-        window_records = records[-self._moving_avg_window_months - 1 : -1]
+        # Need at least min_months_for_moving months of history
+        if len(records) < self._min_months_for_moving + 1:
+            return
+
+        # Get the previous months (last N records before current, excluding current)
+        window_records = records[-self._moving_avg_window_months:]
 
         if len(window_records) < self._min_months_for_moving:
             return
@@ -644,7 +646,7 @@ class CostExplorerAnalyzerChecker(Checker):
         ctx: RunContext,
         service: str,
         current: CostRecord,
-        records: List[CostRecord],
+        records: list[CostRecord],
     ) -> Iterable[FindingDraft]:
         """Year-over-Year comparison detection."""
         # Find the same month last year
@@ -692,7 +694,7 @@ class CostExplorerAnalyzerChecker(Checker):
         self,
         ctx: RunContext,
         service: str,
-        records: List[CostRecord],
+        records: list[CostRecord],
     ) -> Iterable[FindingDraft]:
         """Regression-based trend detection."""
         # Use the last N months for trend analysis
@@ -753,7 +755,7 @@ class CostExplorerAnalyzerChecker(Checker):
         ctx: RunContext,
         service: str,
         current: CostRecord,
-        previous: Optional[CostRecord],
+        previous: CostRecord | None,
     ) -> Iterable[FindingDraft]:
         """Service discovery: new or absent services."""
         # New service detection

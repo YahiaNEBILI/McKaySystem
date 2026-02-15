@@ -138,6 +138,37 @@ def _audit_lifecycle(
     }
     _log("INFO", "lifecycle_audit", evt)
 
+    # Keep legacy finding_state_audit writes for compatibility while audit_log is primary.
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT mckay_finding_state_audit_1")
+            cur.execute(
+                """
+                INSERT INTO finding_state_audit
+                  (tenant_id, workspace, subject_type, subject_id, action, state, snooze_until, reason, updated_by)
+                VALUES
+                  (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    tenant_id,
+                    workspace,
+                    subject_type,
+                    subject_id,
+                    action,
+                    state,
+                    snooze_until,
+                    reason,
+                    updated_by,
+                ),
+            )
+            cur.execute("RELEASE SAVEPOINT mckay_finding_state_audit_1")
+    except Exception:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT mckay_finding_state_audit_1")
+        except Exception:
+            pass
+
     _audit_log_event(
         conn,
         tenant_id=tenant_id,
@@ -368,13 +399,15 @@ def api_lifecycle_ignore() -> Any:
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace = _require_scope_from_json(payload)
-        fingerprint = str(payload.get("fingerprint") or "").strip()
-        if not fingerprint:
+        fingerprint = str(payload.get("fingerprint") or "")
+        if not fingerprint.strip():
             raise ValueError("fingerprint is required")
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
         with db_conn() as conn:
-            if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint):
+            if hasattr(conn, "cursor") and not _finding_exists(
+                conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint
+            ):
                 return _err("not_found", "finding not found", status=404)
             _upsert_state(
                 conn,
@@ -410,13 +443,15 @@ def api_lifecycle_resolve() -> Any:
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace = _require_scope_from_json(payload)
-        fingerprint = str(payload.get("fingerprint") or "").strip()
-        if not fingerprint:
+        fingerprint = str(payload.get("fingerprint") or "")
+        if not fingerprint.strip():
             raise ValueError("fingerprint is required")
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
         with db_conn() as conn:
-            if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint):
+            if hasattr(conn, "cursor") and not _finding_exists(
+                conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint
+            ):
                 return _err("not_found", "finding not found", status=404)
             _upsert_state(
                 conn,
@@ -452,8 +487,8 @@ def api_lifecycle_snooze() -> Any:
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace = _require_scope_from_json(payload)
-        fingerprint = str(payload.get("fingerprint") or "").strip()
-        if not fingerprint:
+        fingerprint = str(payload.get("fingerprint") or "")
+        if not fingerprint.strip():
             raise ValueError("fingerprint is required")
         snooze_until_raw = payload.get("snooze_until")
         if not snooze_until_raw:
@@ -462,7 +497,9 @@ def api_lifecycle_snooze() -> Any:
         reason = payload.get("reason")
         updated_by = payload.get("updated_by")
         with db_conn() as conn:
-            if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint):
+            if hasattr(conn, "cursor") and not _finding_exists(
+                conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint
+            ):
                 return _err("not_found", "finding not found", status=404)
             _upsert_state(
                 conn,

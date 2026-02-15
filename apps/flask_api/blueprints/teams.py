@@ -24,11 +24,8 @@ from apps.flask_api.utils import (
     _parse_int,
     _coerce_optional_text,
     _payload_optional_text,
+    _MISSING,
 )
-
-
-# Sentinel for missing values
-_MISSING = object()
 
 
 # Create the blueprint
@@ -543,6 +540,8 @@ def api_team_member_add(team_id: str) -> Any:
 
         user_name = None if user_name_v is _MISSING else user_name_v
         role = "member" if role_v is _MISSING else role_v
+        if role not in {"owner", "member", "viewer"}:
+            raise ValueError("role must be one of: owner, member, viewer")
 
         with db_conn() as conn:
             if not _team_exists(conn, tenant_id=tenant_id, workspace=workspace, team_id=tid):
