@@ -132,6 +132,7 @@ Body params for `/api/recommendations/estimate`:
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/remediations` | List remediation actions |
+| GET | `/api/remediations/impact` | List remediation impact and realized savings metrics |
 | POST | `/api/remediations/request` | Request remediation action creation for a finding |
 | POST | `/api/remediations/approve` | Approve one pending remediation action |
 | POST | `/api/remediations/reject` | Reject one pending remediation action |
@@ -144,6 +145,21 @@ Scope:
 Optional filters:
 - `status`, `action_type`, `check_id`, `fingerprint` (CSV)
 - `limit`, `offset`
+
+### GET /api/remediations/impact
+
+Optional filters:
+- `action_status`, `verification_status`, `action_type`, `check_id`, `fingerprint`, `action_id` (CSV)
+- `limit`, `offset`
+- `refresh` (boolean, default `false`) to refresh impact snapshots before listing
+- `refresh_limit` (default `500`) max actions refreshed when `refresh=true`
+
+Response:
+- `summary.actions_count`: impact rows count in filtered scope
+- `summary.baseline_total_monthly_savings`: total baseline estimated monthly savings
+- `summary.realized_total_monthly_savings`: total realized monthly savings
+- `summary.realization_rate_pct`: realized/baseline percentage when baseline > 0
+- `items`: per-action impact rows with verification status and realized savings
 
 ### POST /api/remediations/request
 

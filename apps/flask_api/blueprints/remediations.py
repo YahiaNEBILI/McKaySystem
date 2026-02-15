@@ -28,6 +28,8 @@ from apps.flask_api.utils import (
     _require_scope_from_json,
     _require_scope_from_query,
 )
+from services.remediation.impact import refresh_scope_action_impacts
+from services.remediation.payload import normalize_action_payload
 
 if TYPE_CHECKING:
     from psycopg2 import Error as PsycopgError  # type: ignore
@@ -78,19 +80,7 @@ def _utc_now() -> datetime:
 
 def _normalize_action_payload(value: Any) -> dict[str, Any]:
     """Normalize JSON payload to a dictionary."""
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
+    return normalize_action_payload(value)
 
 
 def _serialize_action(row: dict[str, Any]) -> dict[str, Any]:
@@ -643,6 +633,108 @@ def _query_actions(
     return rows, int((count_row or {}).get("n") or 0)
 
 
+def _impact_filters_from_query() -> dict[str, list[str] | None]:
+    """Build remediation impact filters from query params."""
+    return {
+        "action_status": _parse_csv_list(_q("action_status")),
+        "verification_status": _parse_csv_list(_q("verification_status")),
+        "action_type": _parse_csv_list(_q("action_type")),
+        "check_id": _parse_csv_list(_q("check_id")),
+        "fingerprint": _parse_csv_list(_q("fingerprint")),
+        "action_id": _parse_csv_list(_q("action_id")),
+    }
+
+
+def _impact_where_clause(
+    tenant_id: str,
+    workspace: str,
+    filters: dict[str, list[str] | None],
+) -> tuple[list[str], list[Any]]:
+    """Build scoped WHERE clause for remediation impact listing."""
+    where = ["ri.tenant_id = %s", "ri.workspace = %s"]
+    params: list[Any] = [tenant_id, workspace]
+
+    def _add_any(column: str, values: list[str] | None) -> None:
+        if not values:
+            return
+        where.append(f"ri.{column} = ANY(%s)")
+        params.append(values)
+
+    _add_any("action_status", filters.get("action_status"))
+    _add_any("verification_status", filters.get("verification_status"))
+    _add_any("action_type", filters.get("action_type"))
+    _add_any("check_id", filters.get("check_id"))
+    _add_any("fingerprint", filters.get("fingerprint"))
+    _add_any("action_id", filters.get("action_id"))
+    return where, params
+
+
+def _query_impact_rows(
+    *,
+    tenant_id: str,
+    workspace: str,
+    filters: dict[str, list[str] | None],
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+    """Query remediation impact list, summary and total count."""
+    where, params = _impact_where_clause(tenant_id, workspace, filters)
+    list_sql = f"""
+        SELECT
+          ri.tenant_id, ri.workspace, ri.action_id, ri.fingerprint, ri.check_id, ri.action_type,
+          ri.action_status, ri.verification_status,
+          ri.baseline_estimated_monthly_savings, ri.current_estimated_monthly_savings,
+          ri.realized_monthly_savings, ri.realization_rate_pct,
+          ri.latest_run_id, ri.latest_run_ts, ri.present_in_latest,
+          ri.finalized_at, ri.computed_at, ri.version
+        FROM remediation_impact ri
+        WHERE {' AND '.join(where)}
+        ORDER BY ri.computed_at DESC, ri.action_id
+        LIMIT %s OFFSET %s
+    """
+    count_sql = f"""
+        SELECT COUNT(*) AS n
+        FROM remediation_impact ri
+        WHERE {' AND '.join(where)}
+    """
+    summary_sql = f"""
+        SELECT
+          COUNT(*)::bigint AS actions_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_resolved' THEN 1 ELSE 0 END)::bigint AS resolved_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_persistent' THEN 1 ELSE 0 END)::bigint AS persistent_count,
+          SUM(CASE WHEN ri.verification_status = 'pending_post_run' THEN 1 ELSE 0 END)::bigint AS pending_count,
+          SUM(CASE WHEN ri.verification_status = 'execution_failed' THEN 1 ELSE 0 END)::bigint AS failed_count,
+          COALESCE(SUM(ri.baseline_estimated_monthly_savings), 0)::double precision AS baseline_total_monthly_savings,
+          COALESCE(SUM(ri.realized_monthly_savings), 0)::double precision AS realized_total_monthly_savings
+        FROM remediation_impact ri
+        WHERE {' AND '.join(where)}
+    """
+    with db_conn() as conn:
+        rows = fetch_all_dict_conn(conn, list_sql, params + [limit, offset])
+        count_row = fetch_one_dict_conn(conn, count_sql, params)
+        summary = fetch_one_dict_conn(conn, summary_sql, params) or {}
+    return rows, summary, int((count_row or {}).get("n") or 0)
+
+
+def _impact_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
+    """Normalize remediation impact summary counters and ROI percentages."""
+    baseline_total = float(summary.get("baseline_total_monthly_savings") or 0.0)
+    realized_total = float(summary.get("realized_total_monthly_savings") or 0.0)
+    realization_rate_pct = None
+    if baseline_total > 0:
+        realization_rate_pct = (realized_total / baseline_total) * 100.0
+    return {
+        "actions_count": int(summary.get("actions_count") or 0),
+        "resolved_count": int(summary.get("resolved_count") or 0),
+        "persistent_count": int(summary.get("persistent_count") or 0),
+        "pending_count": int(summary.get("pending_count") or 0),
+        "failed_count": int(summary.get("failed_count") or 0),
+        "baseline_total_monthly_savings": baseline_total,
+        "realized_total_monthly_savings": realized_total,
+        "realization_rate_pct": realization_rate_pct,
+    }
+
+
 @remediations_bp.route("/api/remediations", methods=["GET"])
 def api_remediations_list() -> Any:
     """List remediation actions for a scoped tenant/workspace."""
@@ -666,6 +758,57 @@ def api_remediations_list() -> Any:
                 "offset": offset,
                 "total": total,
                 "items": [_serialize_action(row) for row in rows],
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@remediations_bp.route("/api/remediations/impact", methods=["GET"])
+def api_remediations_impact() -> Any:
+    """List closed-loop remediation impact with aggregate realized ROI metrics."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        refresh = _normalize_bool(
+            _q("refresh"),
+            field_name="refresh",
+            default=False,
+        )
+        refresh_limit = _parse_int(_q("refresh_limit"), default=500, min_v=1, max_v=5000)
+        filters = _impact_filters_from_query()
+
+        refreshed = 0
+        if refresh:
+            with db_conn() as conn:
+                refreshed = refresh_scope_action_impacts(
+                    conn,
+                    tenant_id=tenant_id,
+                    workspace=workspace,
+                    limit=refresh_limit,
+                )
+                conn.commit()
+
+        rows, summary, total = _query_impact_rows(
+            tenant_id=tenant_id,
+            workspace=workspace,
+            filters=filters,
+            limit=limit,
+            offset=offset,
+        )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "refreshed": refreshed,
+                "summary": _impact_summary_payload(summary),
+                "items": rows,
             }
         )
     except ValueError as exc:

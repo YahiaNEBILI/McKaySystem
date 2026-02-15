@@ -16,6 +16,8 @@ import boto3  # type: ignore[import-untyped]
 from apps.backend.db import db_conn, fetch_all_dict_conn
 from infra.config import get_settings
 from services.remediation import ActionContext, ExecutionRequest, RemediationExecutor
+from services.remediation.impact import upsert_action_impact
+from services.remediation.payload import normalize_action_payload
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +45,6 @@ class RemediationWorkerStats:
     claimed: int
     completed: int
     failed: int
-
-
-def _normalize_payload(value: Any) -> dict[str, Any]:
-    """Normalize remediation action payload to a dict."""
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
 
 
 def _payload_region(payload: Mapping[str, Any]) -> str:
@@ -161,7 +146,7 @@ def _claimed_action_from_row(
         "fingerprint": str(row.get("fingerprint") or ""),
         "check_id": str(row.get("check_id") or ""),
         "action_type": str(row.get("action_type") or ""),
-        "payload": _normalize_payload(row.get("action_payload")),
+        "payload": normalize_action_payload(row.get("action_payload")),
         "dry_run": effective_dry_run,
     }
 
@@ -324,7 +309,7 @@ def _execute_one_claimed_action(
     actor_id: str,
 ) -> dict[str, Any]:
     """Execute one claimed action and build persistence payload."""
-    payload = _normalize_payload(claimed_action.get("payload"))
+    payload = normalize_action_payload(claimed_action.get("payload"))
     region = _payload_region(payload)
     services = services_factory.for_region(region)
     ctx = ActionContext(
@@ -397,6 +382,12 @@ def process_approved_actions(
         with db_conn() as conn:
             _update_action_result(conn, outcome=outcome)
             _audit_action_outcome(conn, outcome=outcome)
+            upsert_action_impact(
+                conn,
+                tenant_id=str(outcome.get("tenant_id") or ""),
+                workspace=str(outcome.get("workspace") or ""),
+                action_id=str(outcome.get("action_id") or ""),
+            )
             conn.commit()
         if str(outcome.get("status") or "") == _STATUS_COMPLETED:
             completed += 1

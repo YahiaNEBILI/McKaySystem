@@ -78,6 +78,115 @@ def test_remediations_list_query_is_scoped(monkeypatch) -> None:  # type: ignore
     assert "ra.action_type = any(%s)" in sql_blob
 
 
+def test_remediations_impact_query_is_scoped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/remediations/impact` must query remediation_impact with tenant/workspace scope."""
+    _disable_runtime_guards(monkeypatch)
+    captured_sql: list[str] = []
+
+    def _fake_fetch_all(_conn: object, sql: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        _ = params
+        captured_sql.append(sql)
+        return []
+
+    call_no = {"n": 0}
+
+    def _fake_fetch_one(_conn: object, sql: str, params: Sequence[Any] | None = None) -> dict[str, Any]:
+        _ = params
+        captured_sql.append(sql)
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return {"n": 0}
+        return {
+            "actions_count": 0,
+            "resolved_count": 0,
+            "persistent_count": 0,
+            "pending_count": 0,
+            "failed_count": 0,
+            "baseline_total_monthly_savings": 0.0,
+            "realized_total_monthly_savings": 0.0,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get(
+        "/api/remediations/impact?tenant_id=acme&workspace=prod"
+        "&verification_status=verified_resolved&action_status=completed&action_type=rightsize"
+    )
+
+    assert resp.status_code == 200
+    sql_blob = "\n".join(captured_sql).lower()
+    assert "from remediation_impact ri" in sql_blob
+    assert "ri.tenant_id = %s" in sql_blob
+    assert "ri.workspace = %s" in sql_blob
+    assert "ri.verification_status = any(%s)" in sql_blob
+    assert "ri.action_status = any(%s)" in sql_blob
+    assert "ri.action_type = any(%s)" in sql_blob
+
+
+def test_remediations_impact_summary_returns_realization_rate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Impact endpoint should return deterministic summary totals and realization rate."""
+    _disable_runtime_guards(monkeypatch)
+
+    monkeypatch.setattr(
+        flask_app,
+        "fetch_all_dict_conn",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "action_id": "act-1",
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "action_type": "rightsize",
+                "action_status": "completed",
+                "verification_status": "verified_resolved",
+                "baseline_estimated_monthly_savings": 100.0,
+                "current_estimated_monthly_savings": None,
+                "realized_monthly_savings": 80.0,
+                "realization_rate_pct": 80.0,
+                "latest_run_id": "run-2",
+                "latest_run_ts": "2026-02-15T10:00:00Z",
+                "present_in_latest": False,
+                "finalized_at": "2026-02-15T09:00:00Z",
+                "computed_at": "2026-02-15T10:00:00Z",
+                "version": 1,
+            }
+        ],
+    )
+
+    call_no = {"n": 0}
+
+    def _fake_fetch_one(*_args, **_kwargs) -> dict[str, Any]:
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return {"n": 1}
+        return {
+            "actions_count": 1,
+            "resolved_count": 1,
+            "persistent_count": 0,
+            "pending_count": 0,
+            "failed_count": 0,
+            "baseline_total_monthly_savings": 100.0,
+            "realized_total_monthly_savings": 80.0,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/remediations/impact?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    summary = payload.get("summary") or {}
+    assert summary.get("actions_count") == 1
+    assert summary.get("baseline_total_monthly_savings") == 100.0
+    assert summary.get("realized_total_monthly_savings") == 80.0
+    assert summary.get("realization_rate_pct") == 80.0
+
+
 def test_remediation_approve_transitions_pending_to_approved(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Approve endpoint should allow `pending_approval` -> `approved` only."""
     _disable_runtime_guards(monkeypatch)

@@ -137,6 +137,7 @@ def test_process_approved_actions_completes(monkeypatch: pytest.MonkeyPatch) -> 
     conn = _FakeConn()
     updates: list[dict[str, Any]] = []
     audits: list[dict[str, Any]] = []
+    impacts: list[dict[str, Any]] = []
 
     monkeypatch.setattr(remediation_worker, "db_conn", lambda: _ConnCtx(conn))
     monkeypatch.setattr(
@@ -165,6 +166,11 @@ def test_process_approved_actions_completes(monkeypatch: pytest.MonkeyPatch) -> 
         "_audit_action_outcome",
         lambda _conn, **kwargs: audits.append(kwargs),
     )
+    monkeypatch.setattr(
+        remediation_worker,
+        "upsert_action_impact",
+        lambda _conn, **kwargs: impacts.append(kwargs) or True,
+    )
 
     services_factory = _FakeServicesFactory()
     executor = _FakeExecutor(ok=True)
@@ -184,6 +190,7 @@ def test_process_approved_actions_completes(monkeypatch: pytest.MonkeyPatch) -> 
     assert services_factory.regions == ["us-east-2"]
     assert updates and updates[0]["outcome"]["status"] == "completed"
     assert audits and audits[0]["outcome"]["event_type"] == "remediation.completed"
+    assert impacts and impacts[0]["action_id"] == "act-1"
 
 
 def test_process_approved_actions_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,6 +221,11 @@ def test_process_approved_actions_marks_failed(monkeypatch: pytest.MonkeyPatch) 
         lambda _conn, **kwargs: updates.append(kwargs),
     )
     monkeypatch.setattr(remediation_worker, "_audit_action_outcome", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        remediation_worker,
+        "upsert_action_impact",
+        lambda _conn, **_kwargs: True,
+    )
 
     stats = remediation_worker.process_approved_actions(
         options=remediation_worker.RemediationWorkerOptions(
