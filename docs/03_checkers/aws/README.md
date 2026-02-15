@@ -7,6 +7,7 @@ Service-specific checker references:
 
 - `backup_plans.md`
 - `backup_vaults.md`
+- `cloudfront.md`
 - `cloudwatch.md`
 - `ebs.md`
 - `ec2.md`

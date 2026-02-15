@@ -49,6 +49,7 @@ class Services:
     logs: Any = None
     savingsplans: Any = None
     ce: Any = None  # Cost Explorer client (global, us-east-1)
+    cloudfront: Any = None  # CloudFront client (global, us-east-1)
     region: str = ""
     pricing: Any = None
 
@@ -77,6 +78,7 @@ class ServicesFactory:
         self._s3_global: Any | None = None
         self._savingsplans_global: Any | None = None
         self._ce_global: Any | None = None
+        self._cloudfront_global: Any | None = None
         self._pricing_client = self._client("pricing", region="us-east-1")
         self._pricing_cache = make_pricing_cache(base_dir=default_cache_dir(), ttl_days=7)
         self._pricing_service = PricingService(pricing_client=self._pricing_client, cache=self._pricing_cache)
@@ -110,6 +112,12 @@ class ServicesFactory:
             self._ce_global = self._client("ce", region="us-east-1")
         return self._ce_global
 
+    def global_cloudfront(self) -> Any:
+        """CloudFront is a global API; reuse one client."""
+        if self._cloudfront_global is None:
+            self._cloudfront_global = self._client("cloudfront", region="us-east-1")
+        return self._cloudfront_global
+
     def for_region(self, region: str) -> Services:
         """
         Return cached Services for a given region, creating it if needed.
@@ -137,6 +145,7 @@ class ServicesFactory:
             logs=self._client("logs", region=reg),
             savingsplans=self.global_savingsplans(),
             ce=self.global_ce(),
+            cloudfront=self.global_cloudfront(),
             pricing=self._pricing_service,
             region=reg,
         )
