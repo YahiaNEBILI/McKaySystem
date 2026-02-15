@@ -132,6 +132,7 @@ Body params for `/api/recommendations/estimate`:
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/remediations` | List remediation actions |
+| POST | `/api/remediations/request` | Request remediation action creation for a finding |
 | POST | `/api/remediations/approve` | Approve one pending remediation action |
 | POST | `/api/remediations/reject` | Reject one pending remediation action |
 
@@ -143,6 +144,22 @@ Scope:
 Optional filters:
 - `status`, `action_type`, `check_id`, `fingerprint` (CSV)
 - `limit`, `offset`
+
+### POST /api/remediations/request
+
+Body:
+- `tenant_id`, `workspace`, `fingerprint` required
+- Optional: `action_id`, `action_type`, `action_payload`, `dry_run`, `auto_approve`, `requested_by`, `reason`
+
+Behavior:
+- Creates a remediation action idempotently from a finding in `finding_current`.
+- If `action_id` is omitted, a deterministic action id is derived from scope + fingerprint + action type + dry-run.
+- If the action already exists with matching identity, returns existing action with `created=false` and `idempotent=true`.
+
+Errors:
+- `404` finding missing in scope
+- `409` finding is terminal (`resolved`/`ignored`) or `action_id` conflicts with different identity
+- `400` invalid payload
 
 ### POST /api/remediations/approve
 

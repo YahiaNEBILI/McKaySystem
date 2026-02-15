@@ -1,6 +1,7 @@
 """Remediations Blueprint.
 
 Provides remediation action endpoints:
+- request action
 - list actions
 - approve action
 - reject action
@@ -8,13 +9,16 @@ Provides remediation action endpoints:
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.blueprints import recommendations as recommendations_module
 from apps.flask_api.utils import (
     _err,
     _ok,
@@ -42,6 +46,29 @@ remediations_bp = Blueprint("remediations", __name__)
 _PENDING_APPROVAL = "pending_approval"
 _APPROVED = "approved"
 _REJECTED = "rejected"
+_TERMINAL_FINDING_STATES = {"resolved", "ignored"}
+
+
+@dataclass(frozen=True)
+class _RequestCreateInput:
+    """Normalized input for remediation action creation."""
+
+    tenant_id: str
+    workspace: str
+    fingerprint: str
+    requested_by: str | None
+    reason: str | None
+    payload: dict[str, Any]
+
+
+class _RequestError(ValueError):
+    """Structured API error for remediation request endpoint."""
+
+    def __init__(self, *, code: str, message: str, status: int) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
 
 
 def _utc_now() -> datetime:
@@ -176,6 +203,73 @@ def _where_clause(
     return where, params
 
 
+def _normalize_bool(value: Any, *, field_name: str, default: bool) -> bool:
+    """Parse an optional boolean-like value from payload."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "0", "no", "n"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean")
+
+
+def _stable_action_id(
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+    action_type: str,
+    dry_run: bool,
+) -> str:
+    """Deterministically build an action_id."""
+    seed = f"{tenant_id}|{workspace}|{fingerprint}|{action_type}|{int(dry_run)}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"act_{digest[:24]}"
+
+
+def _recommendation_rule_for_check_id(check_id: str) -> dict[str, Any]:
+    """Best-effort load recommendation rule metadata by check_id."""
+    if not check_id:
+        return {}
+
+    rules = getattr(recommendations_module, "_RECOMMENDATION_RULES", {})
+    default_rule = getattr(recommendations_module, "_RECOMMENDATION_DEFAULT_RULE", {})
+    if not isinstance(rules, dict):
+        rules = {}
+    if not isinstance(default_rule, dict):
+        default_rule = {}
+    rule = rules.get(check_id, default_rule)
+    if not isinstance(rule, dict):
+        return {}
+    return dict(rule)
+
+
+def _fetch_finding_for_request(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    """Fetch recommendation-relevant finding fields from read model."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id, workspace, fingerprint, check_id, effective_state, service
+        FROM finding_current
+        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+        LIMIT 1
+        """,
+        (tenant_id, workspace, fingerprint),
+    )
+
+
 def _fetch_action_for_update(
     conn: Any,
     *,
@@ -237,6 +331,274 @@ def _require_actor(payload: dict[str, Any], *, field_name: str) -> str:
     if not actor:
         raise ValueError(f"{field_name} is required")
     return actor
+
+
+def _resolve_request_action_type(payload: dict[str, Any], *, check_id: str) -> str:
+    """Resolve action_type from request override or recommendation rule defaults."""
+    explicit = str(payload.get("action_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    rule = _recommendation_rule_for_check_id(check_id)
+    rule_action = str(rule.get("action_type") or "").strip().lower()
+    if rule_action:
+        return rule_action
+    raise ValueError("action_type is required")
+
+
+def _build_action_payload(
+    *,
+    payload: dict[str, Any],
+    check_id: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Build deterministic action_payload JSON for storage."""
+    out = _normalize_action_payload(payload.get("action_payload"))
+    out.setdefault("fingerprint", fingerprint)
+    out.setdefault("check_id", check_id)
+    rule = _recommendation_rule_for_check_id(check_id)
+    recommendation_type = str(rule.get("recommendation_type") or "").strip()
+    if recommendation_type:
+        out.setdefault("recommendation_type", recommendation_type)
+    return out
+
+
+def _resolve_initial_status(
+    *,
+    payload: dict[str, Any],
+    check_id: str,
+) -> tuple[str, str | None, datetime | None]:
+    """Resolve initial action status and approval metadata."""
+    rule = _recommendation_rule_for_check_id(check_id)
+    requires_approval = bool(rule.get("requires_approval", False))
+    auto_approve = _normalize_bool(
+        payload.get("auto_approve"),
+        field_name="auto_approve",
+        default=False,
+    )
+
+    if auto_approve and requires_approval:
+        raise ValueError("auto_approve is not allowed for actions that require approval")
+
+    if auto_approve:
+        actor = _require_actor(payload, field_name="requested_by")
+        return _APPROVED, actor, _utc_now()
+    return _PENDING_APPROVAL, None, None
+
+
+def _insert_action(conn: Any, *, action: dict[str, Any]) -> None:
+    """Insert remediation action idempotently."""
+    now = _utc_now()
+    execute_conn(
+        conn,
+        """
+        INSERT INTO remediation_actions (
+          tenant_id, workspace, action_id,
+          fingerprint, check_id, action_type,
+          action_payload, dry_run, status, reason,
+          requested_by, approved_by, rejected_by,
+          requested_at, approved_at, rejected_at, updated_at, version
+        ) VALUES (
+          %s, %s, %s,
+          %s, %s, %s,
+          %s::jsonb, %s, %s, %s,
+          %s, %s, NULL,
+          %s, %s, NULL, %s, 1
+        )
+        ON CONFLICT (tenant_id, workspace, action_id) DO NOTHING
+        """,
+        (
+            action["tenant_id"],
+            action["workspace"],
+            action["action_id"],
+            action["fingerprint"],
+            action["check_id"],
+            action["action_type"],
+            json.dumps(action["action_payload"], separators=(",", ":")),
+            action["dry_run"],
+            action["status"],
+            action["reason"],
+            action["requested_by"],
+            action["approved_by"],
+            now,
+            action["approved_at"],
+            now,
+        ),
+    )
+
+
+def _optional_text(value: Any) -> str | None:
+    """Normalize optional payload text to stripped string or None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_request_create_input(payload: dict[str, Any]) -> _RequestCreateInput:
+    """Normalize and validate request payload for action creation."""
+    tenant_id, workspace = _require_scope_from_json(payload)
+    fingerprint = str(payload.get("fingerprint") or "").strip()
+    if not fingerprint:
+        raise ValueError("fingerprint is required")
+    return _RequestCreateInput(
+        tenant_id=tenant_id,
+        workspace=workspace,
+        fingerprint=fingerprint,
+        requested_by=_optional_text(payload.get("requested_by")),
+        reason=_optional_text(payload.get("reason")),
+        payload=payload,
+    )
+
+
+def _require_actionable_finding(
+    conn: Any,
+    *,
+    request_data: _RequestCreateInput,
+) -> dict[str, Any]:
+    """Load finding row and enforce request eligibility constraints."""
+    finding = _fetch_finding_for_request(
+        conn,
+        tenant_id=request_data.tenant_id,
+        workspace=request_data.workspace,
+        fingerprint=request_data.fingerprint,
+    )
+    if finding is None:
+        raise _RequestError(code="not_found", message="finding not found", status=404)
+
+    effective_state = str(finding.get("effective_state") or "").strip().lower()
+    if effective_state in _TERMINAL_FINDING_STATES:
+        raise _RequestError(code="invalid_state", message="finding is not actionable", status=409)
+    return finding
+
+
+def _resolve_action_identity(
+    *,
+    request_data: _RequestCreateInput,
+    check_id: str,
+) -> tuple[str, str, bool]:
+    """Resolve action_type, dry_run and action_id deterministically."""
+    action_type = _resolve_request_action_type(request_data.payload, check_id=check_id)
+    dry_run = _normalize_bool(
+        request_data.payload.get("dry_run"),
+        field_name="dry_run",
+        default=True,
+    )
+    action_id_raw = str(request_data.payload.get("action_id") or "").strip()
+    action_id = action_id_raw or _stable_action_id(
+        tenant_id=request_data.tenant_id,
+        workspace=request_data.workspace,
+        fingerprint=request_data.fingerprint,
+        action_type=action_type,
+        dry_run=dry_run,
+    )
+    return action_type, action_id, dry_run
+
+
+def _request_action_for_finding(
+    conn: Any,
+    *,
+    request_data: _RequestCreateInput,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Create or fetch an idempotent remediation action for one finding."""
+    finding = _require_actionable_finding(conn, request_data=request_data)
+    check_id = str(finding.get("check_id") or "").strip()
+    action_type, action_id, dry_run = _resolve_action_identity(
+        request_data=request_data,
+        check_id=check_id,
+    )
+
+    existing = _fetch_action(
+        conn,
+        tenant_id=request_data.tenant_id,
+        workspace=request_data.workspace,
+        action_id=action_id,
+    )
+    if existing is not None:
+        if (
+            str(existing.get("fingerprint") or "") != request_data.fingerprint
+            or str(existing.get("action_type") or "") != action_type
+        ):
+            raise _RequestError(
+                code="conflict",
+                message="action_id already exists with different payload",
+                status=409,
+            )
+        return existing, False, True
+
+    status, approved_by, approved_at = _resolve_initial_status(
+        payload=request_data.payload,
+        check_id=check_id,
+    )
+    action_payload = _build_action_payload(
+        payload=request_data.payload,
+        check_id=check_id,
+        fingerprint=request_data.fingerprint,
+    )
+    _insert_action(
+        conn,
+        action={
+            "tenant_id": request_data.tenant_id,
+            "workspace": request_data.workspace,
+            "action_id": action_id,
+            "fingerprint": request_data.fingerprint,
+            "check_id": check_id,
+            "action_type": action_type,
+            "action_payload": action_payload,
+            "dry_run": dry_run,
+            "status": status,
+            "reason": request_data.reason,
+            "requested_by": request_data.requested_by,
+            "approved_by": approved_by,
+            "approved_at": approved_at,
+        },
+    )
+    created = _fetch_action(
+        conn,
+        tenant_id=request_data.tenant_id,
+        workspace=request_data.workspace,
+        action_id=action_id,
+    )
+    if created is None:
+        raise ValueError("failed to create remediation action")
+    return created, True, False
+
+
+@remediations_bp.route("/api/remediations/request", methods=["POST"])
+def api_remediations_request() -> Any:
+    """Create (idempotently) a remediation action from a finding fingerprint."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        request_data = _parse_request_create_input(payload)
+        with db_conn() as conn:
+            action, created, idempotent = _request_action_for_finding(
+                conn,
+                request_data=request_data,
+            )
+            if created:
+                _audit_log_event(
+                    conn,
+                    event={
+                        "tenant_id": request_data.tenant_id,
+                        "workspace": request_data.workspace,
+                        "action_id": action.get("action_id"),
+                        "event_type": "remediation.requested",
+                        "previous_value": None,
+                        "new_value": _serialize_action(action),
+                    },
+                    actor_id=request_data.requested_by,
+                )
+                conn.commit()
+        response_payload: dict[str, Any] = {
+            "action": _serialize_action(action),
+            "created": created,
+        }
+        if idempotent:
+            response_payload["idempotent"] = True
+        return _ok(response_payload)
+    except _RequestError as exc:
+        return _err(exc.code, exc.message, status=exc.status)
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
 
 
 def _list_filters_from_query() -> dict[str, list[str] | None]:

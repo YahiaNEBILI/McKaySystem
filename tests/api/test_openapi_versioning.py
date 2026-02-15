@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import apps.flask_api.flask_app as flask_app
 
@@ -12,7 +12,7 @@ class _DummyConn:
     def __enter__(self) -> _DummyConn:
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:  # type: ignore[no-untyped-def]
         return False
 
     def commit(self) -> None:
@@ -79,6 +79,8 @@ def test_openapi_public_endpoint_contains_versioned_servers(monkeypatch) -> None
     assert "post" in (paths.get("/recommendations/preview") or {})
     assert "/remediations" in paths
     assert "get" in (paths.get("/remediations") or {})
+    assert "/remediations/request" in paths
+    assert "post" in (paths.get("/remediations/request") or {})
     assert "/remediations/approve" in paths
     assert "post" in (paths.get("/remediations/approve") or {})
 
@@ -165,6 +167,67 @@ def test_versioned_remediations_alias_works(monkeypatch) -> None:  # type: ignor
     body = resp.get_json() or {}
     assert body.get("ok") is True
     assert body.get("total") == 0
+
+
+def test_versioned_remediations_request_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/remediations/request` should behave like `/api/remediations/request`."""
+    _disable_runtime_guards(monkeypatch)
+    execute_calls: list[tuple[str, Sequence[Any] | None]] = []
+    fetch_calls = {"n": 0}
+
+    def _fake_fetch_one(
+        _conn: object, _sql: str, _params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        fetch_calls["n"] += 1
+        if fetch_calls["n"] == 1:
+            return {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "effective_state": "open",
+                "service": "ec2",
+            }
+        if fetch_calls["n"] == 2:
+            return None
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-v1",
+            "fingerprint": "fp-1",
+            "check_id": "aws.ec2.instances.underutilized",
+            "action_type": "rightsize",
+            "status": "pending_approval",
+            "action_payload": {},
+            "dry_run": True,
+            "reason": None,
+            "requested_by": None,
+            "approved_by": None,
+            "rejected_by": None,
+            "requested_at": "2026-02-15T10:00:00Z",
+            "approved_at": None,
+            "rejected_at": None,
+            "updated_at": "2026-02-15T10:00:00Z",
+            "version": 1,
+        }
+
+    def _fake_execute(_conn: object, sql: str, params: Sequence[Any] | None = None) -> None:
+        execute_calls.append((sql, params))
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "execute_conn", _fake_execute)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/v1/remediations/request",
+        json={"tenant_id": "acme", "workspace": "prod", "fingerprint": "fp-1", "action_id": "act-v1"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("ok") is True
+    assert body.get("created") is True
+    assert execute_calls
 
 
 def test_versioned_openapi_alias_and_version_endpoint(monkeypatch) -> None:  # type: ignore[no-untyped-def]
