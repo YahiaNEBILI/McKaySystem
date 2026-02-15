@@ -18,6 +18,21 @@ EC2_T_CREDIT_LOOKBACK_DAYS: Final[int] = 7
 EC2_T_CREDIT_BALANCE_MIN_THRESHOLD: Final[float] = 20.0
 EC2_REQUIRED_INSTANCE_TAG_KEYS: Final[tuple[str, ...]] = ("ApplicationId", "Environment", "Application")
 
+# ECS/EKS containers checker defaults
+CONTAINERS_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+CONTAINERS_NONPROD_TAG_KEYS: Final[tuple[str, ...]] = ("env", "environment", "stage", "tier")
+CONTAINERS_NONPROD_TAG_VALUES: Final[tuple[str, ...]] = (
+    "dev",
+    "test",
+    "qa",
+    "uat",
+    "staging",
+    "sandbox",
+    "nonprod",
+    "non-prod",
+)
+EKS_MIN_SUPPORTED_VERSION: Final[tuple[int, int]] = (1, 28)
+
 # RDS instances optimization checker defaults
 RDS_STORAGE_GB_MONTH_PRICE_USD: Final[float] = 0.115
 RDS_STORAGE_WINDOW_DAYS: Final[int] = 14

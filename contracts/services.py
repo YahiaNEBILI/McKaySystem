@@ -33,6 +33,8 @@ class Services:
     rds: Any
     backup: Any
     ec2: Any
+    ecs: Any = None
+    eks: Any = None
     fsx: Any = None
     efs: Any = None
     elbv2: Any = None
@@ -102,6 +104,8 @@ class ServicesFactory:
             rds=self._client("rds", region=reg),
             backup=self._client("backup", region=reg),
             ec2=self._client("ec2", region=reg),
+            ecs=self._client("ecs", region=reg),
+            eks=self._client("eks", region=reg),
             fsx=self._client("fsx", region=reg),
             efs=self._client("efs", region=reg),
             elbv2=self._client("elbv2", region=reg),
