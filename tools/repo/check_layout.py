@@ -38,6 +38,10 @@ ROOT_IGNORED_PREFIXES = (
     "__pycache__",
 )
 
+ROOT_IGNORED_SUFFIXES = (
+    ".egg-info",
+)
+
 
 def list_unexpected_root_entries(repo_root: Path) -> list[str]:
     """Return sorted root entries that violate the structure policy."""
@@ -45,6 +49,8 @@ def list_unexpected_root_entries(repo_root: Path) -> list[str]:
     for entry in repo_root.iterdir():
         name = entry.name
         if any(name.startswith(prefix) for prefix in ROOT_IGNORED_PREFIXES):
+            continue
+        if any(name.endswith(suffix) for suffix in ROOT_IGNORED_SUFFIXES):
             continue
         if name not in ROOT_ALLOWED:
             unexpected.append(name)
