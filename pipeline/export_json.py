@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import glob as _glob
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 
 def _json_default(obj: Any) -> Any:
@@ -27,11 +30,11 @@ def _json_default(obj: Any) -> Any:
     return str(obj)
 
 
-def _rows_to_jsonable(cols: List[str], rows: List[tuple]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _rows_to_jsonable(cols: list[str], rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for row in rows:
-        rec: Dict[str, Any] = {}
-        for k, v in zip(cols, row):
+        rec: dict[str, Any] = {}
+        for k, v in zip(cols, row, strict=False):
             if isinstance(v, (datetime, date)):
                 rec[k] = v.isoformat()
             elif isinstance(v, Decimal):
@@ -48,11 +51,11 @@ class ExportConfig:
     out_dir: str = "webapp_data"
     limit_findings: int = 500
 
-    # Back-compat single glob
+    # Single-glob compatibility
     findings_glob: str = ""
 
-    # Preferred for multiple datasets
-    findings_globs: Optional[List[str]] = None
+    # Preferred for multiple datasets.
+    findings_globs: list[str] | None = None
 
     # Optional: also export correlated-only JSON
     export_correlated: bool = True
@@ -86,7 +89,7 @@ class FinOpsJsonExporter:
         if (self.ENRICHED_GLOB not in globs) and self._glob_has_files(self.ENRICHED_GLOB):
             standard = {self.STANDARD_RAW_GLOB, self.STANDARD_CORR_GLOB}
             if any(g in standard for g in globs):
-                print("[export_json] enriched dataset detected, using it for export")
+                logger.info("enriched dataset detected; using it for export")
                 globs = [self.ENRICHED_GLOB]
 
         self._globs_used = globs
@@ -94,7 +97,7 @@ class FinOpsJsonExporter:
         if not self._files:
             raise ValueError("No parquet files matched findings_glob(s). Check your paths/globs.")
 
-        print(f"[export_json] matched parquet files: {len(self._files)}")
+        logger.info("matched parquet files: %s", len(self._files))
 
         # Fail fast if the tenant doesn't exist in the dataset (avoids silently
         # producing empty JSON artifacts).
@@ -128,7 +131,7 @@ class FinOpsJsonExporter:
     def close(self) -> None:
         self.con.close()
 
-    def _effective_globs(self) -> List[str]:
+    def _effective_globs(self) -> list[str]:
         if self.cfg.findings_globs:
             globs = [str(x).strip() for x in self.cfg.findings_globs if str(x).strip()]
             if globs:
@@ -142,8 +145,8 @@ class FinOpsJsonExporter:
         return bool(_glob.glob(glob_pattern, recursive=True))
 
     @staticmethod
-    def _expand_globs_to_files(globs: List[str]) -> List[str]:
-        files: List[str] = []
+    def _expand_globs_to_files(globs: list[str]) -> list[str]:
+        files: list[str] = []
         for g in globs:
             matches = _glob.glob(g, recursive=True)
             for m in matches:
@@ -218,7 +221,7 @@ class FinOpsJsonExporter:
         cols = [d[0] for d in cur.description]
         matrix = _rows_to_jsonable(cols, rows)
 
-        summary: Dict[str, Any] = {
+        summary: dict[str, Any] = {
             "tenant_id": self.cfg.tenant_id,
             "by_status": {},
             "by_severity": {},
@@ -345,9 +348,9 @@ class FinOpsJsonExporter:
         out_dir = Path(self.cfg.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / filename
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
-        print(f"[OK] wrote {path}")
+        with path.open("w", encoding="utf-8") as file_obj:
+            json.dump(payload, file_obj, indent=2, ensure_ascii=False, default=_json_default)
+        logger.info("wrote %s", path)
 
 
 def run_export(cfg: ExportConfig) -> None:

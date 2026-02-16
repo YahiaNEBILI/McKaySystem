@@ -1,29 +1,20 @@
-"""
-McKaySystem CLI (flat-layout friendly).
-
-Usage
------
-mckay run-all --tenant engie --workspace noprod --out data/finops_findings --db-url "postgresql://..."
-mckay run --tenant engie --workspace noprod --out data/finops_findings
-mckay export
-mckay ingest --db-url "postgresql://..."
-mckay recover --tenant engie --workspace noprod --db-url "postgresql://..."
-mckay migrate
-"""
+"""CLI entry points for running worker, ingest, export, recovery, and migrations."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from infra.config import get_settings
 
+logger = logging.getLogger(__name__)
 
-def _walk_up_for_root(start: Path) -> Optional[Path]:
+
+def _walk_up_for_root(start: Path) -> Path | None:
     """Walk up from *start* to find a project root marker."""
     cur = start.resolve()
     if cur.is_file():
@@ -51,14 +42,19 @@ def _python() -> str:
     return sys.executable
 
 
-def _run_cmd(cmd: List[str], *, cwd: Optional[Path] = None, env: Optional[dict] = None) -> None:
+def _run_cmd(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
     try:
         subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc
 
 
-def _env_default(name: str, default: Optional[str] = None) -> Optional[str]:
+def _env_default(name: str, default: str | None = None) -> str | None:
     settings = get_settings(reload=True)
     value_map = {
         "DB_URL": settings.db.url,
@@ -118,7 +114,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     _run_cmd(cmd, cwd=root, env=env)
 
 
-def cmd_export(args: argparse.Namespace) -> None:  # pylint: disable=unused-argument
+def cmd_export(args: argparse.Namespace) -> None:
     root = _repo_root()
     export_module = "apps.worker.export_findings"
     if not (root / "apps/worker/export_findings.py").exists():
@@ -255,7 +251,7 @@ def cmd_run_all(args: argparse.Namespace) -> None:
 
     db_url = args.db_url or _env_default("DB_URL")
     if not db_url:
-        print("DB_URL not set and --db-url not provided -> skipping ingest.")
+        logger.warning("DB_URL not set and --db-url not provided; skipping ingest")
         if not args.skip_export:
             cmd_export(args)
         return
@@ -336,7 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)

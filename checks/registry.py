@@ -1,50 +1,50 @@
-# checks/registry.py
-"""
-Lightweight checker registry / factory.
+"""Checker registry used by the worker runner.
 
-The runner imports checker modules by dotted path. That import can register
-a factory for the checker class, allowing uniform instantiation without
-runner special-casing.
+Checker modules can register a factory for each checker spec so the runner
+can instantiate checkers without per-module branching logic.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, List
+from collections.abc import Callable
+from typing import Any
 
 from contracts.finops_checker_pattern import Checker, RunContext
 
-Bootstrap = Dict[str, Any]
+Bootstrap = dict[str, Any]
 CheckerFactory = Callable[[RunContext, Bootstrap], Checker]
 
-_REGISTRY: Dict[str, CheckerFactory] = {}
+_REGISTRY: dict[str, CheckerFactory] = {}
 
 
 def register_checker(spec: str) -> Callable[[CheckerFactory], CheckerFactory]:
-    """Register a factory for a checker.
+    """Register a checker factory for a spec string."""
 
-    spec should match what runner uses, e.g. "checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker"
-    """
     def _decorator(factory: CheckerFactory) -> CheckerFactory:
         if spec in _REGISTRY:
             raise KeyError(f"Checker factory already registered for '{spec}'")
         _REGISTRY[spec] = factory
         return factory
+
     return _decorator
 
 
-def register_class(spec: str, klass: type) -> None:
-    """Register a no-arg checker class as a factory."""
-    def _factory(ctx: RunContext, bootstrap: Bootstrap) -> Checker:
-        return klass()  # type: ignore[call-arg]
+def register_class(spec: str, klass: Callable[[], Checker]) -> None:
+    """Register a no-arg checker class."""
+
+    def _factory(_ctx: RunContext, _bootstrap: Bootstrap) -> Checker:
+        return klass()
+
     if spec in _REGISTRY:
         raise KeyError(f"Checker factory already registered for '{spec}'")
     _REGISTRY[spec] = _factory
 
 
-def get_factory(spec: str) -> Optional[CheckerFactory]:
+def get_factory(spec: str) -> CheckerFactory | None:
+    """Return the registered factory for a checker spec."""
     return _REGISTRY.get(spec)
 
 
-def list_specs() -> List[str]:
-    """All registered checker specs in deterministic order."""
+def list_specs() -> list[str]:
+    """Return all registered checker specs in deterministic order."""
     return sorted(_REGISTRY.keys())
