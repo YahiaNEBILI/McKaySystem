@@ -39,16 +39,17 @@ Minimum permissions (read-only):
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import timedelta
-from typing import Any, Dict, Iterable, Iterator, Optional
+from typing import Any
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    AwsAccountContext,
     PricingResolver,
     build_scope,
-    AwsAccountContext,
     gb_from_bytes,
     get_logger,
     is_suppressed,

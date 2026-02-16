@@ -43,20 +43,21 @@ from __future__ import annotations
 import argparse
 import glob
 import importlib
+import logging
 import os
 import pkgutil
 import sys
-import logging
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import boto3
 
 import checks  # IMPORTANT: used for module discovery
 from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
-from contracts.services import ServicesFactory, Services
+from contracts.services import Services, ServicesFactory
 from infra.aws_config import SDK_CONFIG
 from infra.config import get_settings
 from infra.logging_config import setup_logging
@@ -68,7 +69,7 @@ from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSIO
 logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _clean_path(value: str) -> str:
@@ -95,7 +96,7 @@ def _non_empty_dir(path: str) -> bool:
     return os.path.isdir(path) and bool(glob.glob(f"{path}/**/*.parquet", recursive=True))
 
 
-def _optional_non_empty_text(value: Any) -> Optional[str]:
+def _optional_non_empty_text(value: Any) -> str | None:
     """Return normalized optional text."""
     if value is None:
         return None
@@ -103,7 +104,7 @@ def _optional_non_empty_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _derive_pricing_metadata_from_services(services: Services) -> Tuple[Optional[str], Optional[str]]:
+def _derive_pricing_metadata_from_services(services: Services) -> tuple[str | None, str | None]:
     """Best-effort derive pricing source/version from runtime services."""
     pricing = getattr(services, "pricing", None)
     if pricing is None:
@@ -131,7 +132,7 @@ def _derive_pricing_metadata_from_services(services: Services) -> Tuple[Optional
     return source, version
 
 
-def _resolve_run_pricing_metadata(*, services: Services) -> Tuple[Optional[str], Optional[str]]:
+def _resolve_run_pricing_metadata(*, services: Services) -> tuple[str | None, str | None]:
     """Resolve run pricing metadata with explicit env override precedence."""
     auto_source, auto_version = _derive_pricing_metadata_from_services(services)
 
@@ -145,7 +146,7 @@ def _resolve_run_pricing_metadata(*, services: Services) -> Tuple[Optional[str],
 
 
 def _make_run_id(run_ts: datetime) -> str:
-    return f"run-{run_ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}"
+    return f"run-{run_ts.astimezone(UTC).isoformat().replace('+00:00', 'Z')}"
 
 
 def _discover_all_checker_specs() -> list[str]:
@@ -318,9 +319,9 @@ def _run_correlation_step(
 def run_cost_enrichment_if_available(
     *,
     tenant_id: str,
-    findings_globs: List[str],
-    raw_cur_globs: List[str],
-    cur_facts_globs: List[str],
+    findings_globs: list[str],
+    raw_cur_globs: list[str],
+    cur_facts_globs: list[str],
     enriched_out_dir: str,
 ) -> bool:
     """
@@ -331,8 +332,8 @@ def run_cost_enrichment_if_available(
       False -> enrichment skipped (CUR unavailable)
     """
     try:
-        from pipeline.cur.normalize_cur import CurNormalizeConfig, normalize_cur
         from pipeline.cur.cost_enrich import CostEnrichConfig, enrich_findings_with_cur
+        from pipeline.cur.normalize_cur import CurNormalizeConfig, normalize_cur
     except Exception as exc:  # pragma: no cover
         logger.warning("CUR enrichment unavailable (modules missing): %s", exc)
         return False
@@ -365,7 +366,7 @@ def run_cost_enrichment_if_available(
     return True
 
 
-def _get_configured_regions() -> List[str]:
+def _get_configured_regions() -> list[str]:
     """
     Read region list from configuration (infra/aws_config.py).
 
@@ -386,7 +387,7 @@ def _get_configured_regions() -> List[str]:
         )
 
     seen = set()
-    ordered: List[str] = []
+    ordered: list[str] = []
     for r in regions:
         if r not in seen:
             seen.add(r)
@@ -418,10 +419,10 @@ def _make_ctx(
 
 def _partition_checkers_by_scope(
     *,
-    checker_specs: List[str],
+    checker_specs: list[str],
     ctx_control: RunContext,
     bootstrap: dict,
-) -> Tuple[List[Checker], List[str]]:
+) -> tuple[list[Checker], list[str]]:
     """
     Instantiate once using the control ctx so we can detect checker.is_regional.
 
@@ -429,8 +430,8 @@ def _partition_checkers_by_scope(
       - global_checkers: instantiated (run once)
       - regional_specs: specs to instantiate per region
     """
-    global_checkers: List[Checker] = []
-    regional_specs: List[str] = []
+    global_checkers: list[Checker] = []
+    regional_specs: list[str] = []
 
     for spec in checker_specs:
         inst = _load_checker(spec, ctx=ctx_control, bootstrap=bootstrap)
@@ -528,8 +529,8 @@ def main(argv: Sequence[str]) -> int:
 
     total_valid = 0
     total_invalid_count = 0
-    total_invalid_errors: List[str] = []
-    per_region_valid: Dict[str, int] = {}
+    total_invalid_errors: list[str] = []
+    per_region_valid: dict[str, int] = {}
 
     # --- Run global checkers (once, in control region) ---
     if global_checkers:
@@ -545,7 +546,7 @@ def main(argv: Sequence[str]) -> int:
         svcs = factory.for_region(region)
         ctx_region = _make_ctx(args=args, run_id=run_id, run_ts=run_ts, services=svcs)
 
-        regional_checkers: List[Checker] = []
+        regional_checkers: list[Checker] = []
         for spec in regional_specs:
             regional_checkers.append(_load_checker(spec, ctx=ctx_region, bootstrap=bootstrap))
 
@@ -604,7 +605,7 @@ def main(argv: Sequence[str]) -> int:
     logger.info("workspace: %s", args.workspace)
     logger.info("cloud: %s", args.cloud)
     logger.info("run_id: %s", run_id)
-    logger.info("run_ts: %s", run_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+    logger.info("run_ts: %s", run_ts.astimezone(UTC).isoformat().replace("+00:00", "Z"))
 
     logger.info("regions_configured: %s", len(regions))
     logger.info("regions: %s", ", ".join(regions))
@@ -669,7 +670,7 @@ def main(argv: Sequence[str]) -> int:
             tenant_id=args.tenant,
             workspace=args.workspace,
             run_id=run_id,
-            run_ts=run_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            run_ts=run_ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             engine_name=ENGINE_NAME,
             engine_version=ENGINE_VERSION,
             rulepack_version=RULEPACK_VERSION,

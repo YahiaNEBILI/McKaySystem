@@ -29,9 +29,10 @@ Notes
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -63,7 +64,6 @@ from checks.aws.defaults import (
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
 
-
 # -----------------------------
 # Config
 # -----------------------------
@@ -84,7 +84,7 @@ class ElbV2LoadBalancersConfig:
     min_age_days: int = ELBV2_MIN_AGE_DAYS
 
     # Tag-based suppression keys (lowercased).
-    suppress_tag_keys: Tuple[str, ...] = ELBV2_SUPPRESS_TAG_KEYS
+    suppress_tag_keys: tuple[str, ...] = ELBV2_SUPPRESS_TAG_KEYS
 
     # Safety valve.
     max_findings_per_type: int = ELBV2_MAX_FINDINGS_PER_TYPE
@@ -99,7 +99,7 @@ _FALLBACK_ALB_HOURLY_USD: float = ELBV2_FALLBACK_ALB_HOURLY_USD
 _FALLBACK_NLB_HOURLY_USD: float = ELBV2_FALLBACK_NLB_HOURLY_USD
 
 
-def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) -> Tuple[float, str, int]:
+def _resolve_lb_hourly_pricing(ctx: RunContext, *, region: str, lb_type: str) -> tuple[float, str, int]:
     """Best-effort hourly price for ALB/NLB.
 
     Returns: (usd_per_hour, notes, confidence_0_100)
@@ -134,7 +134,7 @@ def _is_access_denied(exc: ClientError) -> bool:
     }
 
 
-def _chunk(seq: Sequence[str], size: int) -> Iterator[List[str]]:
+def _chunk(seq: Sequence[str], size: int) -> Iterator[list[str]]:
     i = 0
     while i < len(seq):
         yield list(seq[i : i + size])
@@ -177,19 +177,19 @@ class _ElbCloudWatch:
         lb_dimension_values: Sequence[str],
         start: datetime,
         end: datetime,
-    ) -> Dict[str, List[float]]:
+    ) -> dict[str, list[float]]:
         period = 86400
         stat = "Sum"
 
-        out: Dict[str, List[float]] = {v: [] for v in lb_dimension_values}
+        out: dict[str, list[float]] = {v: [] for v in lb_dimension_values}
         if not lb_dimension_values:
             return out
 
         # get_metric_data supports up to 500 MetricDataQueries.
         # We issue one query per load balancer.
         for batch in _chunk(list(lb_dimension_values), 450):
-            queries: List[Dict[str, Any]] = []
-            id_to_dim: Dict[str, str] = {}
+            queries: list[dict[str, Any]] = []
+            id_to_dim: dict[str, str] = {}
             for i, dim_val in enumerate(batch):
                 qid = f"m{i}"
                 id_to_dim[qid] = dim_val
@@ -249,9 +249,9 @@ class ElbV2LoadBalancersChecker:
         self,
         *,
         account_id: str,
-        billing_account_id: Optional[str] = None,
+        billing_account_id: str | None = None,
         partition: str = "aws",
-        cfg: Optional[ElbV2LoadBalancersConfig] = None,
+        cfg: ElbV2LoadBalancersConfig | None = None,
     ) -> None:
         self._account = AwsAccountContext(
             account_id=str(account_id or ""),
@@ -312,9 +312,9 @@ class ElbV2LoadBalancersChecker:
         lb_arns = [str(lb.get("LoadBalancerArn") or "") for lb in lbs if lb.get("LoadBalancerArn")]
 
         # Track IAM gaps once per operation (do not spam per resource).
-        iam_denied: Set[str] = set()
+        iam_denied: set[str] = set()
 
-        tags_by_arn: Dict[str, Dict[str, str]] = {}
+        tags_by_arn: dict[str, dict[str, str]] = {}
         for batch in _chunk(lb_arns, 20):
             try:
                 resp = elbv2.describe_tags(ResourceArns=batch)
@@ -350,9 +350,9 @@ class ElbV2LoadBalancersChecker:
         cw_fetcher = _ElbCloudWatch(cw) if cw is not None else None
 
         # Build CloudWatch series for ALB and NLB separately.
-        alb_dims: List[str] = []
-        nlb_dims: List[str] = []
-        dim_by_arn: Dict[str, str] = {}
+        alb_dims: list[str] = []
+        nlb_dims: list[str] = []
+        dim_by_arn: dict[str, str] = {}
 
         for lb in lbs:
             arn = str(lb.get("LoadBalancerArn") or "")
@@ -366,8 +366,8 @@ class ElbV2LoadBalancersChecker:
             elif lb_type == "network":
                 nlb_dims.append(dim_val)
 
-        alb_series: Dict[str, List[float]] = {}
-        nlb_series: Dict[str, List[float]] = {}
+        alb_series: dict[str, list[float]] = {}
+        nlb_series: dict[str, list[float]] = {}
         if cw_fetcher is not None and cfg.lookback_days > 0:
             try:
                 alb_series = cw_fetcher.daily_metric(
@@ -421,7 +421,7 @@ class ElbV2LoadBalancersChecker:
                 else:
                     raise
 
-        emitted: Dict[str, int] = {
+        emitted: dict[str, int] = {
             "idle": 0,
             "orphan_no_listeners": 0,
             "orphan_no_targets": 0,
@@ -429,7 +429,7 @@ class ElbV2LoadBalancersChecker:
         }
 
         # Pre-fetch listeners and target groups (maps keyed by LB ARN)
-        listeners_by_lb: Dict[str, List[Dict[str, Any]]] = {}
+        listeners_by_lb: dict[str, list[dict[str, Any]]] = {}
         for lb_arn in lb_arns:
             try:
                 listeners = list(
@@ -465,7 +465,7 @@ class ElbV2LoadBalancersChecker:
                 raise
             listeners_by_lb[lb_arn] = listeners
 
-        tgs_by_lb: Dict[str, List[Dict[str, Any]]] = {}
+        tgs_by_lb: dict[str, list[dict[str, Any]]] = {}
         for lb_arn in lb_arns:
             try:
                 tgs = list(
@@ -502,8 +502,8 @@ class ElbV2LoadBalancersChecker:
             tgs_by_lb[lb_arn] = tgs
 
         # Helper: resolve referenced TG ARNs from listener actions
-        def _listener_tg_arns(listener: Mapping[str, Any]) -> Set[str]:
-            out: Set[str] = set()
+        def _listener_tg_arns(listener: Mapping[str, Any]) -> set[str]:
+            out: set[str] = set()
             for act in listener.get("DefaultActions", []) or []:
                 if not isinstance(act, dict):
                     continue
@@ -529,7 +529,7 @@ class ElbV2LoadBalancersChecker:
             if is_suppressed(tags, suppress_keys=set(cfg.suppress_tag_keys)):
                 continue
 
-            created: Optional[datetime] = lb.get("CreatedTime") if isinstance(lb.get("CreatedTime"), datetime) else None
+            created: datetime | None = lb.get("CreatedTime") if isinstance(lb.get("CreatedTime"), datetime) else None
             if created is not None and (now - created) < min_age:
                 # too new
                 continue
@@ -608,16 +608,16 @@ class ElbV2LoadBalancersChecker:
 
             # Orphaned targets / unhealthy targets (best-effort)
             # Determine referenced TGs from listener actions and inspect target health.
-            referenced_tgs: Set[str] = set()
-            for l in listeners:
-                referenced_tgs |= _listener_tg_arns(l)
+            referenced_tgs: set[str] = set()
+            for listener in listeners:
+                referenced_tgs |= _listener_tg_arns(listener)
 
             if not referenced_tgs:
                 # No forward target groups referenced.
                 continue
 
             # Target groups inventory for the LB
-            tg_by_arn: Dict[str, Dict[str, Any]] = {str(tg.get("TargetGroupArn") or ""): tg for tg in tgs_by_lb.get(arn, [])}
+            tg_by_arn: dict[str, dict[str, Any]] = {str(tg.get("TargetGroupArn") or ""): tg for tg in tgs_by_lb.get(arn, [])}
 
             any_targets = False
             any_healthy = False

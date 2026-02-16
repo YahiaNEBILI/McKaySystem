@@ -3,26 +3,24 @@
 Provides finding group endpoints for grouped findings.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from flask import Blueprint
 
-from apps.backend.db import db_conn, fetch_one_dict_conn, fetch_all_dict_conn
+from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.utils import (
-    _ok,
     _json,
+    _parse_csv_list,
+    _parse_int,
     _q,
     _require_scope_from_query,
-    _parse_int,
-    _parse_csv_list,
 )
-
 
 # Create the blueprint
 groups_bp = Blueprint("groups", __name__)
 
 
-def _add_any_filter(where: List[str], params: List[Any], field: str, values: Optional[List[str]]) -> None:
+def _add_any_filter(where: list[str], params: list[Any], field: str, values: list[str] | None) -> None:
     """Add ANY filter to WHERE clause."""
     if not values:
         return
@@ -66,7 +64,7 @@ def api_groups() -> Any:
             raise ValueError("order must be 'savings_desc' or 'count_desc'")
 
         where = ["tenant_id = %s", "workspace = %s", "group_key IS NOT NULL"]
-        params: List[Any] = [tenant_id, workspace]
+        params: list[Any] = [tenant_id, workspace]
 
         _add_any_filter(where, params, "effective_state", effective_states)
         _add_any_filter(where, params, "category", categories)
@@ -153,7 +151,7 @@ def api_group_detail(group_key: str) -> Any:
         q = _q("q")
 
         where = ["tenant_id = %s", "workspace = %s", "group_key = %s"]
-        params: List[Any] = [tenant_id, workspace, group_key]
+        params: list[Any] = [tenant_id, workspace, group_key]
 
         if effective_states:
             where.append("effective_state = ANY(%s)")

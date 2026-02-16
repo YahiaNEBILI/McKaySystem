@@ -52,21 +52,20 @@ Therefore this engine avoids passing parameters into CREATE VIEW and instead:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from time import perf_counter
-from typing import Any, Dict, List, Mapping, Optional, Sequence
-
-from decimal import Decimal
-
 import json
 import traceback
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 import duckdb
 
 from contracts.finops_contracts import build_ids_and_validate, normalize_str
-from pipeline.writer_parquet import ParquetWriterConfig, FindingsParquetWriter
+from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 
 from .contracts import CorrelationRule
 
@@ -166,7 +165,7 @@ class CorrelationConfig:
     max_rows_per_rule: int = 0
 
     # Contract knobs
-    finding_id_salt: Optional[str] = None  # if you want per-run/per-day salt, pass it here
+    finding_id_salt: str | None = None  # if you want per-run/per-day salt, pass it here
 
     # Safety
     fail_fast: bool = True  # if False, keep going on rule failures and record errors
@@ -177,10 +176,10 @@ class CorrelationStats:
     rules_total: int = 0
     rules_enabled: int = 0
     emitted: int = 0
-    emitted_by_rule: Dict[str, int] = field(default_factory=dict)
-    timings_by_rule: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    errors: List[str] = field(default_factory=list)
-    errors_by_rule: Dict[str, str] = field(default_factory=dict)
+    emitted_by_rule: dict[str, int] = field(default_factory=dict)
+    timings_by_rule: dict[str, dict[str, float]] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+    errors_by_rule: dict[str, str] = field(default_factory=dict)
     report_path: str = ""
 
 # -------------------------------
@@ -278,7 +277,7 @@ class CorrelationEngine:
 
                     if cfg.fail_fast:
                         raise CorrelationError(msg) from exc
-                    
+
             report = {
                 "tenant_id": cfg.tenant_id,
                 "workspace_id": cfg.workspace_id,
@@ -312,7 +311,7 @@ class CorrelationEngine:
         Remove line comments (--) and trim whitespace.
         This is a lightweight guard, not a full SQL parser.
         """
-        lines: List[str] = []
+        lines: list[str] = []
         for line in sql.splitlines():
             s = line.strip()
             if s.startswith("--"):
@@ -427,7 +426,7 @@ class CorrelationEngine:
     # -------------------------------
     # Internals
     # -------------------------------
-    
+
 
     def _apply_rule(
         self,
@@ -435,7 +434,7 @@ class CorrelationEngine:
         writer: FindingsParquetWriter,
         rule: CorrelationRule,
         cfg: CorrelationConfig,
-    ) -> tuple[int, Dict[str, float]]:
+    ) -> tuple[int, dict[str, float]]:
         """
         Execute one rule and write emitted meta-findings.
 
@@ -449,7 +448,7 @@ class CorrelationEngine:
           - write_ms: time spent in writer.extend()
           - total_ms: sum of the above (approx)
         """
-        timings: Dict[str, float] = {
+        timings: dict[str, float] = {
             "setup_ms": 0.0,
             "validate_ms": 0.0,
             "exec_ms": 0.0,
@@ -513,7 +512,7 @@ class CorrelationEngine:
             return 0, timings
 
         emitted = 0
-        now_ts = datetime.now(timezone.utc)
+        now_ts = datetime.now(UTC)
         row_cap = int(cfg.max_rows_per_rule or 0)
 
         while True:
@@ -527,9 +526,9 @@ class CorrelationEngine:
                     f"Rule exceeded max_rows_per_rule={row_cap}: emitted_so_far={emitted}, next_batch={len(rows)}"
                 )
 
-            wire_findings: List[Dict[str, Any]] = []
+            wire_findings: list[dict[str, Any]] = []
             for row in rows:
-                rec = dict(zip(cols, row))
+                rec = dict(zip(cols, row, strict=False))
                 wire = self._finalize_wire_meta_finding(
                     raw=rec,
                     rule=rule,
@@ -554,11 +553,11 @@ class CorrelationEngine:
     def _finalize_wire_meta_finding(
         self,
         *,
-        raw: Dict[str, Any],
+        raw: dict[str, Any],
         rule: CorrelationRule,
         cfg: CorrelationConfig,
         now_ts: datetime,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Take a row returned by rule SQL and:
           - fill safe defaults for optional fields
@@ -596,7 +595,7 @@ class CorrelationEngine:
         links = raw.get("links") or []
 
         estimated_in = raw.get("estimated")
-        estimated: Dict[str, Any] = dict(estimated_in) if isinstance(estimated_in, Mapping) else {}
+        estimated: dict[str, Any] = dict(estimated_in) if isinstance(estimated_in, Mapping) else {}
         estimated.setdefault("monthly_savings", "0")
         estimated.setdefault("monthly_cost", "0")
         estimated.setdefault("one_time_savings", "0")
@@ -631,7 +630,7 @@ class CorrelationEngine:
 
         issue_key = self._build_issue_key_for_correlation(raw, rule)
 
-        wire: Dict[str, Any] = {
+        wire: dict[str, Any] = {
             "tenant_id": tenant_id,
             "workspace_id": workspace_id,
             "run_id": run_id,
@@ -674,7 +673,7 @@ class CorrelationEngine:
         return wire
 
     @staticmethod
-    def _build_issue_key_for_correlation(raw: Mapping[str, Any], rule: CorrelationRule) -> Dict[str, Any]:
+    def _build_issue_key_for_correlation(raw: Mapping[str, Any], rule: CorrelationRule) -> dict[str, Any]:
         """
         Build issue_key for deterministic fingerprinting.
 
@@ -686,7 +685,7 @@ class CorrelationEngine:
         If none are present, we still build a key with just rule_id, but dedup stability
         depends on scope-only changes.
         """
-        sources: List[str] = []
+        sources: list[str] = []
 
         if "source_fingerprints" in raw and raw["source_fingerprints"] is not None:
             val = raw["source_fingerprints"]

@@ -32,9 +32,10 @@ are missing.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -83,7 +84,7 @@ class EFSFileSystemsConfig:
     percent_io_limit_period_seconds: int = EFS_PERCENT_IO_LIMIT_PERIOD_SECONDS
 
     # Suppression tags (lowercased by normalize_tags)
-    suppress_tag_keys: Tuple[str, ...] = EFS_SUPPRESS_TAG_KEYS
+    suppress_tag_keys: tuple[str, ...] = EFS_SUPPRESS_TAG_KEYS
 
     # Safety valve
     max_findings_per_type: int = EFS_MAX_FINDINGS_PER_TYPE
@@ -93,7 +94,7 @@ def _safe_str(value: Any) -> str:
     return str(value or "")
 
 
-def _safe_bool(value: Any) -> Optional[bool]:
+def _safe_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
     return None
@@ -134,7 +135,7 @@ class EFSFileSystemsChecker(Checker):
     _CATEGORY_COST = "cost"
     _CATEGORY_GOV = "governance"
 
-    def __init__(self, *, account_id: str, cfg: Optional[EFSFileSystemsConfig] = None) -> None:
+    def __init__(self, *, account_id: str, cfg: EFSFileSystemsConfig | None = None) -> None:
         if not str(account_id or "").strip():
             raise ValueError("account_id is required")
         self._account = AwsAccountContext(account_id=str(account_id))
@@ -145,8 +146,8 @@ class EFSFileSystemsChecker(Checker):
     # -----------------------------
 
     @staticmethod
-    def _paginate(client: Any, op_name: str, *, result_key: str, **kwargs: Any) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
+    def _paginate(client: Any, op_name: str, *, result_key: str, **kwargs: Any) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
         paginator = client.get_paginator(op_name)
         for page in paginator.paginate(**kwargs):
             items = page.get(result_key, [])
@@ -156,7 +157,7 @@ class EFSFileSystemsChecker(Checker):
                         out.append(dict(it))
         return out
 
-    def _list_file_systems(self, efs: Any) -> List[Dict[str, Any]]:
+    def _list_file_systems(self, efs: Any) -> list[dict[str, Any]]:
         return self._paginate(efs, "describe_file_systems", result_key="FileSystems")
 
     # -----------------------------
@@ -172,10 +173,10 @@ class EFSFileSystemsChecker(Checker):
         stat: str,
         period: int,
         namespace: str = "AWS/EFS",
-        unit: Optional[str] = None,
-        extended_stat: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        metric_stat: Dict[str, Any] = {
+        unit: str | None = None,
+        extended_stat: str | None = None,
+    ) -> dict[str, Any]:
+        metric_stat: dict[str, Any] = {
             "Metric": {"Namespace": namespace, "MetricName": metric_name, "Dimensions": [{"Name": "FileSystemId", "Value": fs_id}]},
             "Period": int(period),
         }
@@ -196,7 +197,7 @@ class EFSFileSystemsChecker(Checker):
         end: datetime,
         daily_period: int,
         p95_period: int,
-    ) -> Dict[str, Dict[str, List[float]]]:
+    ) -> dict[str, dict[str, list[float]]]:
         """Return metrics by fs_id and metric key."""
         # CloudWatch GetMetricData supports up to 500 queries per call.
         # We need:
@@ -207,11 +208,11 @@ class EFSFileSystemsChecker(Checker):
         per_fs_queries = 4
         max_fs_per_call = max(1, 500 // per_fs_queries)
 
-        out: Dict[str, Dict[str, List[float]]] = {fs_id: {"read": [], "write": [], "conn": [], "p95": []} for fs_id in fs_ids}
+        out: dict[str, dict[str, list[float]]] = {fs_id: {"read": [], "write": [], "conn": [], "p95": []} for fs_id in fs_ids}
 
         for batch in _chunk(list(fs_ids), max_fs_per_call):
-            queries: List[Dict[str, Any]] = []
-            qmap: Dict[str, Tuple[str, str]] = {}
+            queries: list[dict[str, Any]] = []
+            qmap: dict[str, tuple[str, str]] = {}
             for i, fs_id in enumerate(batch):
                 base = f"m{i}"  # stable within the batch
                 q_read = f"{base}r"
@@ -287,8 +288,8 @@ class EFSFileSystemsChecker(Checker):
         _LOGGER.info("Listed EFS filesystems", extra={"count": len(file_systems), "region": region})
 
         # Extract ids + tags
-        fs_by_id: Dict[str, Dict[str, Any]] = {}
-        tags_by_id: Dict[str, Dict[str, str]] = {}
+        fs_by_id: dict[str, dict[str, Any]] = {}
+        tags_by_id: dict[str, dict[str, str]] = {}
         for fs in file_systems:
             fs_id = _safe_str(fs.get("FileSystemId"))
             if not fs_id:
@@ -300,7 +301,7 @@ class EFSFileSystemsChecker(Checker):
         fs_ids = list(fs_by_id.keys())
 
         # CloudWatch metrics (best-effort)
-        metrics: Dict[str, Dict[str, List[float]]] = {fs_id: {"read": [], "write": [], "conn": [], "p95": []} for fs_id in fs_ids}
+        metrics: dict[str, dict[str, list[float]]] = {fs_id: {"read": [], "write": [], "conn": [], "p95": []} for fs_id in fs_ids}
         if cw is not None and fs_ids:
             end = now_utc()
             start = end - timedelta(days=int(cfg.lookback_days))
@@ -320,7 +321,7 @@ class EFSFileSystemsChecker(Checker):
         suppress_keys = {k.lower() for k in cfg.suppress_tag_keys}
 
         # Emit findings
-        emitted: Dict[str, int] = {}
+        emitted: dict[str, int] = {}
 
         def _cap(check_id: str) -> bool:
             c = emitted.get(check_id, 0)
@@ -348,7 +349,9 @@ class EFSFileSystemsChecker(Checker):
 
             # 1) Possibly unused
             m = metrics.get(fs_id, {"read": [], "write": [], "conn": [], "p95": []})
-            daily_io = [float(r) + float(w) for r, w in zip(m.get("read", []), m.get("write", []))] if m.get("read") and m.get("write") else []
+            daily_io = [
+                float(r) + float(w) for r, w in zip(m.get("read", []), m.get("write", []), strict=False)
+            ] if m.get("read") and m.get("write") else []
             io_p95 = _p95(daily_io) if daily_io else 0.0
             conn_max = max(m.get("conn", []) or [0.0])
             if (

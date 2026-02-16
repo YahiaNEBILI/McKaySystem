@@ -17,16 +17,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
-
+from typing import Any
 
 MANIFEST_FILENAME = "run_manifest.json"
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -39,29 +38,29 @@ class RunManifest:
     run_ts: str
 
     # Engine metadata (best-effort)
-    engine_name: Optional[str] = None
-    engine_version: Optional[str] = None
-    rulepack_version: Optional[str] = None
-    schema_version: Optional[int] = None
-    pricing_version: Optional[str] = None
-    pricing_source: Optional[str] = None
+    engine_name: str | None = None
+    engine_version: str | None = None
+    rulepack_version: str | None = None
+    schema_version: int | None = None
+    pricing_version: str | None = None
+    pricing_source: str | None = None
 
     # Paths
-    out_raw: Optional[str] = None
-    out_correlated: Optional[str] = None
-    out_enriched: Optional[str] = None
-    export_dir: Optional[str] = None
+    out_raw: str | None = None
+    out_correlated: str | None = None
+    out_enriched: str | None = None
+    export_dir: str | None = None
 
     created_at: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         if not d.get("created_at"):
             d["created_at"] = _utc_now_iso()
         return d
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "RunManifest":
+    def from_dict(cls, payload: dict[str, Any]) -> RunManifest:
         return cls(
             tenant_id=str(payload.get("tenant_id") or "").strip(),
             workspace=str(payload.get("workspace") or "").strip(),
@@ -125,7 +124,7 @@ def load_manifest(path: str | Path) -> RunManifest:
     return m
 
 
-def find_manifest(start: str | Path) -> Optional[Path]:
+def find_manifest(start: str | Path) -> Path | None:
     """Search for a manifest starting at *start* and walking up a few levels."""
 
     cur = Path(start).resolve()

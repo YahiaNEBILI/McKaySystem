@@ -3,11 +3,10 @@
 Provides standardized HTTP response formatting for consistent API responses.
 """
 
-from typing import Any, Dict, Optional
+import traceback
+from typing import Any
 
 from flask import jsonify, request
-import traceback
-
 
 # Configuration - will be set when loaded into flask_app context
 _API_DEBUG_ERRORS: bool = False
@@ -19,7 +18,7 @@ def set_debug_mode(enabled: bool) -> None:
     _API_DEBUG_ERRORS = enabled
 
 
-def _ok(data: Optional[Dict[str, Any]] = None, *, status: int = 200) -> Any:
+def _ok(data: dict[str, Any] | None = None, *, status: int = 200) -> Any:
     """Create a successful JSON response.
 
     Args:
@@ -29,7 +28,7 @@ def _ok(data: Optional[Dict[str, Any]] = None, *, status: int = 200) -> Any:
     Returns:
         Flask response tuple (json, status)
     """
-    payload: Dict[str, Any] = {"ok": True}
+    payload: dict[str, Any] = {"ok": True}
     if data:
         payload.update(data)
     return jsonify(payload), status
@@ -40,7 +39,7 @@ def _err(
     message: str,
     *,
     status: int,
-    extra: Optional[Dict[str, Any]] = None,
+    extra: dict[str, Any] | None = None,
 ) -> Any:
     """Create an error JSON response.
 
@@ -53,13 +52,13 @@ def _err(
     Returns:
         Flask response tuple (json, status)
     """
-    payload: Dict[str, Any] = {"ok": False, "error": code, "message": message}
+    payload: dict[str, Any] = {"ok": False, "error": code, "message": message}
     if extra:
         payload.update(extra)
     return jsonify(payload), status
 
 
-def _json(payload: Dict[str, Any], *, status: int = 200) -> Any:
+def _json(payload: dict[str, Any], *, status: int = 200) -> Any:
     """Create a generic JSON response with explicit status code.
 
     Backward-compatible helper. If 'ok' is missing, it is inferred from status.
@@ -91,7 +90,6 @@ def _api_internal_error_response(exc: Exception) -> Any:
         Flask response tuple with appropriate error format
     """
     # Import here to avoid circular imports
-    from flask import current_app
 
     exc_text = str(exc)
 

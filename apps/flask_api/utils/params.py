@@ -4,17 +4,16 @@ Provides utilities for extracting and validating request parameters
 from query strings and JSON payloads.
 """
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from flask import request
-
 
 # Sentinel value for missing optional parameters
 _MISSING = object()
 
 
-def _q(name: str, default: Optional[str] = None) -> Optional[str]:
+def _q(name: str, default: str | None = None) -> str | None:
     """Get a query parameter value with optional default.
 
     Args:
@@ -30,7 +29,7 @@ def _q(name: str, default: Optional[str] = None) -> Optional[str]:
     return v
 
 
-def _require_scope_from_query() -> Tuple[str, str]:
+def _require_scope_from_query() -> tuple[str, str]:
     """Extract required tenant_id and workspace from query parameters.
 
     Accepts either 'tenant_id' or 'tenant' (alias) and 'workspace'.
@@ -55,7 +54,7 @@ def _require_scope_from_query() -> Tuple[str, str]:
     return tenant_id.strip(), workspace.strip()
 
 
-def _require_scope_from_json(payload: Dict[str, Any]) -> Tuple[str, str]:
+def _require_scope_from_json(payload: dict[str, Any]) -> tuple[str, str]:
     """Extract required tenant_id and workspace from JSON payload.
 
     Accepts either 'tenant_id' or 'tenant' (alias) and 'workspace'.
@@ -83,7 +82,7 @@ def _require_scope_from_json(payload: Dict[str, Any]) -> Tuple[str, str]:
     return tenant_id, workspace
 
 
-def _safe_scope_from_request() -> Tuple[Optional[str], Optional[str]]:
+def _safe_scope_from_request() -> tuple[str | None, str | None]:
     """Safely extract tenant_id and workspace from request.
 
     Does not raise - returns None values if not present.
@@ -102,7 +101,7 @@ def _safe_scope_from_request() -> Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_int(
-    value: Optional[str], *, default: int, min_v: int, max_v: int
+    value: str | None, *, default: int, min_v: int, max_v: int
 ) -> int:
     """Parse an integer query parameter with bounds checking.
 
@@ -129,7 +128,7 @@ def _parse_int(
     return n
 
 
-def _parse_csv_list(value: Optional[str]) -> Optional[List[str]]:
+def _parse_csv_list(value: str | None) -> list[str] | None:
     """Parse a comma-separated list of values.
 
     Args:
@@ -145,8 +144,8 @@ def _parse_csv_list(value: Optional[str]) -> Optional[List[str]]:
 
 
 def _parse_iso8601_dt(
-    value: Optional[str], *, field_name: str = "timestamp"
-) -> Optional[datetime]:
+    value: str | None, *, field_name: str = "timestamp"
+) -> datetime | None:
     """Parse an ISO-8601 timestamp into a UTC-aware datetime.
 
     Accepts timestamps with or without timezone, and trailing 'Z'.
@@ -173,11 +172,11 @@ def _parse_iso8601_dt(
             f"Invalid {field_name} (expected ISO-8601): {s!r}"
         ) from exc
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
-def _coerce_optional_text(value: Any) -> Optional[str]:
+def _coerce_optional_text(value: Any) -> str | None:
     """Normalize optional API text values to trimmed strings or None.
 
     Args:
@@ -192,7 +191,7 @@ def _coerce_optional_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _payload_optional_text(payload: Dict[str, Any], key: str) -> Any:
+def _payload_optional_text(payload: dict[str, Any], key: str) -> Any:
     """Return normalized payload value for a key or _MISSING when absent.
 
     Args:
@@ -251,7 +250,7 @@ def _coerce_non_negative_int(value: Any, *, field_name: str) -> int:
     return n
 
 
-def _coerce_optional_float(value: Any, *, field_name: str) -> Optional[float]:
+def _coerce_optional_float(value: Any, *, field_name: str) -> float | None:
     """Parse an optional float value from JSON payload data.
 
     Args:
@@ -272,7 +271,7 @@ def _coerce_optional_float(value: Any, *, field_name: str) -> Optional[float]:
         raise ValueError(f"{field_name} must be a number") from exc
 
 
-def _coerce_text_list(value: Any, *, field_name: str) -> Optional[List[str]]:
+def _coerce_text_list(value: Any, *, field_name: str) -> list[str] | None:
     """Normalize list-like API input into a compact list of strings.
 
     Accepts comma-separated strings or actual lists.

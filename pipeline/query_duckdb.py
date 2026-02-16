@@ -7,10 +7,11 @@ area (connection creation, safe parameter handling, convenience helpers).
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any
 
 import duckdb
 
@@ -24,8 +25,8 @@ def _json_default(obj: Any) -> Any:
     return str(obj)
 
 
-def _as_jsonable_row(row: Mapping[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
+def _as_jsonable_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for k, v in row.items():
         if v is None:
             out[k] = None
@@ -67,13 +68,13 @@ class DuckDBClient:
         # union_by_name allows schema evolution (new columns later)
         return f"read_parquet('{self._cfg.findings_glob}', union_by_name=True)"
 
-    def _exec(self, sql: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
+    def _exec(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
         cur = self._con.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for r in rows:
-            out.append(_as_jsonable_row(dict(zip(cols, r))))
+            out.append(_as_jsonable_row(dict(zip(cols, r, strict=False))))
         return out
 
     # -------------------------
@@ -84,17 +85,17 @@ class DuckDBClient:
         self,
         *,
         tenant_id: str,
-        status: Optional[str] = None,
-        category: Optional[str] = None,
-        severity_level: Optional[str] = None,
+        status: str | None = None,
+        category: str | None = None,
+        severity_level: str | None = None,
         limit: int = 200,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         List findings (flattened fields for UI).
         """
         where = ["tenant_id = ?"]
-        params: List[Any] = [tenant_id]
+        params: list[Any] = [tenant_id]
 
         if status:
             where.append("status = ?")
@@ -150,7 +151,7 @@ class DuckDBClient:
         self,
         *,
         tenant_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Basic KPI summary for a tenant (counts by status and severity).
         """
@@ -167,7 +168,7 @@ class DuckDBClient:
         rows = self._exec(sql, [tenant_id])
 
         # Reshape to something API-friendly
-        out: Dict[str, Any] = {"tenant_id": tenant_id, "by_status": {}, "by_severity": {}, "matrix": rows}
+        out: dict[str, Any] = {"tenant_id": tenant_id, "by_status": {}, "by_severity": {}, "matrix": rows}
         for r in rows:
             st = r["status"]
             sev = r["severity_level"]
@@ -181,7 +182,7 @@ class DuckDBClient:
         *,
         tenant_id: str,
         limit: int = 50,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Top savings opportunities by estimated.monthly_savings (DESC).
         """

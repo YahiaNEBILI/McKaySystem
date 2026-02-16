@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import atexit
 import json
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional, Sequence, Tuple
+from typing import Any
 
 from apps.backend.db_metrics import measure_query
 from infra.config import get_settings
@@ -39,7 +40,7 @@ def _db_url() -> str:
 
 # Keep a single global pool per process.
 _POOL = None
-_POOL_DSN: Optional[str] = None
+_POOL_DSN: str | None = None
 
 
 def _get_pool():
@@ -122,7 +123,7 @@ def _query_name(sql: str, *, operation: str) -> str:
     return f"{operation}:{first_token}"
 
 
-def fetch_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tuple[Any, ...]]:
+def fetch_one_conn(conn: Any, sql: str, params: Sequence[Any] | None = None) -> tuple[Any, ...] | None:
     """Execute a query on an existing connection and return one row (or None)."""
     with conn.cursor() as cur:
         with measure_query(_query_name(sql, operation="fetch_one_conn")):
@@ -130,7 +131,7 @@ def fetch_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) 
         return cur.fetchone()
 
 
-def fetch_all_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[Tuple[Any, ...]]:
+def fetch_all_conn(conn: Any, sql: str, params: Sequence[Any] | None = None) -> list[tuple[Any, ...]]:
     """Execute a query on an existing connection and return all rows."""
     with conn.cursor() as cur:
         with measure_query(_query_name(sql, operation="fetch_all_conn")):
@@ -138,7 +139,7 @@ def fetch_all_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) 
         return cur.fetchall()
 
 
-def execute_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> None:
+def execute_conn(conn: Any, sql: str, params: Sequence[Any] | None = None) -> None:
     """Execute a statement on an existing connection (no returned rows)."""
     with conn.cursor() as cur:
         with measure_query(_query_name(sql, operation="execute_conn")):
@@ -158,7 +159,7 @@ def execute_many_conn(conn: Any, sql: str, seq_of_params: list[Sequence[Any]]) -
 # Convenience helpers (pooled)
 # ---------------------------
 
-def fetch_one(sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tuple[Any, ...]]:
+def fetch_one(sql: str, params: Sequence[Any] | None = None) -> tuple[Any, ...] | None:
     """Execute a query and return one row (or None)."""
     with db_conn() as conn:
         try:
@@ -171,7 +172,7 @@ def fetch_one(sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tupl
             raise
 
 
-def fetch_all(sql: str, params: Optional[Sequence[Any]] = None) -> list[Tuple[Any, ...]]:
+def fetch_all(sql: str, params: Sequence[Any] | None = None) -> list[tuple[Any, ...]]:
     """Execute a query and return all rows."""
     with db_conn() as conn:
         try:
@@ -184,7 +185,7 @@ def fetch_all(sql: str, params: Optional[Sequence[Any]] = None) -> list[Tuple[An
             raise
 
 
-def execute(sql: str, params: Optional[Sequence[Any]] = None) -> None:
+def execute(sql: str, params: Sequence[Any] | None = None) -> None:
     """Execute a statement (no returned rows) and commit."""
     with db_conn() as conn:
         try:
@@ -223,7 +224,7 @@ def to_jsonb(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def fetch_jsonb_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Any:
+def fetch_jsonb_one_conn(conn: Any, sql: str, params: Sequence[Any] | None = None) -> Any:
     """Fetch a single JSON/JSONB column value from an existing connection."""
     row = fetch_one_conn(conn, sql, params)
     if not row:
@@ -231,7 +232,7 @@ def fetch_jsonb_one_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = 
     return row[0]
 
 
-def fetch_jsonb_one(sql: str, params: Optional[Sequence[Any]] = None) -> Any:
+def fetch_jsonb_one(sql: str, params: Sequence[Any] | None = None) -> Any:
     """Fetch a single JSON/JSONB column value using a pooled connection."""
     with db_conn() as conn:
         try:
@@ -273,7 +274,7 @@ def _rows_to_dicts(cursor: Any, rows: list[tuple[Any, ...]]) -> list[dict[str, A
     return [dict(zip(cols, r, strict=False)) for r in rows]
 
 
-def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[dict[str, Any]]:
+def fetch_one_dict_conn(conn: Any, sql: str, params: Sequence[Any] | None = None) -> dict[str, Any] | None:
     """Execute a query and return one row as a dict (or None)."""
     with conn.cursor() as cur:
         with measure_query(_query_name(sql, operation="fetch_one_dict_conn")):
@@ -287,7 +288,7 @@ def fetch_one_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = N
         return dict(zip(cols, row, strict=False))
 
 
-def fetch_all_dict_conn(conn: Any, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+def fetch_all_dict_conn(conn: Any, sql: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
     """Execute a query and return all rows as dicts."""
     with conn.cursor() as cur:
         with measure_query(_query_name(sql, operation="fetch_all_dict_conn")):

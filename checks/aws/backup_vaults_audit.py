@@ -49,7 +49,8 @@ Permissions required (minimum):
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set
+from collections.abc import Iterable
+from typing import Any
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
@@ -72,7 +73,7 @@ _LOGGER = get_logger("backup_vaults_audit")
 
 
 # Actions that are generally high-impact if granted broadly.
-_SENSITIVE_ACTIONS: Set[str] = {
+_SENSITIVE_ACTIONS: set[str] = {
     "backup:deletebackupvault",
     "backup:deletebackupvaultaccesspolicy",
     "backup:putbackupvaultaccesspolicy",
@@ -137,7 +138,7 @@ def _pricing_backup_gb_month_price(
     )
 
 
-def _parse_account_id_from_principal(principal: str) -> Optional[str]:
+def _parse_account_id_from_principal(principal: str) -> str | None:
     """
     Supports:
       - "123456789012"
@@ -159,7 +160,7 @@ def _parse_account_id_from_principal(principal: str) -> Optional[str]:
     return None
 
 
-def _as_list(value: Any) -> List[Any]:
+def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, list):
@@ -167,9 +168,9 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
-def _normalize_action(action: Any) -> Set[str]:
+def _normalize_action(action: Any) -> set[str]:
     """Action can be a string or list; normalize to lowercase set."""
-    actions: Set[str] = set()
+    actions: set[str] = set()
     for a in _as_list(action):
         if a is None:
             continue
@@ -190,9 +191,9 @@ def _principal_is_wildcard(principal: Any) -> bool:
     return False
 
 
-def _extract_principals(principal: Any) -> List[str]:
+def _extract_principals(principal: Any) -> list[str]:
     """Return a list of principal strings (best-effort)."""
-    principals: List[str] = []
+    principals: list[str] = []
     if principal is None:
         return principals
 
@@ -218,12 +219,12 @@ def _extract_principals(principal: Any) -> List[str]:
     return principals
 
 
-def _extract_org_ids_from_condition(condition: Any) -> List[str]:
+def _extract_org_ids_from_condition(condition: Any) -> list[str]:
     """Best-effort extraction of aws:PrincipalOrgID values from a policy Condition."""
     if not isinstance(condition, dict):
         return []
 
-    org_ids: List[str] = []
+    org_ids: list[str] = []
     for op in (
         "StringEquals",
         "StringLike",
@@ -242,8 +243,8 @@ def _extract_org_ids_from_condition(condition: Any) -> List[str]:
                 org_ids.append(s)
 
     # de-dupe, keep order
-    seen: Set[str] = set()
-    out: List[str] = []
+    seen: set[str] = set()
+    out: list[str] = []
     for x in org_ids:
         if x in seen:
             continue
@@ -265,9 +266,9 @@ class AwsBackupVaultsAuditChecker:
         self,
         *,
         account: AwsAccountContext,
-        expected_lock_min_days: Optional[int] = None,
-        expected_lock_max_days: Optional[int] = None,
-        allowed_cross_account_ids: Optional[Set[str]] = None,
+        expected_lock_min_days: int | None = None,
+        expected_lock_max_days: int | None = None,
+        allowed_cross_account_ids: set[str] | None = None,
     ) -> None:
         self._account = account
         self._expected_lock_min_days = expected_lock_min_days
@@ -303,8 +304,7 @@ class AwsBackupVaultsAuditChecker:
                 return
 
             if lock_findings:
-                for f in lock_findings:
-                    yield f
+                yield from lock_findings
                 # If retention guardrail is failing, do not emit policy findings too
                 continue
 
@@ -321,7 +321,7 @@ class AwsBackupVaultsAuditChecker:
         ctx,
         backup: BaseClient,
         region: str,
-        vault: Dict[str, Any],
+        vault: dict[str, Any],
     ) -> Iterable[FindingDraft]:
         """
         Vault Lock / retention guardrails.
@@ -373,7 +373,7 @@ class AwsBackupVaultsAuditChecker:
             rule = "vault_lock_out_of_standard"
 
         # (2) Attach best-effort monthly storage cost estimate for "no max retention"
-        est_cost: Optional[float] = None
+        est_cost: float | None = None
         est_notes: str = ""
         est_conf: int = 0
         if rule == "vault_lock_no_max":
@@ -462,7 +462,7 @@ class AwsBackupVaultsAuditChecker:
         ctx,
         backup: BaseClient,
         region: str,
-        vault: Dict[str, Any],
+        vault: dict[str, Any],
     ) -> Iterable[FindingDraft]:
         vault_name = str(vault.get("BackupVaultName") or "")
         vault_arn = str(vault.get("BackupVaultArn") or "")
@@ -500,15 +500,15 @@ class AwsBackupVaultsAuditChecker:
                 return a.startswith(p[:-1])
             return a == p
 
-        def _has_sensitive_action(actions: Set[str]) -> bool:
+        def _has_sensitive_action(actions: set[str]) -> bool:
             for a in actions:
                 for pat in _SENSITIVE_ACTIONS:
                     if _matches_action_pattern(a, pat):
                         return True
             return False
 
-        def _matched_sensitive_actions(actions: Set[str]) -> List[str]:
-            out: List[str] = []
+        def _matched_sensitive_actions(actions: set[str]) -> list[str]:
+            out: list[str] = []
             for a in sorted(actions):
                 if any(_matches_action_pattern(a, pat) for pat in _SENSITIVE_ACTIONS):
                     out.append(a)
@@ -616,7 +616,7 @@ class AwsBackupVaultsAuditChecker:
         if not isinstance(statements, list):
             statements = []
 
-        worst: Optional[FindingDraft] = None
+        worst: FindingDraft | None = None
 
         for st in statements:
             if not isinstance(st, dict):
@@ -726,7 +726,7 @@ class AwsBackupVaultsAuditChecker:
 
             # --- 2) Cross-account principals (not in allowlist)
             principals = _extract_principals(principal)
-            cross_accounts: Set[str] = set()
+            cross_accounts: set[str] = set()
             for p in principals:
                 acct = _parse_account_id_from_principal(p)
                 if acct and acct != self._account.account_id and acct not in self._allowed_cross_account_ids:
@@ -818,7 +818,7 @@ class AwsBackupVaultsAuditChecker:
             yield worst
 
 
-    def _pick_worst(self, current: Optional[FindingDraft], candidate: FindingDraft) -> FindingDraft:
+    def _pick_worst(self, current: FindingDraft | None, candidate: FindingDraft) -> FindingDraft:
         if current is None:
             return candidate
 
@@ -846,7 +846,7 @@ class AwsBackupVaultsAuditChecker:
         vault_name: str,
         warm_fallback_usd: float = BACKUP_VAULTS_WARM_FALLBACK_USD,
         cold_fallback_usd: float = BACKUP_VAULTS_COLD_FALLBACK_USD,
-    ) -> tuple[Optional[float], str, int]:
+    ) -> tuple[float | None, str, int]:
         """Estimate monthly storage cost for recovery points currently in a vault.
 
         Best-effort only:
@@ -973,7 +973,7 @@ def _factory(ctx: RunContext, bootstrap: Bootstrap) -> AwsBackupVaultsAuditCheck
         expected_lock_max_days = int(expected_lock_max_days)
 
     # Allowlist for legitimate cross-account access (comma-separated or list).
-    allowlist: Set[str] = set()
+    allowlist: set[str] = set()
     raw_allow = bootstrap.get("backup_vault_allowed_cross_account_ids")
     if isinstance(raw_allow, list):
         for x in raw_allow:

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, List, Set
 
 from apps.backend.db import db_conn
 from infra.config import get_settings
@@ -33,7 +33,7 @@ def _ensure_migrations_table(conn) -> None:
     conn.commit()
 
 
-def _applied_versions(conn) -> Set[str]:
+def _applied_versions(conn) -> set[str]:
     """Return applied migration versions from the DB."""
     with conn.cursor() as cur:
         cur.execute("SELECT version FROM schema_migrations")
@@ -41,10 +41,10 @@ def _applied_versions(conn) -> Set[str]:
     return {str(r[0]) for r in rows if r and r[0]}
 
 
-def _split_sql(sql: str) -> List[str]:
+def _split_sql(sql: str) -> list[str]:
     """Split a SQL file into statements (supports comments and dollar-quoting)."""
-    statements: List[str] = []
-    buf: List[str] = []
+    statements: list[str] = []
+    buf: list[str] = []
     in_squote = False
     in_line_comment = False
     in_block_comment = False
@@ -221,11 +221,11 @@ def _iter_migration_files(migrations_dir: Path) -> Iterable[Path]:
     return sorted(files, key=lambda p: p.name)
 
 
-def pending_migration_versions(conn, *, migrations_dir: Path) -> List[str]:
+def pending_migration_versions(conn, *, migrations_dir: Path) -> list[str]:
     """Return pending migration versions for the provided connection."""
     _ensure_migrations_table(conn)
     applied = _applied_versions(conn)
-    pending: List[str] = []
+    pending: list[str] = []
     for path in _iter_migration_files(migrations_dir):
         version = path.stem
         if version not in applied:
@@ -275,7 +275,7 @@ def run_migrations(*, migrations_dir: Path, dry_run: bool = False) -> None:
             print(f"Applied {version}")
 
 
-def main(argv: List[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(description="Apply database migrations.")
     parser.add_argument(

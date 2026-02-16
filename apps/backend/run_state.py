@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Mapping, Optional
-
+from typing import Any
 
 STATE_RUNNING = "running"
 STATE_READY = "ready"
@@ -42,7 +42,7 @@ def default_owner(prefix: str) -> str:
     return f"{prefix}:{os.getpid()}"
 
 
-def _event_payload_json(payload: Optional[Mapping[str, Any]]) -> Optional[str]:
+def _event_payload_json(payload: Mapping[str, Any] | None) -> str | None:
     """Serialize event payload to JSON string for JSONB insertion."""
     if payload is None:
         return None
@@ -59,9 +59,9 @@ def append_run_event(
     run_id: str,
     event_type: str,
     actor: str,
-    from_state: Optional[str] = None,
-    to_state: Optional[str] = None,
-    payload: Optional[Mapping[str, Any]] = None,
+    from_state: str | None = None,
+    to_state: str | None = None,
+    payload: Mapping[str, Any] | None = None,
 ) -> None:
     """Append a run event (best effort inside caller transaction)."""
     with conn.cursor() as cur:
@@ -92,7 +92,7 @@ def acquire_run_lock(
     run_id: str,
     owner: str,
     ttl_seconds: int,
-) -> Optional[RunLock]:
+) -> RunLock | None:
     """Acquire/refresh a run lock if free or expired.
 
     Returns ``None`` when another non-expired owner already holds the lock.
@@ -162,16 +162,16 @@ def begin_run_running(
     run_id: str,
     run_ts: datetime,
     artifact_prefix: str,
-    engine_version: Optional[str],
-    pricing_version: Optional[str],
-    pricing_source: Optional[str],
+    engine_version: str | None,
+    pricing_version: str | None,
+    pricing_source: str | None,
     raw_present: bool,
     correlated_present: bool,
     enriched_present: bool,
     actor: str,
 ) -> str:
     """Transition a run to ``running`` atomically (or keep ``ready``)."""
-    previous_status: Optional[str]
+    previous_status: str | None
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -323,14 +323,14 @@ def transition_run_to_failed(
     run_id: str,
     run_ts: datetime,
     artifact_prefix: str,
-    engine_version: Optional[str],
-    pricing_version: Optional[str],
-    pricing_source: Optional[str],
+    engine_version: str | None,
+    pricing_version: str | None,
+    pricing_source: str | None,
     actor: str,
     reason: str,
 ) -> None:
     """Upsert a run and transition it to ``failed`` with an event."""
-    previous_status: Optional[str]
+    previous_status: str | None
     with conn.cursor() as cur:
         cur.execute(
             """

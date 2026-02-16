@@ -14,8 +14,7 @@ Main exports:
 - TypedDict definitions for API contracts
 """
 
-from contracts import finops_checker_pattern
-from contracts import finops_contracts
+from contracts import finops_checker_pattern, finops_contracts
 from contracts import services as services_module
 
 # Explicit re-exports to satisfy ruff F401

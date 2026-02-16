@@ -4,25 +4,24 @@ Provides endpoints for managing SLA policies and overrides.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from flask import Blueprint, request
 
-from apps.backend.db import db_conn, fetch_one_dict_conn, fetch_all_dict_conn, execute_conn
+from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.utils import (
-    _ok,
-    _err,
-    _q,
-    _require_scope_from_query,
-    _require_scope_from_json,
-    _parse_int,
-    _parse_csv_list,
+    _MISSING,
     _coerce_optional_text,
     _coerce_positive_int,
-    _MISSING,
+    _err,
+    _ok,
+    _parse_csv_list,
+    _parse_int,
     _payload_optional_text,
+    _q,
+    _require_scope_from_json,
+    _require_scope_from_query,
 )
-
 
 # Create the blueprint
 sla_policies_bp = Blueprint("sla_policies", __name__)
@@ -39,7 +38,7 @@ def _fetch_sla_policy_category(
     tenant_id: str,
     workspace: str,
     category: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Fetch one category SLA policy row by scope + category."""
     return fetch_one_dict_conn(
         conn,
@@ -65,7 +64,7 @@ def _fetch_sla_policy_override(
     tenant_id: str,
     workspace: str,
     check_id: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Fetch one check SLA override row by scope + check_id."""
     return fetch_one_dict_conn(
         conn,
@@ -92,17 +91,17 @@ def _audit_log_event(
     workspace: str,
     entity_type: str,
     entity_id: str,
-    fingerprint: Optional[str],
+    fingerprint: str | None,
     event_type: str,
     event_category: str,
-    previous_value: Optional[Dict[str, Any]],
-    new_value: Optional[Dict[str, Any]],
-    actor_id: Optional[str],
-    actor_email: Optional[str],
-    actor_name: Optional[str],
+    previous_value: dict[str, Any] | None,
+    new_value: dict[str, Any] | None,
+    actor_id: str | None,
+    actor_email: str | None,
+    actor_name: str | None,
     source: str,
-    run_id: Optional[str] = None,
-    correlation_id: Optional[str] = None,
+    run_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Best-effort append-only write to audit_log, isolated by savepoint."""
     try:
@@ -380,7 +379,7 @@ def api_sla_overrides() -> Any:
         check_ids = _parse_csv_list(_q("check_id"))
 
         where = ["tenant_id = %s", "workspace = %s"]
-        params: List[Any] = [tenant_id, workspace]
+        params: list[Any] = [tenant_id, workspace]
         if check_ids:
             where.append("check_id = ANY(%s)")
             params.append(check_ids)

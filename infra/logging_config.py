@@ -19,7 +19,6 @@ from typing import Any
 
 from infra.config import get_settings
 
-
 # Context that follows requests through the system
 # Use set_request_context() to populate, clear_request_context() to reset
 request_ctx: ContextVar[dict[str, Any] | None] = ContextVar("request_ctx", default=None)

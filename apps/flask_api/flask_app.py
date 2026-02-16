@@ -25,7 +25,6 @@ FLASK_APP=flask_app.py flask run --host=0.0.0.0 --port=5000
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import hmac
 import json
 import logging
@@ -33,9 +32,10 @@ import re
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from flask import Flask, Response, abort, jsonify, request
 from werkzeug.exceptions import BadRequest
@@ -51,8 +51,8 @@ from apps.flask_api.blueprints import findings as findings_module
 from apps.flask_api.blueprints import groups as groups_module
 from apps.flask_api.blueprints import health as health_module
 from apps.flask_api.blueprints import lifecycle as lifecycle_module
-from apps.flask_api.blueprints import remediations as remediations_module
 from apps.flask_api.blueprints import recommendations as recommendations_module
+from apps.flask_api.blueprints import remediations as remediations_module
 from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
 from apps.flask_api.blueprints import teams as teams_module
@@ -109,16 +109,16 @@ _RATE_LIMIT_BURST = _SETTINGS.api.rate_limit_burst
 
 
 def _iso_z(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _log(level: str, event: str, fields: Dict[str, Any]) -> None:
+def _log(level: str, event: str, fields: dict[str, Any]) -> None:
     """Emit a single-line JSON log via the standard logging pipeline."""
     level_u = (level or "INFO").upper()
     order = {"ERROR": 3, "WARN": 2, "INFO": 1}
     if order.get(level_u, 1) < order.get(_API_LOG_LEVEL, 1):
         return
-    payload: Dict[str, Any] = {"ts": _iso_z(_now_utc()), "level": level_u, "event": event}
+    payload: dict[str, Any] = {"ts": _iso_z(_now_utc()), "level": level_u, "event": event}
     payload.update(fields)
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if level_u == "ERROR":
@@ -129,7 +129,7 @@ def _log(level: str, event: str, fields: Dict[str, Any]) -> None:
         _LOGGER.info("%s", payload_json)
 
 
-def _merge_vary_header(current: Optional[str], token: str) -> str:
+def _merge_vary_header(current: str | None, token: str) -> str:
     """Return a Vary header value that includes token exactly once."""
     items = [x.strip() for x in str(current or "").split(",") if x.strip()]
     token_norm = token.strip()
@@ -143,7 +143,7 @@ def _start_timer() -> None:
     request.environ["_mckay_t0"] = time.monotonic()
 
 
-def _safe_scope_from_request() -> Tuple[Optional[str], Optional[str]]:
+def _safe_scope_from_request() -> tuple[str | None, str | None]:
     tenant_id = _q("tenant_id") or _q("tenant")
     workspace = _q("workspace")
     if tenant_id and workspace:
@@ -214,20 +214,20 @@ class _TokenBucket:
 
 
 _rate_lock = threading.Lock()
-_rate_buckets: Dict[str, _TokenBucket] = {}
+_rate_buckets: dict[str, _TokenBucket] = {}
 _schema_gate_lock = threading.Lock()
 _schema_gate_checked = False
 _schema_gate_enabled = bool(_SETTINGS.api.enforce_schema_gate)
 
 
-def _rate_limits() -> Tuple[Optional[float], Optional[float]]:
+def _rate_limits() -> tuple[float | None, float | None]:
     if _RATE_LIMIT_RPS is None:
         return None, None
     rps = float(_RATE_LIMIT_RPS)
     if rps <= 0:
         return None, None
 
-    burst: Optional[float] = float(_RATE_LIMIT_BURST) if _RATE_LIMIT_BURST is not None else None
+    burst: float | None = float(_RATE_LIMIT_BURST) if _RATE_LIMIT_BURST is not None else None
     if burst is None:
         burst = max(10.0, rps * 2.0)
     return rps, burst
@@ -276,15 +276,15 @@ def _enforce_rate_limit() -> None:
         abort(429)
 
 
-def _ok(data: Optional[Dict[str, Any]] = None, *, status: int = 200) -> Any:
-    payload: Dict[str, Any] = {"ok": True}
+def _ok(data: dict[str, Any] | None = None, *, status: int = 200) -> Any:
+    payload: dict[str, Any] = {"ok": True}
     if data:
         payload.update(data)
     return jsonify(payload), status
 
 
-def _err(code: str, message: str, *, status: int, extra: Optional[Dict[str, Any]] = None) -> Any:
-    payload: Dict[str, Any] = {"ok": False, "error": code, "message": message}
+def _err(code: str, message: str, *, status: int, extra: dict[str, Any] | None = None) -> Any:
+    payload: dict[str, Any] = {"ok": False, "error": code, "message": message}
     if extra:
         payload.update(extra)
     return jsonify(payload), status
@@ -344,7 +344,7 @@ def _ensure_schema_gate() -> None:
 
 
 @app.before_request
-def _enforce_schema_gate() -> Optional[Any]:
+def _enforce_schema_gate() -> Any | None:
     """Return 503 if the DB schema is behind local code migrations."""
     path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
@@ -368,7 +368,7 @@ def _err_429(_: Exception) -> Any:
 def _err_500(exc: Exception) -> Any:
     root_exc = getattr(exc, "original_exception", None) or exc
     tb = traceback.format_exc()
-    fields: Dict[str, Any] = {"path": request.path, "detail": str(root_exc)}
+    fields: dict[str, Any] = {"path": request.path, "detail": str(root_exc)}
     if _API_DEBUG_ERRORS:
         fields["traceback"] = tb
     _log("ERROR", "unhandled_exception", fields)
@@ -442,10 +442,10 @@ def _openapi_security_for_path(path: str) -> list[dict[str, list[str]]]:
     return [{"bearerAuth": []}]
 
 
-def _build_openapi_spec() -> Dict[str, Any]:
+def _build_openapi_spec() -> dict[str, Any]:
     """Build OpenAPI 3.0 spec from registered Flask API routes."""
-    paths: Dict[str, Dict[str, Any]] = {}
-    seen_ops: Set[Tuple[str, str]] = set()
+    paths: dict[str, dict[str, Any]] = {}
+    seen_ops: set[tuple[str, str]] = set()
 
     for rule in app.url_map.iter_rules():
         if rule.endpoint == "static":
@@ -477,7 +477,7 @@ def _build_openapi_spec() -> Dict[str, Any]:
             seen_ops.add(op_key)
 
             method_u = method.upper()
-            parameters: List[Dict[str, Any]] = []
+            parameters: list[dict[str, Any]] = []
             for arg in sorted(rule.arguments):
                 parameters.append(
                     {
@@ -488,7 +488,7 @@ def _build_openapi_spec() -> Dict[str, Any]:
                     }
                 )
 
-            operation: Dict[str, Any] = {
+            operation: dict[str, Any] = {
                 "operationId": f"{rule.endpoint.replace('.', '_')}_{method}",
                 "summary": _operation_summary_from_view(view_func, method_u, openapi_path),
                 "tags": [openapi_path.strip("/").split("/", 1)[0] or "root"],
@@ -565,17 +565,17 @@ def api_version() -> Any:
 # --------------------
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _q(name: str, default: Optional[str] = None) -> Optional[str]:
+def _q(name: str, default: str | None = None) -> str | None:
     v = request.args.get(name)
     if v is None or v == "":
         return default
     return v
 
 
-def _require_scope_from_query() -> Tuple[str, str]:
+def _require_scope_from_query() -> tuple[str, str]:
     tenant_id = _q("tenant_id") or _q("tenant") or ""
     workspace = _q("workspace") or ""
     if not tenant_id or not workspace:
@@ -583,7 +583,7 @@ def _require_scope_from_query() -> Tuple[str, str]:
     return tenant_id, workspace
 
 
-def _require_scope_from_json(payload: Dict[str, Any]) -> Tuple[str, str]:
+def _require_scope_from_json(payload: dict[str, Any]) -> tuple[str, str]:
     tenant_id = str(payload.get("tenant_id") or payload.get("tenant") or "").strip()
     workspace = str(payload.get("workspace") or "").strip()
     if not tenant_id or not workspace:
@@ -591,7 +591,7 @@ def _require_scope_from_json(payload: Dict[str, Any]) -> Tuple[str, str]:
     return tenant_id, workspace
 
 
-def _parse_int(value: Optional[str], *, default: int, min_v: int, max_v: int) -> int:
+def _parse_int(value: str | None, *, default: int, min_v: int, max_v: int) -> int:
     if value is None or value == "":
         return default
     try:
@@ -601,14 +601,14 @@ def _parse_int(value: Optional[str], *, default: int, min_v: int, max_v: int) ->
     return max(min_v, min(max_v, n))
 
 
-def _parse_csv_list(value: Optional[str]) -> Optional[List[str]]:
+def _parse_csv_list(value: str | None) -> list[str] | None:
     if not value:
         return None
     items = [x.strip() for x in value.split(",") if x.strip()]
     return items or None
 
 
-def _json(payload: Dict[str, Any], *, status: int = 200) -> Any:
+def _json(payload: dict[str, Any], *, status: int = 200) -> Any:
     """Return a JSON response with an explicit status code.
 
     Backward-compatible helper. If 'ok' is missing, it is inferred from status.
@@ -620,7 +620,7 @@ def _json(payload: Dict[str, Any], *, status: int = 200) -> Any:
     return jsonify(payload), status
 
 
-def _parse_iso8601_dt(value: Optional[str], *, field_name: str = "timestamp") -> Optional[datetime]:
+def _parse_iso8601_dt(value: str | None, *, field_name: str = "timestamp") -> datetime | None:
     """Parse an ISO-8601 timestamp (accepts trailing 'Z') into an aware UTC datetime."""
     if value is None:
         return None
@@ -632,14 +632,14 @@ def _parse_iso8601_dt(value: Optional[str], *, field_name: str = "timestamp") ->
     except ValueError as exc:
         raise ValueError(f"Invalid {field_name} (expected ISO-8601): {s!r}") from exc
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 _MISSING = object()
 
 
-def _coerce_optional_text(value: Any) -> Optional[str]:
+def _coerce_optional_text(value: Any) -> str | None:
     """Normalize optional API text values to trimmed strings or None."""
     if value is None:
         return None
@@ -647,7 +647,7 @@ def _coerce_optional_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _payload_optional_text(payload: Dict[str, Any], key: str) -> Any:
+def _payload_optional_text(payload: dict[str, Any], key: str) -> Any:
     """Return normalized payload value for a key or _MISSING when absent."""
     if key not in payload:
         return _MISSING
@@ -728,13 +728,13 @@ def _install_blueprint_backcompat_shims() -> None:
     def _db_conn_proxy() -> Any:
         return db_conn()
 
-    def _fetch_all_proxy(conn: Any, sql: str, params: Optional[Iterable[Any]] = None) -> Any:
+    def _fetch_all_proxy(conn: Any, sql: str, params: Iterable[Any] | None = None) -> Any:
         return fetch_all_dict_conn(conn, sql, params)
 
-    def _fetch_one_proxy(conn: Any, sql: str, params: Optional[Iterable[Any]] = None) -> Any:
+    def _fetch_one_proxy(conn: Any, sql: str, params: Iterable[Any] | None = None) -> Any:
         return fetch_one_dict_conn(conn, sql, params)
 
-    def _execute_proxy(conn: Any, sql: str, params: Optional[Iterable[Any]] = None) -> Any:
+    def _execute_proxy(conn: Any, sql: str, params: Iterable[Any] | None = None) -> Any:
         return execute_conn(conn, sql, params)
 
     for module in (

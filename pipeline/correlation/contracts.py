@@ -6,9 +6,8 @@ a view named ``rule_input`` created by the correlation engine.
 The engine treats each returned row as one emitted *meta-finding*.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
-
 
 
 @dataclass(frozen=True)

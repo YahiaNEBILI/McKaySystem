@@ -8,7 +8,7 @@ from typing import Any
 from flask import Blueprint, jsonify
 
 from apps.backend.db import db_conn, fetch_one_dict_conn
-from apps.flask_api.utils import _ok, _json
+from apps.flask_api.utils import _json, _ok
 
 # Create the blueprint
 health_bp = Blueprint("health", __name__)

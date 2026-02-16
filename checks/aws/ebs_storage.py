@@ -21,9 +21,10 @@ Caveat:
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -36,7 +37,6 @@ from checks.aws.defaults import (
     EBS_SUPPRESS_VALUE_PREFIXES,
     EBS_UNATTACHED_MIN_AGE_DAYS,
 )
-
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
 
@@ -55,14 +55,14 @@ class EBSStorageConfig:
     unattached_min_age_days: int = EBS_UNATTACHED_MIN_AGE_DAYS
     snapshot_old_age_days: int = EBS_SNAPSHOT_OLD_AGE_DAYS
 
-    suppress_tag_keys: Tuple[str, ...] = EBS_SUPPRESS_TAG_KEYS
-    suppress_tag_values: Tuple[str, ...] = EBS_SUPPRESS_TAG_VALUES
+    suppress_tag_keys: tuple[str, ...] = EBS_SUPPRESS_TAG_KEYS
+    suppress_tag_values: tuple[str, ...] = EBS_SUPPRESS_TAG_VALUES
     # Prefix-based suppression for common retention tags such as:
     #   retention_policy=keep-90-days
     #   purpose=backup-prod
     # This keeps strict equality matching but also treats any value starting with
     # one of these prefixes as a suppress signal when the key is in suppress_tag_keys.
-    suppress_value_prefixes: Tuple[str, ...] = EBS_SUPPRESS_VALUE_PREFIXES
+    suppress_value_prefixes: tuple[str, ...] = EBS_SUPPRESS_VALUE_PREFIXES
 
 
     max_findings_per_type: int = EBS_MAX_FINDINGS_PER_TYPE
@@ -74,7 +74,7 @@ class EBSStorageConfig:
 
 # Conservative USD/GB-month defaults.
 # If you later inject a Pricing client into Services, replace this with a cached lookup.
-_FALLBACK_USD_PER_GB_MONTH: Dict[str, float] = {
+_FALLBACK_USD_PER_GB_MONTH: dict[str, float] = {
     "gp2": 0.10,
     "gp3": 0.08,
     "io1": 0.125,
@@ -135,11 +135,11 @@ def _days_ago(ts: datetime, now: datetime) -> int:
     return max(0, int((now - ts).total_seconds() // 86400))
 
 
-def _tags_to_dict(tags: Any) -> Dict[str, str]:
+def _tags_to_dict(tags: Any) -> dict[str, str]:
     if isinstance(tags, dict):
         return {str(k): str(v) for k, v in tags.items()}
     if isinstance(tags, list):
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for t in tags:
             if not isinstance(t, dict):
                 continue
@@ -203,11 +203,11 @@ def _paginate(paginator: Any, **kwargs: Any) -> Iterable[Mapping[str, Any]]:
             yield page
 
 
-def _collect_ami_snapshot_ids(ec2: Any) -> Set[str]:
+def _collect_ami_snapshot_ids(ec2: Any) -> set[str]:
     """
     Collect snapshot IDs referenced by self-owned AMIs (strong false-positive guardrail).
     """
-    referenced: Set[str] = set()
+    referenced: set[str] = set()
     paginator = ec2.get_paginator("describe_images")
     for page in _paginate(paginator, Owners=["self"]):
         for img in page.get("Images", []) or []:
@@ -244,7 +244,7 @@ def _money_val(val: float) -> float:
 class EBSStorageChecker(Checker):
     checker_id = "aws.ec2.ebs.storage"
 
-    def __init__(self, *, account_id: str, cfg: Optional[EBSStorageConfig] = None) -> None:
+    def __init__(self, *, account_id: str, cfg: EBSStorageConfig | None = None) -> None:
         self._account_id = str(account_id)
         self._cfg = cfg or EBSStorageConfig()
 
@@ -298,12 +298,12 @@ class EBSStorageChecker(Checker):
 
         # Resolve storage prices best-effort (PricingService if available, else fallback).
         # Keep lookups cached to avoid repeated Pricing API calls.
-        volume_price_cache: Dict[str, Tuple[float, str, int]] = {}
+        volume_price_cache: dict[str, tuple[float, str, int]] = {}
         snapshot_price_usd_per_gb_month, snapshot_pricing_notes, snapshot_pricing_conf = (
             _resolve_ebs_snapshot_storage_price_usd_per_gb_month(ctx, region=region)
         )
 
-        def _vol_price(vol_type: str) -> Tuple[float, str, int]:
+        def _vol_price(vol_type: str) -> tuple[float, str, int]:
             key = str(vol_type or "gp2").strip().lower()
             cached = volume_price_cache.get(key)
             if cached is not None:

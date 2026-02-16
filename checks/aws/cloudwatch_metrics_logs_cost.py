@@ -20,8 +20,9 @@ Design notes
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -56,9 +57,9 @@ class CloudWatchMetricsLogsCostConfig:
 
     # Log groups
     require_retention_policy: bool = CLOUDWATCH_REQUIRE_RETENTION_POLICY
-    suppress_tag_keys: Tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_KEYS
-    suppress_tag_values: Tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_VALUES
-    suppress_value_prefixes: Tuple[str, ...] = CLOUDWATCH_SUPPRESS_VALUE_PREFIXES
+    suppress_tag_keys: tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_KEYS
+    suppress_tag_values: tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_VALUES
+    suppress_value_prefixes: tuple[str, ...] = CLOUDWATCH_SUPPRESS_VALUE_PREFIXES
 
     # Custom metrics
     min_custom_metrics_for_signal: int = CLOUDWATCH_MIN_CUSTOM_METRICS_FOR_SIGNAL
@@ -114,7 +115,7 @@ def _resolve_custom_metric_price_usd_per_month(ctx: RunContext, *, region: str) 
             30,
         )
 
-    attempts: List[List[Dict[str, str]]] = [
+    attempts: list[list[dict[str, str]]] = [
         [
             {"Field": "location", "Value": location},
             {"Field": "productFamily", "Value": "Metric"},
@@ -177,7 +178,7 @@ def _resolve_alarm_price_usd_per_month(ctx: RunContext, *, region: str) -> tuple
             30,
         )
 
-    attempts: List[List[Dict[str, str]]] = [
+    attempts: list[list[dict[str, str]]] = [
         [
             {"Field": "location", "Value": location},
             {"Field": "productFamily", "Value": "Alarm"},
@@ -227,8 +228,8 @@ def _paginate(
     op_name: str,
     result_key: str,
     *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterable[Dict[str, Any]]:
+    params: dict[str, Any] | None = None,
+) -> Iterable[dict[str, Any]]:
     """Yield items from a paginator, raising errors to the caller."""
 
     paginator = client.get_paginator(op_name)
@@ -258,7 +259,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         self,
         *,
         account: AwsAccountContext,
-        cfg: Optional[CloudWatchMetricsLogsCostConfig] = None,
+        cfg: CloudWatchMetricsLogsCostConfig | None = None,
     ) -> None:
         self._account = account
         self._cfg = cfg or CloudWatchMetricsLogsCostConfig()
@@ -278,10 +279,10 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         )
         _LOGGER.debug("CloudWatch check running", extra={"region": region})
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
 
         # Logs inventory is shared by multiple signals; fetch once.
-        log_groups: Optional[List[Dict[str, Any]]] = None
+        log_groups: list[dict[str, Any]] | None = None
         if logs is not None:
             try:
                 log_groups = list(_paginate(logs, "describe_log_groups", "logGroups"))
@@ -372,12 +373,12 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         logs: Any,
         region: str,
         log_groups: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
         if not cfg.require_retention_policy:
             return []
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
         for g in log_groups:
             name = _safe_str(g.get("logGroupName"))
             if not name:
@@ -465,10 +466,10 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         logs: Any,
         region: str,
         log_groups: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
 
-        by_metric: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        by_metric: dict[tuple[str, str], dict[str, Any]] = {}
         for g in log_groups:
             name = _safe_str(g.get("logGroupName"))
             if not name:
@@ -514,7 +515,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
         unit_price, notes, confidence = _resolve_custom_metric_price_usd_per_month(ctx, region=region)
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
         emitted = 0
         for (namespace, metric_name), meta in sorted(by_metric.items()):
             if emitted >= cfg.max_custom_metric_findings:
@@ -579,7 +580,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
     # Alarm count signal
     # -------------------------
 
-    def _alarms_count_findings(self, ctx: RunContext, *, cloudwatch: Any, region: str) -> List[FindingDraft]:
+    def _alarms_count_findings(self, ctx: RunContext, *, cloudwatch: Any, region: str) -> list[FindingDraft]:
         cfg = self._cfg
         try:
             alarms = list(_paginate(cloudwatch, "describe_alarms", "MetricAlarms"))

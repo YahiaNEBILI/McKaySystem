@@ -3,24 +3,24 @@
 Provides recommendation endpoints for FinOps optimization opportunities.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from flask import Blueprint, request
 
-from apps.backend.db import db_conn, fetch_one_dict_conn, fetch_all_dict_conn
+from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.utils import (
-    _ok,
-    _err,
-    _q,
-    _require_scope_from_query,
-    _require_scope_from_json,
-    _parse_int,
-    _parse_csv_list,
-    _coerce_optional_text,
+    _coerce_non_negative_int,
     _coerce_optional_float,
+    _coerce_optional_text,
     _coerce_positive_int,
     _coerce_text_list,
-    _coerce_non_negative_int,
+    _err,
+    _ok,
+    _parse_csv_list,
+    _parse_int,
+    _q,
+    _require_scope_from_json,
+    _require_scope_from_query,
 )
 from apps.flask_api.utils.payload import (
     _as_float,
@@ -32,13 +32,12 @@ from apps.flask_api.utils.payload import (
     _run_meta_pricing_version,
 )
 
-
 # Create the blueprint
 recommendations_bp = Blueprint("recommendations", __name__)
 
 
 # Recommendation rules - mapping check_ids to recommendation metadata
-_RECOMMENDATION_RULES: Dict[str, Dict[str, Any]] = {
+_RECOMMENDATION_RULES: dict[str, dict[str, Any]] = {
     "aws.ec2.instances.underutilized": {
         "recommendation_type": "rightsizing.ec2.instance",
         "action": "Downsize EC2 instance to a smaller family/size based on sustained utilization.",
@@ -172,7 +171,7 @@ _RECOMMENDATION_RULES: Dict[str, Dict[str, Any]] = {
 }
 
 _RECOMMENDATION_CHECK_IDS = sorted(_RECOMMENDATION_RULES)
-_RECOMMENDATION_DEFAULT_RULE: Dict[str, Any] = {
+_RECOMMENDATION_DEFAULT_RULE: dict[str, Any] = {
     "recommendation_type": "other",
     "action": "Review finding details and define a remediation plan.",
     "priority": "p2",
@@ -191,22 +190,22 @@ def _build_recommendations_where_from_values(
     tenant_id: str,
     workspace: str,
     *,
-    effective_states: Optional[List[str]],
-    severities: Optional[List[str]],
-    services: Optional[List[str]],
-    check_ids: Optional[List[str]],
-    categories: Optional[List[str]],
-    regions: Optional[List[str]],
-    account_ids: Optional[List[str]],
-    query_str: Optional[str],
-    min_savings: Optional[float],
-    fingerprints: Optional[List[str]] = None,
-) -> Tuple[List[str], List[Any]]:
+    effective_states: list[str] | None,
+    severities: list[str] | None,
+    services: list[str] | None,
+    check_ids: list[str] | None,
+    categories: list[str] | None,
+    regions: list[str] | None,
+    account_ids: list[str] | None,
+    query_str: str | None,
+    min_savings: float | None,
+    fingerprints: list[str] | None = None,
+) -> tuple[list[str], list[Any]]:
     """Build scoped SQL filters for recommendations endpoints."""
     where = ["fc.tenant_id = %s", "fc.workspace = %s", "fc.check_id = ANY(%s)"]
-    params: List[Any] = [tenant_id, workspace, _RECOMMENDATION_CHECK_IDS]
+    params: list[Any] = [tenant_id, workspace, _RECOMMENDATION_CHECK_IDS]
 
-    def _add_any(field: str, values: Optional[List[str]]) -> None:
+    def _add_any(field: str, values: list[str] | None) -> None:
         if not values:
             return
         where.append(f"fc.{field} = ANY(%s)")
@@ -232,10 +231,10 @@ def _build_recommendations_where_from_values(
     return where, params
 
 
-def _build_recommendations_where(tenant_id: str, workspace: str) -> Tuple[List[str], List[Any]]:
+def _build_recommendations_where(tenant_id: str, workspace: str) -> tuple[list[str], list[Any]]:
     """Build scoped SQL filters for recommendations endpoints from query params."""
     min_savings_raw = _q("min_savings")
-    min_savings: Optional[float] = None
+    min_savings: float | None = None
     if min_savings_raw is not None:
         try:
             min_savings = float(min_savings_raw)
@@ -258,7 +257,7 @@ def _build_recommendations_where(tenant_id: str, workspace: str) -> Tuple[List[s
 
 def _recommendation_type_case_sql() -> str:
     """Return SQL CASE expression that maps check_id to recommendation_type."""
-    clauses: List[str] = []
+    clauses: list[str] = []
     for check_id in _RECOMMENDATION_CHECK_IDS:
         rec_type = _RECOMMENDATION_RULES[check_id]["recommendation_type"]
         clauses.append(f"WHEN check_id = '{check_id}' THEN '{rec_type}'")
@@ -267,11 +266,11 @@ def _recommendation_type_case_sql() -> str:
 
 def _build_estimate_risk_warnings(
     *,
-    items: List[Dict[str, Any]],
-    requested_fingerprints: Optional[List[str]],
-) -> List[Dict[str, Any]]:
+    items: list[dict[str, Any]],
+    requested_fingerprints: list[str] | None,
+) -> list[dict[str, Any]]:
     """Build deterministic risk warnings for estimate responses."""
-    warnings: List[Dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
     requires_approval_count = sum(1 for item in items if bool(item.get("requires_approval")))
     if requires_approval_count:
         warnings.append(
@@ -310,7 +309,7 @@ def _build_estimate_risk_warnings(
     return warnings
 
 
-def _build_recommendation_item(row: Dict[str, Any]) -> Dict[str, Any]:
+def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
     """Convert a finding_current row to a recommendation item payload."""
     check_id = str(row.get("check_id") or "")
     rule = _RECOMMENDATION_RULES.get(check_id, _RECOMMENDATION_DEFAULT_RULE)

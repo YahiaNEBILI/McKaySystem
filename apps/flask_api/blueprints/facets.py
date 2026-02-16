@@ -10,7 +10,6 @@ from flask import Blueprint, jsonify
 from apps.backend.db import db_conn, fetch_all_dict_conn
 from apps.flask_api.utils import _require_scope_from_query
 
-
 # Create the blueprint
 facets_bp = Blueprint("facets", __name__)
 

@@ -27,22 +27,23 @@ Signals (Windows cost/perf):
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
+    AwsAccountContext,
     PricingResolver,
     build_scope,
-    AwsAccountContext,
     get_logger,
+    money,
     normalize_tags,
     now_utc,
     percentile,
     safe_region_from_client,
-    money,
 )
 from checks.aws.defaults import (
     FSX_LARGE_STORAGE_GIB_THRESHOLD,
@@ -53,10 +54,8 @@ from checks.aws.defaults import (
     FSX_UNUSED_LOOKBACK_DAYS,
     FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS,
 )
-
 from checks.registry import Bootstrap, register_checker
-from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
-from contracts.finops_checker_pattern import Checker
+from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
 
 # Logger for this module
 _LOGGER = get_logger("fsx_filesystems")
@@ -85,7 +84,7 @@ class FSxFileSystemsConfig:
     windows_backup_low_retention_days: int = FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS
 
     # Governance tags (tags are lowercased by normalize_tags)
-    required_tag_keys: Tuple[str, ...] = FSX_REQUIRED_TAG_KEYS
+    required_tag_keys: tuple[str, ...] = FSX_REQUIRED_TAG_KEYS
 
     # Safety valve
     max_findings_per_type: int = FSX_MAX_FINDINGS_PER_TYPE
@@ -103,7 +102,7 @@ class FSxFileSystemsConfig:
 # Conservative fallback USD prices.
 # These are only used when PricingService is not available or the catalog query fails.
 # Tune later with real resolved quotes once you observe stable filter patterns.
-_FALLBACK_FSX_STORAGE_USD_PER_GB_MONTH: Dict[str, Dict[str, float]] = {
+_FALLBACK_FSX_STORAGE_USD_PER_GB_MONTH: dict[str, dict[str, float]] = {
     # FSx for Windows
     "WINDOWS": {"SSD": 0.13, "HDD": 0.04},
     # FSx for ONTAP (storage is generally SSD-backed; keep one fallback)
@@ -114,7 +113,7 @@ _FALLBACK_FSX_STORAGE_USD_PER_GB_MONTH: Dict[str, Dict[str, float]] = {
 
 # Throughput capacity often priced per MB/s-month (catalog unit commonly "MBps-Mo").
 # Fallbacks are deliberately conservative; treat as "ballpark".
-_FALLBACK_FSX_THROUGHPUT_USD_PER_MBPS_MONTH: Dict[str, float] = {
+_FALLBACK_FSX_THROUGHPUT_USD_PER_MBPS_MONTH: dict[str, float] = {
     "WINDOWS": 2.0,
     "ONTAP": 0.3,
     "LUSTRE": 0.0,  # often bundled/varies; keep 0 by default unless you confirm a stable quote
@@ -191,7 +190,7 @@ def _to_str(v: Any) -> str:
         return ""
 
 
-def _to_int(v: Any) -> Optional[int]:
+def _to_int(v: Any) -> int | None:
     if v is None:
         return None
     try:
@@ -200,7 +199,7 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
-def _to_float(v: Any) -> Optional[float]:
+def _to_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
@@ -209,18 +208,18 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def _age_days(created: Any, *, now_ts: datetime) -> Optional[int]:
+def _age_days(created: Any, *, now_ts: datetime) -> int | None:
     if not isinstance(created, datetime):
         return None
     dt = created
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return int((now_ts - dt).total_seconds() // 86400)
 
 
-def _is_nonprod(tags: Dict[str, str]) -> bool:
+def _is_nonprod(tags: dict[str, str]) -> bool:
     for k in ("env", "environment", "stage", "tier"):
         v = (tags.get(k) or "").strip().lower()
         if v and any(h in v for h in _NONPROD_HINTS):
@@ -231,7 +230,7 @@ def _is_nonprod(tags: Dict[str, str]) -> bool:
     return False
 
 
-def _extract_deployment_type(fs: Dict[str, Any]) -> str:
+def _extract_deployment_type(fs: dict[str, Any]) -> str:
     # Many FSx types embed DeploymentType under their specific config blocks
     for key in ("WindowsConfiguration", "OntapConfiguration", "LustreConfiguration"):
         cfg = fs.get(key)
@@ -242,7 +241,7 @@ def _extract_deployment_type(fs: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_throughput_capacity(fs: Dict[str, Any]) -> Optional[int]:
+def _extract_throughput_capacity(fs: dict[str, Any]) -> int | None:
     top = _to_int(fs.get("ThroughputCapacity"))
     if top is not None:
         return top
@@ -256,7 +255,7 @@ def _extract_throughput_capacity(fs: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _extract_windows_cfg(fs: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_windows_cfg(fs: dict[str, Any]) -> dict[str, Any]:
     cfg = fs.get("WindowsConfiguration")
     if isinstance(cfg, dict):
         return cfg
@@ -277,7 +276,7 @@ def _cw_get(
     end: datetime,
     period: int,
     statistics: Sequence[str],
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     cw = getattr(ctx.services, "cloudwatch", None) if ctx.services is not None else None
     if cw is None:
         return []
@@ -302,11 +301,11 @@ def _cw_get(
         return []
 
 
-def _p95(values: List[float]) -> Optional[float]:
+def _p95(values: list[float]) -> float | None:
     return percentile(values, 95.0, method="floor")
 
 
-def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, Dict[str, Any]]:
+def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> tuple[bool, dict[str, Any]]:
     """
     Returns (active, evidence).
     active=True if any known metric shows >0 activity.
@@ -314,7 +313,7 @@ def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, D
     end = now_utc()
     start = end - timedelta(days=days)
 
-    candidates: List[Tuple[str, str]] = [
+    candidates: list[tuple[str, str]] = [
         ("DataReadBytes", "Sum"),
         ("DataWriteBytes", "Sum"),
         ("ThroughputUtilization", "Average"),
@@ -323,7 +322,7 @@ def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, D
     ]
 
     any_metric_seen = False
-    evidence: Dict[str, Any] = {
+    evidence: dict[str, Any] = {
         "window_days": days,
         "seen_metrics": [],
         "any_metric_seen": False,
@@ -361,7 +360,7 @@ def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, D
     return False, evidence
 
 
-def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Optional[float], Dict[str, Any]]:
+def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> tuple[float | None, dict[str, Any]]:
     """
     Best-effort: returns p95 utilization percentage from known utilization metrics.
     """
@@ -380,7 +379,7 @@ def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Opt
         )
         if not dps:
             continue
-        vals: List[float] = []
+        vals: list[float] = []
         for dp in dps:
             v = _to_float(dp.get("Average"))
             if v is not None:
@@ -392,7 +391,7 @@ def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Opt
     return None, {"window_days": days, "reason": "no_util_metrics"}
 
 
-def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Optional[float], Dict[str, Any]]:
+def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> tuple[float | None, dict[str, Any]]:
     """
     Fallback: approximate p95 throughput via DataReadBytes+DataWriteBytes (Sum per hour).
     Returns MiB/s.
@@ -406,8 +405,8 @@ def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Option
     if not read and not write:
         return None, {"window_days": days, "reason": "no_rw_metrics"}
 
-    read_vals: List[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in read]
-    write_vals: List[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in write]
+    read_vals: list[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in read]
+    write_vals: list[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in write]
 
     p95_read = _p95(read_vals) or 0.0
     p95_write = _p95(write_vals) or 0.0
@@ -425,13 +424,13 @@ def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Option
 class FSxFileSystemsChecker(Checker):
     checker_id = "aws.fsx.filesystems"
 
-    def __init__(self, *, account_id: str, cfg: Optional[FSxFileSystemsConfig] = None) -> None:
+    def __init__(self, *, account_id: str, cfg: FSxFileSystemsConfig | None = None) -> None:
         self._account_id = str(account_id)
         self._cfg = cfg or FSxFileSystemsConfig()
 
     @staticmethod
-    def _list_file_systems_best_effort(fsx: Any) -> List[Dict[str, Any]]:
-        file_systems: List[Dict[str, Any]] = []
+    def _list_file_systems_best_effort(fsx: Any) -> list[dict[str, Any]]:
+        file_systems: list[dict[str, Any]] = []
         # Prefer paginator for correctness (API is paginated).
         try:
             paginator = fsx.get_paginator("describe_file_systems")
@@ -464,8 +463,8 @@ class FSxFileSystemsChecker(Checker):
         region: str,
         fs_type: str,
         storage_type: str,
-        storage_gib: Optional[int],
-        throughput_cfg: Optional[int],
+        storage_gib: int | None,
+        throughput_cfg: int | None,
     ) -> tuple[float, float, str, int]:
         storage_price, storage_notes, storage_conf = _resolve_fsx_storage_price_usd_per_gb_month(
             ctx,
@@ -502,7 +501,6 @@ class FSxFileSystemsChecker(Checker):
         region = safe_region_from_client(fsx) or "unknown"
         _LOGGER.debug("FSx check running", extra={"region": region})
         cfg = self._cfg
-        now_ts = now_utc()
 
         account = AwsAccountContext(account_id=self._account_id)
 
@@ -514,7 +512,7 @@ class FSxFileSystemsChecker(Checker):
         _LOGGER.info("Listed FSx filesystems", extra={"count": len(file_systems), "region": region})
 
         # Counters per check_id to enforce max_findings_per_type
-        emitted: Dict[str, int] = {}
+        emitted: dict[str, int] = {}
 
         for fs_any in file_systems:
             if not isinstance(fs_any, dict):
@@ -531,7 +529,6 @@ class FSxFileSystemsChecker(Checker):
             dep = _extract_deployment_type(fs)
             throughput_cfg = _extract_throughput_capacity(fs)
             storage_gib = _to_int(fs.get("StorageCapacity"))
-            created_days = _age_days(fs.get("CreationTime"), now_ts=now_ts)
 
             # Determine storage_type for pricing
             storage_type = ""
@@ -561,16 +558,6 @@ class FSxFileSystemsChecker(Checker):
                 resource_id=fs_id,
                 resource_arn=fs_arn,
             )
-
-            base_details: Dict[str, Any] = {
-                "fs_id": fs_id,
-                "fs_arn": fs_arn,
-                "fs_type": fs_type,
-                "deployment_type": dep,
-                "throughput_capacity": throughput_cfg,
-                "storage_capacity_gib": storage_gib,
-                "created_age_days": created_days,
-            }
 
             # -----------------------------
             # Governance: missing required tags
@@ -738,20 +725,19 @@ class FSxFileSystemsChecker(Checker):
         self,
         ctx: RunContext,
         *,
-        fs: Dict[str, Any],
+        fs: dict[str, Any],
         base_scope: Any,
-        tags: Dict[str, str],
+        tags: dict[str, str],
         region: str,
-        storage_gib: Optional[int],
+        storage_gib: int | None,
         storage_type: str,
         baseline_monthly_cost: float,
         pricing_conf: int,
         pricing_notes: str,
-        emitted: Dict[str, int],
+        emitted: dict[str, int],
     ) -> Iterable[FindingDraft]:
         cfg = self._cfg
         fs_id = _to_str(fs.get("FileSystemId"))
-        fs_arn = _to_str(fs.get("ResourceARN"))
 
         win = _extract_windows_cfg(fs)
         backup_days = _to_int(win.get("AutomaticBackupRetentionDays"))
@@ -851,7 +837,7 @@ class FSxFileSystemsChecker(Checker):
                 )
         else:
             # Format usually "d:HH:MM" or "d:HH:MM:SS"; parse HH best-effort
-            hour: Optional[int] = None
+            hour: int | None = None
             try:
                 parts = maint.split(":")
                 if len(parts) >= 2:

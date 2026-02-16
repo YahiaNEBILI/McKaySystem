@@ -5,7 +5,7 @@ run metadata, and other JSON structures.
 """
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 def _as_float(value: Any, *, default: float = 0.0) -> float:
@@ -24,7 +24,7 @@ def _as_float(value: Any, *, default: float = 0.0) -> float:
         return default
 
 
-def _payload_dict(value: Any) -> Dict[str, Any]:
+def _payload_dict(value: Any) -> dict[str, Any]:
     """Normalize finding payload to a dictionary.
 
     Accepts dict, JSON string, or empty/invalid values.
@@ -49,7 +49,7 @@ def _payload_dict(value: Any) -> Dict[str, Any]:
     return {}
 
 
-def _as_int_0_100(value: Any) -> Optional[int]:
+def _as_int_0_100(value: Any) -> int | None:
     """Coerce an optional confidence-like value to an integer between 0 and 100.
 
     Args:
@@ -67,7 +67,7 @@ def _as_int_0_100(value: Any) -> Optional[int]:
     return max(0, min(100, n))
 
 
-def _payload_optional_str(payload: Dict[str, Any], *path: str) -> Optional[str]:
+def _payload_optional_str(payload: dict[str, Any], *path: str) -> str | None:
     """Get an optional non-empty nested string from payload path.
 
     Args:
@@ -88,7 +88,7 @@ def _payload_optional_str(payload: Dict[str, Any], *path: str) -> Optional[str]:
     return text or None
 
 
-def _payload_estimated_confidence(payload: Dict[str, Any]) -> Optional[int]:
+def _payload_estimated_confidence(payload: dict[str, Any]) -> int | None:
     """Extract estimated confidence from canonical payload structure.
 
     Looks in payload.estimated.confidence
@@ -105,7 +105,7 @@ def _payload_estimated_confidence(payload: Dict[str, Any]) -> Optional[int]:
     return _as_int_0_100(est.get("confidence"))
 
 
-def _payload_pricing_source(payload: Dict[str, Any]) -> Optional[str]:
+def _payload_pricing_source(payload: dict[str, Any]) -> str | None:
     """Extract pricing source when available in finding payload.
 
     Checks multiple possible paths for pricing source.
@@ -133,7 +133,7 @@ def _payload_pricing_source(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _payload_pricing_version(payload: Dict[str, Any]) -> Optional[str]:
+def _payload_pricing_version(payload: dict[str, Any]) -> str | None:
     """Extract pricing version when available in finding payload.
 
     Args:
@@ -148,7 +148,7 @@ def _payload_pricing_version(payload: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def _run_meta_pricing_source(run_meta: Dict[str, Any]) -> Optional[str]:
+def _run_meta_pricing_source(run_meta: dict[str, Any]) -> str | None:
     """Extract pricing source from run metadata payload when available.
 
     Args:
@@ -160,7 +160,7 @@ def _run_meta_pricing_source(run_meta: Dict[str, Any]) -> Optional[str]:
     return _payload_optional_str(run_meta, "pricing_source")
 
 
-def _run_meta_pricing_version(run_meta: Dict[str, Any]) -> Optional[str]:
+def _run_meta_pricing_version(run_meta: dict[str, Any]) -> str | None:
     """Extract pricing version from run metadata payload when available.
 
     Args:

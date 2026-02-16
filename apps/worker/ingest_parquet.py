@@ -12,11 +12,12 @@ import io
 import json
 import logging
 import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 import pyarrow.dataset as ds
 
@@ -45,7 +46,7 @@ def _lock_ttl_seconds() -> int:
     return int(get_settings(reload=True).worker.run_lock_ttl_seconds)
 
 
-def _parse_dt(value: Any) -> Optional[datetime]:
+def _parse_dt(value: Any) -> datetime | None:
     """Parse a datetime from common inputs, returning UTC-aware."""
     if isinstance(value, datetime):
         dt = value
@@ -59,8 +60,8 @@ def _parse_dt(value: Any) -> Optional[datetime]:
             return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _manifest_run_ts(manifest_run_ts: str) -> datetime:
@@ -80,7 +81,7 @@ def _json_default(obj: Any) -> Any:
     return str(obj)
 
 
-def _to_float(v: Any) -> Optional[float]:
+def _to_float(v: Any) -> float | None:
     """Best-effort numeric parsing for savings/cost fields."""
     if v is None:
         return None
@@ -119,7 +120,7 @@ _CATEGORY_BY_PREFIX: list[tuple[str, str]] = [
 ]
 
 
-def _derive_category(check_id: Optional[str]) -> str:
+def _derive_category(check_id: str | None) -> str:
     """Infer a coarse category from check_id prefix."""
     if not check_id:
         return "other"
@@ -140,7 +141,7 @@ _ID_PATTERNS = [
 ]
 
 
-def _normalize_title(title: Optional[str]) -> str:
+def _normalize_title(title: str | None) -> str:
     """Normalize titles for grouping (mask IDs and digits)."""
     t = (title or "").strip().lower()
     if not t:
@@ -152,7 +153,7 @@ def _normalize_title(title: Optional[str]) -> str:
     return t.strip()
 
 
-def _derive_group_key(check_id: Optional[str], category: str, title: Optional[str]) -> Optional[str]:
+def _derive_group_key(check_id: str | None, category: str, title: str | None) -> str | None:
     """Build a stable group key from check_id/category/title."""
     base = f"{(check_id or '').strip()}|{category}|{_normalize_title(title)}".strip("|")
     if not base:
@@ -162,7 +163,7 @@ def _derive_group_key(check_id: Optional[str], category: str, title: Optional[st
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 
-def _scope_get(scope: Any, key: str) -> Optional[str]:
+def _scope_get(scope: Any, key: str) -> str | None:
     """Safe access to a scope mapping field."""
     if isinstance(scope, Mapping):
         v = scope.get(key)
@@ -172,10 +173,10 @@ def _scope_get(scope: Any, key: str) -> Optional[str]:
 
 def _guess_fields_from_record(
     rec: Mapping[str, Any],
-) -> Tuple[
-    Optional[str], Optional[str], Optional[str], Optional[str],
-    Optional[float], Optional[str], Optional[str],
-    str, Optional[str],
+) -> tuple[
+    str | None, str | None, str | None, str | None,
+    float | None, str | None, str | None,
+    str, str | None,
 ]:
     """Extract DB fields from a Parquet record with best-effort fallbacks."""
     check_id = rec.get("check_id")
@@ -220,7 +221,7 @@ def _glob_has_files(path: str | Path) -> bool:
     return bool(list(base.glob("**/*.parquet")))
 
 
-def _list_parquet_files(path: str | Path) -> List[Path]:
+def _list_parquet_files(path: str | Path) -> list[Path]:
     """List parquet files under a dataset directory."""
     base = Path(path)
     if not base.exists():
@@ -243,7 +244,7 @@ def _as_copy_value(value: Any) -> str:
     return str(value)
 
 
-def _copy_rows(cur, table: str, columns: Sequence[str], rows: List[Sequence[Any]]) -> int:
+def _copy_rows(cur, table: str, columns: Sequence[str], rows: list[Sequence[Any]]) -> int:
     """Bulk copy rows into a table using CSV COPY."""
     if not rows:
         return 0
@@ -265,7 +266,7 @@ def _copy_rows(cur, table: str, columns: Sequence[str], rows: List[Sequence[Any]
     return len(rows)
 
 
-def _selected_dataset_paths(manifest) -> tuple[List[str], str]:
+def _selected_dataset_paths(manifest) -> tuple[list[str], str]:
     """Resolve dataset paths to ingest.
 
     Rules:
@@ -275,8 +276,8 @@ def _selected_dataset_paths(manifest) -> tuple[List[str], str]:
     if manifest.out_enriched and _glob_has_files(manifest.out_enriched):
         return [manifest.out_enriched], "enriched"
 
-    selected: List[str] = []
-    labels: List[str] = []
+    selected: list[str] = []
+    labels: list[str] = []
     if manifest.out_raw and _glob_has_files(manifest.out_raw):
         selected.append(manifest.out_raw)
         labels.append("raw")
@@ -288,7 +289,7 @@ def _selected_dataset_paths(manifest) -> tuple[List[str], str]:
         return selected, "+".join(labels)
 
     # Fall back to configured paths for a clearer error message upstream.
-    fallback: List[str] = []
+    fallback: list[str] = []
     if manifest.out_enriched:
         fallback.append(manifest.out_enriched)
     if manifest.out_raw:
@@ -298,9 +299,9 @@ def _selected_dataset_paths(manifest) -> tuple[List[str], str]:
     return fallback, "none"
 
 
-def _list_parquet_files_for_paths(paths: Sequence[str]) -> List[Path]:
+def _list_parquet_files_for_paths(paths: Sequence[str]) -> list[Path]:
     """List parquet files across multiple dataset roots."""
-    files: List[Path] = []
+    files: list[Path] = []
     for path in paths:
         files.extend(_list_parquet_files(path))
     # Deterministic and de-duplicated
@@ -309,9 +310,9 @@ def _list_parquet_files_for_paths(paths: Sequence[str]) -> List[Path]:
 
 @dataclass(frozen=True)
 class DbApi:
-    execute: Callable[[str, Optional[Sequence[Any]]], None]
-    execute_many: Callable[[str, List[Sequence[Any]]], None]
-    fetch_one: Callable[[str, Optional[Sequence[Any]]], Optional[Tuple[Any, ...]]]
+    execute: Callable[[str, Sequence[Any] | None], None]
+    execute_many: Callable[[str, list[Sequence[Any]]], None]
+    fetch_one: Callable[[str, Sequence[Any] | None], tuple[Any, ...] | None]
 
 
 def _default_db_api() -> DbApi:
@@ -518,9 +519,9 @@ def _refresh_remediation_impacts_best_effort(
 def ingest_from_manifest(
     manifest_path: Path,
     *,
-    db_api: Optional[DbApi] = None,
-    batch_size: Optional[int] = None,
-    parquet_batch_size: Optional[int] = None,
+    db_api: DbApi | None = None,
+    batch_size: int | None = None,
+    parquet_batch_size: int | None = None,
 ) -> IngestStats:
     """Ingest a Parquet dataset described by a run_manifest.json."""
     worker_cfg = get_settings(reload=True).worker
@@ -661,8 +662,8 @@ def ingest_from_manifest(
 
         scanner = dataset.scanner(filter=filt, batch_size=int(parquet_batch_size))
 
-        presence_rows: List[Sequence[Any]] = []
-        latest_rows: List[Sequence[Any]] = []
+        presence_rows: list[Sequence[Any]] = []
+        latest_rows: list[Sequence[Any]] = []
         seen_fingerprints: set[str] = set()
         total_presence = 0
         total_latest = 0
@@ -933,7 +934,7 @@ def _ingest_with_copy(
     total_presence = 0
     total_latest = 0
     lock_owner = default_owner("ingest_parquet")
-    lock_token: Optional[str] = None
+    lock_token: str | None = None
 
     with db_conn() as conn:
         try:
@@ -1023,8 +1024,8 @@ def _ingest_with_copy(
                     "CREATE TEMP TABLE tmp_latest (LIKE finding_latest INCLUDING DEFAULTS) ON COMMIT DROP"
                 )
 
-                presence_rows: List[Sequence[Any]] = []
-                latest_rows: List[Sequence[Any]] = []
+                presence_rows: list[Sequence[Any]] = []
+                latest_rows: list[Sequence[Any]] = []
                 seen_fingerprints: set[str] = set()
 
                 def _flush_presence_copy() -> None:
@@ -1277,7 +1278,7 @@ def _ingest_with_copy(
     )
 
 
-def _find_manifest_path(arg: Optional[str]) -> Path:
+def _find_manifest_path(arg: str | None) -> Path:
     """Resolve the manifest path from args, env, or cwd."""
     if arg:
         p = Path(arg).resolve()
@@ -1299,7 +1300,7 @@ def _find_manifest_path(arg: Optional[str]) -> Path:
     raise SystemExit("run_manifest.json not found (use --manifest or MANIFEST_PATH).")
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint."""
     import argparse
 

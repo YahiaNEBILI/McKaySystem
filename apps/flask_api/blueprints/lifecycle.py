@@ -4,38 +4,35 @@ Provides finding lifecycle action endpoints (ignore, resolve, snooze).
 """
 
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_one_dict_conn
 from apps.flask_api.utils import (
-    _ok,
     _err,
-    _json,
-    _require_scope_from_json,
+    _ok,
     _parse_iso8601_dt,
-    _coerce_optional_text,
+    _require_scope_from_json,
 )
-
 
 # Create the blueprint
 lifecycle_bp = Blueprint("lifecycle", __name__)
 
 
-def _log(level: str, event: str, fields: Dict[str, Any]) -> None:
+def _log(level: str, event: str, fields: dict[str, Any]) -> None:
     """Emit a log message."""
     import logging
     logger = logging.getLogger("lifecycle")
     getattr(logger, level.lower())(f"{event}: {fields}")
 
 
-def _iso_z(dt: Optional[datetime]) -> Optional[str]:
+def _iso_z(dt: datetime | None) -> str | None:
     """Format datetime as ISO-8601 with Z suffix."""
     if dt is None:
         return None
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _audit_log_event(
@@ -45,17 +42,17 @@ def _audit_log_event(
     workspace: str,
     entity_type: str,
     entity_id: str,
-    fingerprint: Optional[str],
+    fingerprint: str | None,
     event_type: str,
     event_category: str,
-    previous_value: Optional[Dict[str, Any]],
-    new_value: Optional[Dict[str, Any]],
-    actor_id: Optional[str],
-    actor_email: Optional[str],
-    actor_name: Optional[str],
+    previous_value: dict[str, Any] | None,
+    new_value: dict[str, Any] | None,
+    actor_id: str | None,
+    actor_email: str | None,
+    actor_name: str | None,
     source: str,
-    run_id: Optional[str] = None,
-    correlation_id: Optional[str] = None,
+    run_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Best-effort append-only write to audit_log."""
     try:
@@ -120,9 +117,9 @@ def _audit_lifecycle(
     subject_type: str,
     subject_id: str,
     state: str,
-    snooze_until: Optional[datetime],
-    reason: Optional[str],
-    updated_by: Optional[str],
+    snooze_until: datetime | None,
+    reason: str | None,
+    updated_by: str | None,
 ) -> None:
     """Best-effort lifecycle audit logging."""
     evt = {
@@ -194,9 +191,9 @@ def _upsert_state(
     workspace: str,
     fingerprint: str,
     state: str,
-    snooze_until: Optional[datetime],
-    reason: Optional[str],
-    updated_by: Optional[str],
+    snooze_until: datetime | None,
+    reason: str | None,
+    updated_by: str | None,
 ) -> None:
     """Upsert finding state."""
     execute_conn(
@@ -227,9 +224,9 @@ def _upsert_group_state(
     workspace: str,
     group_key: str,
     state: str,
-    snooze_until: Optional[datetime],
-    reason: Optional[str],
-    updated_by: Optional[str],
+    snooze_until: datetime | None,
+    reason: str | None,
+    updated_by: str | None,
 ) -> None:
     """Upsert finding group state."""
     execute_conn(

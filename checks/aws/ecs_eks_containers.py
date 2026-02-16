@@ -14,8 +14,9 @@ Signals (EKS):
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError, OperationNotPageableError
 
@@ -43,9 +44,9 @@ class EcsEksContainersConfig:
     """Configuration knobs for :class:`EcsEksContainersChecker`."""
 
     max_findings_per_type: int = CONTAINERS_MAX_FINDINGS_PER_TYPE
-    nonprod_tag_keys: Tuple[str, ...] = CONTAINERS_NONPROD_TAG_KEYS
-    nonprod_tag_values: Tuple[str, ...] = CONTAINERS_NONPROD_TAG_VALUES
-    eks_min_supported_version: Tuple[int, int] = EKS_MIN_SUPPORTED_VERSION
+    nonprod_tag_keys: tuple[str, ...] = CONTAINERS_NONPROD_TAG_KEYS
+    nonprod_tag_values: tuple[str, ...] = CONTAINERS_NONPROD_TAG_VALUES
+    eks_min_supported_version: tuple[int, int] = EKS_MIN_SUPPORTED_VERSION
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -95,7 +96,7 @@ def _paginate_strings(
     operation: str,
     result_key: str,
     *,
-    params: Optional[Dict[str, Any]] = None,
+    params: dict[str, Any] | None = None,
     request_token_key: str = "nextToken",
     response_token_keys: Sequence[str] = ("nextToken", "NextToken"),
 ) -> Iterator[str]:
@@ -118,7 +119,7 @@ def _paginate_strings(
     if not callable(call):
         raise AttributeError(f"client has no operation {operation}")
 
-    next_token: Optional[str] = None
+    next_token: str | None = None
     while True:
         req = dict(call_params)
         if next_token:
@@ -139,7 +140,7 @@ def _paginate_strings(
             break
 
 
-def _parse_k8s_version(version: str) -> Optional[Tuple[int, int]]:
+def _parse_k8s_version(version: str) -> tuple[int, int] | None:
     """Parse Kubernetes version like '1.27' or '1.27.6' into (major, minor)."""
     text = str(version or "").strip()
     if not text:
@@ -189,7 +190,7 @@ class EcsEksContainersChecker(Checker):
         self,
         *,
         account: AwsAccountContext,
-        cfg: Optional[EcsEksContainersConfig] = None,
+        cfg: EcsEksContainersConfig | None = None,
     ) -> None:
         self._account = account
         self._cfg = cfg or EcsEksContainersConfig()
@@ -210,7 +211,7 @@ class EcsEksContainersChecker(Checker):
             or safe_region_from_client(eks)
             or str(getattr(services, "region", "") or "")
         )
-        emitted: Dict[str, int] = {}
+        emitted: dict[str, int] = {}
 
         if ecs is not None:
             for finding in self._run_ecs(ctx, ecs=ecs, region=region, emitted=emitted):
@@ -226,7 +227,7 @@ class EcsEksContainersChecker(Checker):
         *,
         ecs: Any,
         region: str,
-        emitted: Dict[str, int],
+        emitted: dict[str, int],
     ) -> Iterable[FindingDraft]:
         try:
             cluster_arns = list(_paginate_strings(ecs, "list_clusters", "clusterArns"))
@@ -367,7 +368,7 @@ class EcsEksContainersChecker(Checker):
                     continue
 
                 cp_strategy = svc.get("capacityProviderStrategy") or []
-                providers: List[str] = []
+                providers: list[str] = []
                 if isinstance(cp_strategy, list):
                     for item in cp_strategy:
                         if not isinstance(item, Mapping):
@@ -418,8 +419,8 @@ class EcsEksContainersChecker(Checker):
                             },
                         )
 
-    def _describe_ecs_clusters(self, ecs: Any, cluster_arns: Sequence[str]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
+    def _describe_ecs_clusters(self, ecs: Any, cluster_arns: Sequence[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
         for i in range(0, len(cluster_arns), 100):
             batch = list(cluster_arns[i : i + 100])
             if not batch:
@@ -442,7 +443,7 @@ class EcsEksContainersChecker(Checker):
         *,
         cluster_arn: str,
         service_arns: Sequence[str],
-    ) -> Iterator[Dict[str, Any]]:
+    ) -> Iterator[dict[str, Any]]:
         for i in range(0, len(service_arns), 10):
             batch = list(service_arns[i : i + 10])
             if not batch:
@@ -461,7 +462,7 @@ class EcsEksContainersChecker(Checker):
         *,
         eks: Any,
         region: str,
-        emitted: Dict[str, int],
+        emitted: dict[str, int],
     ) -> Iterable[FindingDraft]:
         try:
             cluster_names = list(_paginate_strings(eks, "list_clusters", "clusters"))
@@ -718,7 +719,7 @@ class EcsEksContainersChecker(Checker):
                 return True
         return False
 
-    def _should_emit(self, check_id: str, emitted: Dict[str, int]) -> bool:
+    def _should_emit(self, check_id: str, emitted: dict[str, int]) -> bool:
         count = int(emitted.get(check_id, 0))
         if count >= self._cfg.max_findings_per_type:
             return False

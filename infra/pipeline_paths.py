@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 
 def _p(path: str | Path) -> Path:
@@ -47,13 +46,13 @@ class PipelinePaths:
     cur_facts_dirname: str = "cur_facts"
 
     # Optional overrides (used by CLI to point elsewhere)
-    findings_raw_override: Optional[Path] = None
-    findings_correlated_override: Optional[Path] = None
-    findings_enriched_override: Optional[Path] = None
+    findings_raw_override: Path | None = None
+    findings_correlated_override: Path | None = None
+    findings_enriched_override: Path | None = None
 
-    export_override: Optional[Path] = None
-    cur_raw_override: Optional[Path] = None
-    cur_facts_override: Optional[Path] = None
+    export_override: Path | None = None
+    cur_raw_override: Path | None = None
+    cur_facts_override: Path | None = None
 
     def __post_init__(self) -> None:
         # Validate the important invariants early so misuse fails fast.
@@ -130,7 +129,7 @@ class PipelinePaths:
     def cur_facts_glob(self) -> str:
         return self.parquet_glob(self.cur_facts_dir())
 
-    def export_findings_globs(self) -> List[str]:
+    def export_findings_globs(self) -> list[str]:
         """
         Standard export inputs. The exporter may auto-select enriched if present,
         but callers should use this to stay consistent.
@@ -151,7 +150,7 @@ class PipelinePaths:
         export_dir: str | Path | None = None,
         cur_raw_dir: str | Path | None = None,
         cur_facts_dir: str | Path | None = None,
-    ) -> "PipelinePaths":
+    ) -> PipelinePaths:
         """
         Preferred way for runner/CLI to override locations without changing conventions.
         """

@@ -4,29 +4,27 @@ Provides team management endpoints including CRUD operations and member manageme
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import (
     db_conn,
-    fetch_one_dict_conn,
-    fetch_all_dict_conn,
     execute_conn,
+    fetch_all_dict_conn,
+    fetch_one_dict_conn,
 )
 from apps.flask_api.utils import (
-    _ok,
-    _err,
-    _json,
-    _q,
-    _require_scope_from_query,
-    _require_scope_from_json,
-    _parse_int,
-    _coerce_optional_text,
-    _payload_optional_text,
     _MISSING,
+    _coerce_optional_text,
+    _err,
+    _ok,
+    _parse_int,
+    _payload_optional_text,
+    _q,
+    _require_scope_from_json,
+    _require_scope_from_query,
 )
-
 
 # Create the blueprint
 teams_bp = Blueprint("teams", __name__)
@@ -47,7 +45,7 @@ def _team_exists(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> 
     return bool(row and row.get("ok") == 1)
 
 
-def _fetch_team(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> Optional[Dict[str, Any]]:
+def _fetch_team(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> dict[str, Any] | None:
     """Fetch one team by scoped id."""
     return fetch_one_dict_conn(
         conn,
@@ -70,7 +68,7 @@ def _fetch_team(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> O
 
 def _fetch_team_member(
     conn: Any, *, tenant_id: str, workspace: str, team_id: str, user_id: str
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Fetch one team member by scoped team_id + user_id."""
     return fetch_one_dict_conn(
         conn,
@@ -101,17 +99,17 @@ def _audit_log_event(
     workspace: str,
     entity_type: str,
     entity_id: str,
-    fingerprint: Optional[str],
+    fingerprint: str | None,
     event_type: str,
     event_category: str,
-    previous_value: Optional[Dict[str, Any]],
-    new_value: Optional[Dict[str, Any]],
-    actor_id: Optional[str],
-    actor_email: Optional[str],
-    actor_name: Optional[str],
+    previous_value: dict[str, Any] | None,
+    new_value: dict[str, Any] | None,
+    actor_id: str | None,
+    actor_email: str | None,
+    actor_name: str | None,
     source: str,
-    run_id: Optional[str] = None,
-    correlation_id: Optional[str] = None,
+    run_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Best-effort append-only write to audit_log, isolated by savepoint."""
     try:
@@ -121,7 +119,8 @@ def _audit_log_event(
         ip_address = None
         user_agent = ""
 
-    params = (
+    # Audit write is currently a no-op fallback in this code path.
+    _ = (
         tenant_id,
         workspace,
         entity_type,
@@ -129,8 +128,8 @@ def _audit_log_event(
         fingerprint,
         event_type,
         event_category,
-        (json.dumps(previous_value, separators=(",", ":")) if previous_value is not None else None),
-        (json.dumps(new_value, separators=(",", ":")) if new_value is not None else None),
+        json.dumps(previous_value, separators=(",", ":")) if previous_value is not None else None,
+        json.dumps(new_value, separators=(",", ":")) if new_value is not None else None,
         actor_id,
         actor_email,
         actor_name,
@@ -170,7 +169,7 @@ def api_teams() -> Any:
         query_str = _q("q")
 
         where = ["t.tenant_id = %s", "t.workspace = %s"]
-        params: List[Any] = [tenant_id, workspace]
+        params: list[Any] = [tenant_id, workspace]
         if query_str:
             where.append("(t.team_id ILIKE %s OR t.name ILIKE %s)")
             params.extend([f"%{query_str}%", f"%{query_str}%"])
@@ -463,7 +462,7 @@ def api_team_members(team_id: str) -> Any:
                 return _err("not_found", "team not found", status=404)
 
             where = ["tenant_id = %s", "workspace = %s", "team_id = %s"]
-            params: List[Any] = [tenant_id, workspace, tid]
+            params: list[Any] = [tenant_id, workspace, tid]
             if query_str:
                 where.append(
                     "(user_id ILIKE %s OR user_email ILIKE %s OR COALESCE(user_name, '') ILIKE %s)"

@@ -14,12 +14,12 @@ consistent across checkers.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from contracts.finops_checker_pattern import Scope
-
 
 # Logger name prefix for AWS checkers
 _LOGGER_PREFIX = "mckay.checks.aws"
@@ -46,7 +46,7 @@ class AwsAccountContext:
     """
 
     account_id: str
-    billing_account_id: Optional[str] = None
+    billing_account_id: str | None = None
     partition: str = "aws"
 
 
@@ -59,7 +59,7 @@ def build_scope(
     resource_type: str = "",
     resource_id: str = "",
     resource_arn: str = "",
-    billing_account_id: Optional[str] = None,
+    billing_account_id: str | None = None,
     availability_zone: str = "",
     organization_id: str = "",
 ) -> Scope:
@@ -86,20 +86,20 @@ def build_scope(
     )
 
 
-def utc(dt: Optional[datetime]) -> Optional[datetime]:
+def utc(dt: datetime | None) -> datetime | None:
     """Return ``dt`` converted to timezone-aware UTC (or None)."""
 
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def now_utc() -> datetime:
     """Return the current UTC timestamp."""
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def safe_region_from_client(client: Any) -> str:
@@ -196,7 +196,7 @@ def is_suppressed(
     tags: Any,
     *,
     suppress_keys: set[str] | frozenset[str],
-    suppress_values: Optional[set[str] | frozenset[str]] = None,
+    suppress_values: set[str] | frozenset[str] | None = None,
     value_prefixes: tuple[str, ...] = (),
     value_only_if_key_suppressed: bool = False,
     prefix_only_if_key_suppressed: bool = True,
@@ -244,11 +244,11 @@ def paginate_items(
     operation: str,
     result_key: str,
     *,
-    params: Optional[Dict[str, Any]] = None,
+    params: dict[str, Any] | None = None,
     request_token_key: str = "NextToken",
     response_token_keys: Sequence[str] = ("NextToken",),
-    paginator_fallback_exceptions: Tuple[type[Exception], ...] = (Exception,),
-) -> Iterator[Dict[str, Any]]:
+    paginator_fallback_exceptions: tuple[type[Exception], ...] = (Exception,),
+) -> Iterator[dict[str, Any]]:
     """Yield dict items from paginator when available, else token-loop fallback.
 
     This keeps checker pagination behavior deterministic while still supporting
@@ -271,7 +271,7 @@ def paginate_items(
     if call is None:
         raise AttributeError(f"client has no operation {operation}")
 
-    next_token: Optional[str] = None
+    next_token: str | None = None
     while True:
         req = dict(params)
         if next_token:
@@ -302,8 +302,8 @@ def pricing_first_positive(
     method_names: Sequence[str],
     kwargs_variants: Sequence[Mapping[str, Any]] = (),
     args_variants: Sequence[Sequence[Any]] = (),
-    call_exceptions: Tuple[type[Exception], ...] = (Exception,),
-) -> Tuple[Optional[float], str]:
+    call_exceptions: tuple[type[Exception], ...] = (Exception,),
+) -> tuple[float | None, str]:
     """Return first strictly-positive pricing value and method name.
 
     This helper is intentionally best-effort: it tries multiple method names and
@@ -357,7 +357,7 @@ def pricing_location_for_region(pricing: Any, region: str) -> str:
         return ""
 
 
-def pricing_quote_unit_price(quote: Any) -> Optional[float]:
+def pricing_quote_unit_price(quote: Any) -> float | None:
     """Extract a positive unit price from a quote-like object."""
     if quote is None:
         return None
@@ -378,9 +378,9 @@ def pricing_on_demand_first_positive(
     pricing: Any,
     *,
     service_code: str,
-    attempts: Sequence[Tuple[str, Sequence[Mapping[str, str]]]],
-    call_exceptions: Tuple[type[Exception], ...],
-) -> Tuple[Optional[float], Any]:
+    attempts: Sequence[tuple[str, Sequence[Mapping[str, str]]]],
+    call_exceptions: tuple[type[Exception], ...],
+) -> tuple[float | None, Any]:
     """Return first positive on-demand quote price for (unit, filters) attempts.
 
     Returns ``(price, quote)`` where ``quote`` is the raw quote object. If no
@@ -404,7 +404,7 @@ def pricing_on_demand_first_positive(
     return None, None
 
 
-def percentile(values: Sequence[float], p: float, *, method: str = "linear") -> Optional[float]:
+def percentile(values: Sequence[float], p: float, *, method: str = "linear") -> float | None:
     """Compute percentile from a sequence without external dependencies.
 
     Supported methods:
@@ -412,7 +412,7 @@ def percentile(values: Sequence[float], p: float, *, method: str = "linear") -> 
     - ``floor``: floor index selection (nearest-rank lower bound).
     - ``nearest``: nearest index selection (round to nearest rank).
     """
-    numbers: List[float] = []
+    numbers: list[float] = []
     for value in values:
         try:
             numbers.append(float(value))
@@ -462,8 +462,8 @@ class PricingResolver:
         *,
         region: str,
         instance_type: str,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[Optional[float], int, str]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float | None, int, str]:
         """Resolve EC2 on-demand Linux/shared monthly cost."""
         pricing = self._pricing()
         if pricing is None:
@@ -473,7 +473,7 @@ class PricingResolver:
         if not location:
             return None, 30, "pricing location unavailable"
 
-        attempts: List[List[Dict[str, str]]] = [
+        attempts: list[list[dict[str, str]]] = [
             [
                 {"Field": "location", "Value": location},
                 {"Field": "productFamily", "Value": "Compute Instance"},
@@ -533,8 +533,8 @@ class PricingResolver:
         region: str,
         volume_type: str,
         fallback_prices: Mapping[str, float],
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int]:
         """Resolve EBS volume storage unit price (GB-Mo)."""
         default_price = float(fallback_prices.get(str(volume_type or "gp2"), 0.10))
         pricing = self._pricing()
@@ -546,7 +546,7 @@ class PricingResolver:
             return default_price, "Pricing region mapping missing; using fallback pricing.", 30
 
         vt = str(volume_type or "gp2").strip().lower()
-        usage_types: List[str]
+        usage_types: list[str]
         if vt == "gp2":
             usage_types = ["EBS:VolumeUsage.gp2", "EBS:VolumeUsage"]
         elif vt == "gp3":
@@ -595,8 +595,8 @@ class PricingResolver:
         *,
         region: str,
         default_price: float,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int]:
         """Resolve EBS snapshot storage unit price (GB-Mo)."""
         pricing = self._pricing()
         if pricing is None:
@@ -642,8 +642,8 @@ class PricingResolver:
         deployment_option: str,
         engine: str,
         license_model: str,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[Optional[float], str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float | None, str, int]:
         """Resolve RDS on-demand hourly instance price."""
         pricing = self._pricing()
         if pricing is None:
@@ -669,7 +669,7 @@ class PricingResolver:
 
         conf = 70 if str(getattr(quote, "source", "")) == "pricing_api" else 60
         return (
-            float(getattr(quote, "unit_price_usd")),
+            float(quote.unit_price_usd),
             f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
             conf,
         )
@@ -680,8 +680,8 @@ class PricingResolver:
         region: str,
         fallback_hourly_usd: float,
         fallback_data_usd_per_gb: float,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, float, str, int]:
         """Resolve NAT gateway hourly and per-GB processing prices."""
         pricing = self._pricing()
         if pricing is None:
@@ -691,8 +691,8 @@ class PricingResolver:
         if not location:
             return fallback_hourly_usd, fallback_data_usd_per_gb, "Pricing region mapping missing; using fallback pricing.", 30
 
-        notes: List[str] = []
-        hourly_attempts: List[List[Dict[str, str]]] = [
+        notes: list[str] = []
+        hourly_attempts: list[list[dict[str, str]]] = [
             [
                 {"Field": "location", "Value": location},
                 {"Field": "productFamily", "Value": "NAT Gateway"},
@@ -715,7 +715,7 @@ class PricingResolver:
         if hourly and hourly > 0.0:
             notes.append("on-demand hourly price resolved via PricingService")
 
-        data_attempts: List[List[Dict[str, str]]] = [
+        data_attempts: list[list[dict[str, str]]] = [
             [
                 {"Field": "location", "Value": location},
                 {"Field": "usagetype", "Value": "NatGateway-Bytes"},
@@ -754,8 +754,8 @@ class PricingResolver:
         lb_type: str,
         fallback_alb_hourly_usd: float,
         fallback_nlb_hourly_usd: float,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int]:
         """Resolve ALB/NLB hourly price."""
         fallback = fallback_alb_hourly_usd if lb_type == "application" else fallback_nlb_hourly_usd
         pricing = self._pricing()
@@ -766,7 +766,7 @@ class PricingResolver:
         if not location:
             return fallback, "Pricing region mapping missing; using fallback pricing.", 30
 
-        attempts: List[List[Dict[str, str]]]
+        attempts: list[list[dict[str, str]]]
         if lb_type == "application":
             attempts = [
                 [
@@ -809,8 +809,8 @@ class PricingResolver:
         region: str,
         pricing_storage_class: str,
         fallback_usd_per_gb_month: float,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int, str]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int, str]:
         """Resolve S3 storage unit price (GB-Mo)."""
         fallback = (
             float(fallback_usd_per_gb_month),
@@ -827,7 +827,7 @@ class PricingResolver:
         if not location:
             return fallback
 
-        attempts: List[List[Dict[str, str]]] = [
+        attempts: list[list[dict[str, str]]] = [
             [
                 {"Field": "location", "Value": location},
                 {"Field": "productFamily", "Value": "Storage"},
@@ -872,8 +872,8 @@ class PricingResolver:
         fs_type: str,
         storage_type: str,
         default_price: float,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int]:
         """Resolve FSx storage unit price (GB-Mo)."""
         pricing = self._pricing()
         if pricing is None:
@@ -883,7 +883,7 @@ class PricingResolver:
         if not location:
             return default_price, "Pricing region mapping missing; using fallback pricing.", 30
 
-        attempts: List[List[Dict[str, str]]] = [
+        attempts: list[list[dict[str, str]]] = [
             [
                 {"Field": "location", "Value": location},
                 {"Field": "productFamily", "Value": "Storage"},
@@ -928,8 +928,8 @@ class PricingResolver:
         fs_type: str,
         default_price: float,
         units: Sequence[str],
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int]:
         """Resolve FSx throughput unit price (MBps-Mo style units)."""
         if default_price <= 0.0:
             return 0.0, "No throughput fallback for this FSx type; leaving throughput estimate as 0.", 20
@@ -942,7 +942,7 @@ class PricingResolver:
         if not location:
             return default_price, "Pricing region mapping missing; using fallback pricing.", 30
 
-        attempts: List[List[Dict[str, str]]] = [
+        attempts: list[list[dict[str, str]]] = [
             [
                 {"Field": "location", "Value": location},
                 {"Field": "productFamily", "Value": "Provisioned Throughput"},
@@ -983,8 +983,8 @@ class PricingResolver:
         *,
         region: str,
         default_price: float,
-        call_exceptions: Tuple[type[Exception], ...],
-    ) -> Tuple[float, str, int]:
+        call_exceptions: tuple[type[Exception], ...],
+    ) -> tuple[float, str, int]:
         """Resolve RDS snapshot storage unit price (GB-Mo)."""
         pricing = self._pricing()
         if pricing is None:
@@ -1002,7 +1002,7 @@ class PricingResolver:
             return default_price, "Pricing lookup failed/unknown; using default price.", 30
 
         try:
-            price = float(getattr(quote, "unit_price_usd"))
+            price = float(quote.unit_price_usd)
         except (AttributeError, TypeError, ValueError):
             return default_price, "Pricing lookup failed/unknown; using default price.", 30
 
@@ -1031,7 +1031,7 @@ class PricingResolver:
         no_service_note: str,
         lookup_failed_note: str,
         resolved_note_template: str,
-    ) -> Tuple[float, str, int]:
+    ) -> tuple[float, str, int]:
         """Resolve AWS Backup storage unit price (GB-Mo)."""
         pricing = self._pricing()
         if pricing is None:
@@ -1048,7 +1048,7 @@ class PricingResolver:
                     for k, v in kwargs.items()
                 }
             )
-        rendered_args: List[Tuple[Any, ...]] = []
+        rendered_args: list[tuple[Any, ...]] = []
         for args in args_variants:
             rendered_args.append(
                 tuple(tier if a == "{tier}" else storage_class if a == "{storage_class}" else region if a == "{region}" else a for a in args)

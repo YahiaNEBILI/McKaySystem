@@ -3,13 +3,12 @@
 Provides run management endpoints for querying runs and computing diffs.
 """
 
-from typing import Any, Dict, List
+from typing import Any
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify
 
-from apps.backend.db import db_conn, fetch_one_dict_conn, fetch_all_dict_conn
-from apps.flask_api.utils import _ok, _err, _json, _require_scope_from_query
-
+from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.utils import _json, _require_scope_from_query
 
 # Create the blueprint
 runs_bp = Blueprint("runs", __name__)
@@ -147,11 +146,11 @@ def api_runs_diff_latest() -> Any:
                 (tenant_id, workspace, run_old, tenant_id, workspace, run_new, tenant_id, workspace),
             )
 
-        def _rollup(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        def _rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
             total = 0
-            by_cat: Dict[str, int] = {}
-            by_check: Dict[str, int] = {}
-            by_svc: Dict[str, int] = {}
+            by_cat: dict[str, int] = {}
+            by_check: dict[str, int] = {}
+            by_svc: dict[str, int] = {}
             for r in rows:
                 c = int(r.get("count") or 0)
                 total += c

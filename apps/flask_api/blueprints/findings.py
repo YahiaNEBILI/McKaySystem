@@ -4,35 +4,31 @@ Provides finding query and management endpoints.
 """
 
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from flask import Blueprint, request
 
-from apps.backend.db import db_conn, fetch_one_dict_conn, fetch_all_dict_conn, execute_conn
+from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.utils import (
-    _ok,
-    _err,
-    _json,
-    _q,
-    _require_scope_from_query,
-    _require_scope_from_json,
-    _parse_int,
-    _parse_csv_list,
-    _parse_iso8601_dt,
-    _coerce_optional_text,
-    _payload_optional_text,
     _MISSING,
+    _coerce_optional_text,
     _coerce_positive_int,
-    _coerce_non_negative_int,
+    _err,
+    _ok,
+    _parse_csv_list,
+    _parse_int,
+    _payload_optional_text,
+    _q,
+    _require_scope_from_json,
+    _require_scope_from_query,
 )
-
 
 # Create the blueprint
 findings_bp = Blueprint("findings", __name__)
 
 
-def _add_any_filter(where: List[str], params: List[Any], field: str, values: Optional[List[str]]) -> None:
+def _add_any_filter(where: list[str], params: list[Any], field: str, values: list[str] | None) -> None:
     """Add ANY filter to WHERE clause."""
     if not values:
         return
@@ -47,17 +43,17 @@ def _audit_log_event(
     workspace: str,
     entity_type: str,
     entity_id: str,
-    fingerprint: Optional[str],
+    fingerprint: str | None,
     event_type: str,
     event_category: str,
-    previous_value: Optional[Dict[str, Any]],
-    new_value: Optional[Dict[str, Any]],
-    actor_id: Optional[str],
-    actor_email: Optional[str],
-    actor_name: Optional[str],
+    previous_value: dict[str, Any] | None,
+    new_value: dict[str, Any] | None,
+    actor_id: str | None,
+    actor_email: str | None,
+    actor_name: str | None,
     source: str,
-    run_id: Optional[str] = None,
-    correlation_id: Optional[str] = None,
+    run_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Best-effort append-only write to audit_log, isolated by savepoint."""
     try:
@@ -184,7 +180,7 @@ def _ensure_finding_governance_row(conn: Any, *, tenant_id: str, workspace: str,
 
 def _fetch_governance_owner_team(
     conn: Any, *, tenant_id: str, workspace: str, fingerprint: str
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Fetch owner/team governance fields for one finding."""
     return fetch_one_dict_conn(
         conn,
@@ -203,9 +199,9 @@ def _update_finding_owner(
     tenant_id: str,
     workspace: str,
     fingerprint: str,
-    owner_id: Optional[str],
-    owner_email: Optional[str],
-    owner_name: Optional[str],
+    owner_id: str | None,
+    owner_email: str | None,
+    owner_name: str | None,
 ) -> None:
     """Update owner fields for one finding governance row."""
     execute_conn(
@@ -228,7 +224,7 @@ def _update_finding_team(
     tenant_id: str,
     workspace: str,
     fingerprint: str,
-    team_id: Optional[str],
+    team_id: str | None,
 ) -> None:
     """Update team assignment for one finding governance row."""
     execute_conn(
@@ -245,7 +241,7 @@ def _update_finding_team(
 
 def _fetch_finding_effective_state(
     conn: Any, *, tenant_id: str, workspace: str, fingerprint: str
-) -> Optional[str]:
+) -> str | None:
     """Fetch effective finding lifecycle state from read model."""
     row = fetch_one_dict_conn(
         conn,
@@ -266,7 +262,7 @@ def _fetch_finding_effective_state(
 
 def _fetch_governance_sla(
     conn: Any, *, tenant_id: str, workspace: str, fingerprint: str
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Fetch SLA governance fields for one finding."""
     return fetch_one_dict_conn(
         conn,
@@ -293,9 +289,9 @@ def _apply_finding_sla_extension(
     workspace: str,
     fingerprint: str,
     extend_days: int,
-    reason: Optional[str],
+    reason: str | None,
     event_ts: datetime,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Apply SLA extension and return resulting SLA governance fields."""
     extension_seconds = int(extend_days) * 86400
     execute_conn(
@@ -385,7 +381,7 @@ def api_findings() -> Any:
             raise ValueError("order must be 'savings_desc' or 'detected_desc'")
 
         where = ["tenant_id = %s", "workspace = %s"]
-        params: List[Any] = [tenant_id, workspace]
+        params: list[Any] = [tenant_id, workspace]
 
         _add_any_filter(where, params, "effective_state", effective_states)
         _add_any_filter(where, params, "severity", severities)
@@ -482,7 +478,7 @@ def api_findings_sla_breached() -> Any:
         query_str = _q("q")
 
         where = ["tenant_id = %s", "workspace = %s", "sla_status = 'breached'"]
-        params: List[Any] = [tenant_id, workspace]
+        params: list[Any] = [tenant_id, workspace]
 
         _add_any_filter(where, params, "severity", severities)
         _add_any_filter(where, params, "service", services)
@@ -571,7 +567,7 @@ def api_findings_aging() -> Any:
 
         min_days = _parse_int(_q("min_days"), default=0, min_v=0, max_v=36500)
         max_days_raw = _q("max_days")
-        max_days: Optional[int] = None
+        max_days: int | None = None
         if max_days_raw is not None and max_days_raw != "":
             max_days = _parse_int(max_days_raw, default=0, min_v=0, max_v=36500)
             if max_days < min_days:
@@ -590,7 +586,7 @@ def api_findings_aging() -> Any:
         query_str = _q("q")
 
         where = ["tenant_id = %s", "workspace = %s", f"{age_col} IS NOT NULL", f"{age_col} >= %s"]
-        params: List[Any] = [tenant_id, workspace, min_days]
+        params: list[Any] = [tenant_id, workspace, min_days]
 
         if max_days is not None:
             where.append(f"{age_col} <= %s")
@@ -918,7 +914,7 @@ def api_finding_extend_sla(fingerprint: str) -> Any:
         extend_days = _coerce_positive_int(payload.get("extend_days"), field_name="extend_days")
         reason = _coerce_optional_text(payload.get("reason"))
         updated_by = _coerce_optional_text(payload.get("updated_by"))
-        event_ts = datetime.now(timezone.utc)
+        event_ts = datetime.now(UTC)
 
         with db_conn() as conn:
             if not _finding_exists(conn, tenant_id=tenant_id, workspace=workspace, fingerprint=fingerprint):

@@ -55,24 +55,25 @@ registered via ``@register_checker`` for automatic discovery.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Optional, Set, Tuple
+from typing import Any
 
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
-    PricingResolver,
-    build_scope,
     AwsAccountContext,
+    PricingResolver,
     arn_region,
+    build_scope,
     get_logger,
     is_suppressed,
     money,
+    normalize_tags,
     now_utc,
     safe_float,
     safe_region_from_client,
     utc,
-    normalize_tags,
 )
 from checks.aws.defaults import RDS_SNAPSHOTS_GB_MONTH_PRICE_USD, RDS_SNAPSHOTS_STALE_DAYS
 from checks.registry import Bootstrap, register_checker
@@ -85,7 +86,7 @@ _LOGGER = get_logger("rds_snapshots_cleanup")
 SUPPRESS_TAG_KEYS = {"retain", "legal-hold", "backup-policy"}
 
 
- 
+
 
 
 def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
@@ -188,7 +189,7 @@ class RDSSnapshotsCleanupChecker:
         self,
         ctx,
         snap: dict,
-        instances: Set[str],
+        instances: set[str],
         cutoff: datetime,
         region: str,
         usd_per_gb_month: float,
@@ -241,7 +242,7 @@ class RDSSnapshotsCleanupChecker:
         self,
         ctx,
         snap: dict,
-        clusters: Set[str],
+        clusters: set[str],
         cutoff: datetime,
         region: str,
         usd_per_gb_month: float,
@@ -300,7 +301,7 @@ class RDSSnapshotsCleanupChecker:
         usd_per_gb_month: float,
         pricing_notes: str,
         pricing_conf: int,
-    ) -> Tuple[Optional[float], Optional[float], Optional[int], str]:
+    ) -> tuple[float | None, float | None, int | None, str]:
         """Return (estimated_monthly_cost, estimated_monthly_savings, confidence, notes).
 
         We estimate storage cost for snapshots as:
@@ -352,11 +353,11 @@ class RDSSnapshotsCleanupChecker:
         self,
         ctx,
         snapshot_id: str,
-        created: Optional[datetime],
+        created: datetime | None,
         region: str,
         resource_type: str,
         resource_arn: str,
-        est: Tuple[Optional[float], Optional[float], Optional[int], str],
+        est: tuple[float | None, float | None, int | None, str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
@@ -387,7 +388,7 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
-        est: Tuple[Optional[float], Optional[float], Optional[int], str],
+        est: tuple[float | None, float | None, int | None, str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
@@ -443,8 +444,8 @@ class RDSSnapshotsCleanupChecker:
 
     # ---------- AWS listing helpers ----------
 
-    def _list_db_instances(self, rds) -> Set[str]:
-        ids: Set[str] = set()
+    def _list_db_instances(self, rds) -> set[str]:
+        ids: set[str] = set()
         paginator = rds.get_paginator("describe_db_instances")
         for page in paginator.paginate():
             for db in page.get("DBInstances", []):
@@ -453,8 +454,8 @@ class RDSSnapshotsCleanupChecker:
                     ids.add(str(ident))
         return ids
 
-    def _list_db_clusters(self, rds) -> Set[str]:
-        ids: Set[str] = set()
+    def _list_db_clusters(self, rds) -> set[str]:
+        ids: set[str] = set()
         paginator = rds.get_paginator("describe_db_clusters")
         for page in paginator.paginate():
             for c in page.get("DBClusters", []):
@@ -466,14 +467,12 @@ class RDSSnapshotsCleanupChecker:
     def _list_db_snapshots(self, rds):
         paginator = rds.get_paginator("describe_db_snapshots")
         for page in paginator.paginate():
-            for snap in page.get("DBSnapshots", []):
-                yield snap
+            yield from page.get("DBSnapshots", [])
 
     def _list_cluster_snapshots(self, rds):
         paginator = rds.get_paginator("describe_db_cluster_snapshots")
         for page in paginator.paginate():
-            for snap in page.get("DBClusterSnapshots", []):
-                yield snap
+            yield from page.get("DBClusterSnapshots", [])
 
 
 @register_checker("checks.aws.rds_snapshots_cleanup:RDSSnapshotsCleanupChecker")
