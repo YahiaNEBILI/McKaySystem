@@ -38,11 +38,22 @@ def _run_pylint(paths: list[str]) -> list[dict[str, Any]]:
     return json.loads(stdout)
 
 
-def _write_baseline(path: Path, *, max_messages: int, paths: list[str]) -> None:
+def _write_baseline(
+    path: Path,
+    *,
+    max_messages: int,
+    paths: list[str],
+    symbol_max_messages: dict[str, int] | None = None,
+) -> None:
     payload = {
         "max_messages": int(max_messages),
         "paths": paths,
     }
+    if symbol_max_messages:
+        payload["symbol_max_messages"] = {
+            str(k): int(v)
+            for k, v in symbol_max_messages.items()
+        }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -73,11 +84,25 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("Baseline must include non-empty 'paths'.")
 
     max_messages = int(baseline.get("max_messages", 0))
+    symbol_limits = {
+        str(k): int(v)
+        for k, v in dict(baseline.get("symbol_max_messages", {})).items()
+    }
     messages = _run_pylint(paths)
     current = len(messages)
+    symbol_counts = Counter(str(msg.get("symbol") or "unknown") for msg in messages)
 
     if args.update_baseline:
-        _write_baseline(baseline_path, max_messages=current, paths=paths)
+        updated_symbols = {
+            symbol: int(symbol_counts.get(symbol, 0))
+            for symbol in symbol_limits
+        }
+        _write_baseline(
+            baseline_path,
+            max_messages=current,
+            paths=paths,
+            symbol_max_messages=updated_symbols or None,
+        )
         print(f"[pylint-ratchet] baseline updated: {baseline_path} max_messages={current}")
         return 0
 
@@ -91,6 +116,16 @@ def main(argv: list[str] | None = None) -> int:
             "Reduce messages or refresh baseline intentionally."
         )
         return 1
+
+    for symbol, limit in sorted(symbol_limits.items()):
+        current_symbol = int(symbol_counts.get(symbol, 0))
+        print(f"[pylint-ratchet] symbol: {symbol} baseline={limit} current={current_symbol}")
+        if current_symbol > limit:
+            print(
+                "[pylint-ratchet] FAIL: pylint symbol regression detected for "
+                f"{symbol!r}. Reduce findings or refresh baseline intentionally."
+            )
+            return 1
 
     print("[pylint-ratchet] PASS: no regression.")
     return 0
