@@ -1,11 +1,11 @@
--- rule_id: aws.ec2.correlation.ebs_unattached_unencrypted
+-- rule_id: aws.ec2.correlation.ebs.unattached.unencrypted
 -- name: EBS unattached + unencrypted volume (correlated)
 -- enabled: true
--- required_check_ids: aws.ec2.ebs.unattached_volume, aws.ec2.ebs.volume_unencrypted
+-- required_check_ids: aws.ec2.ebs.unattached.volume, aws.ec2.ebs.volume.unencrypted
 
 -- Correlates cost + compliance:
---   - aws.ec2.ebs.unattached_volume  (cost/savings signal)
---   - aws.ec2.ebs.volume_unencrypted (governance/compliance signal)
+--   - aws.ec2.ebs.unattached.volume  (cost/savings signal)
+--   - aws.ec2.ebs.volume.unencrypted (governance/compliance signal)
 --
 -- Emits a meta-finding per volume when BOTH signals are present for the same
 -- tenant/workspace/run/account/region/volume_id.
@@ -24,21 +24,21 @@ vol_signals AS (
     scope.resource_id AS volume_id,
     scope.resource_arn AS volume_arn,
 
-    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached_volume' THEN 1 ELSE 0 END) AS sig_unattached,
-    MAX(CASE WHEN check_id = 'aws.ec2.ebs.volume_unencrypted' THEN 1 ELSE 0 END) AS sig_unencrypted,
+    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached.volume' THEN 1 ELSE 0 END) AS sig_unattached,
+    MAX(CASE WHEN check_id = 'aws.ec2.ebs.volume.unencrypted' THEN 1 ELSE 0 END) AS sig_unencrypted,
 
     -- prefer cost estimate from unattached finding (monthly_cost is same as savings there)
-    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached_volume' THEN COALESCE(estimated.monthly_cost, 0) ELSE 0 END) AS unattached_monthly_cost,
+    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached.volume' THEN COALESCE(estimated.monthly_cost, 0) ELSE 0 END) AS unattached_monthly_cost,
 
     LIST(DISTINCT fingerprint) AS source_fingerprints,
 
     -- helpful dimensions for UI/message
-    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached_volume' THEN COALESCE(dimensions['volume_type'], '') ELSE '' END) AS volume_type,
-    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached_volume' THEN COALESCE(dimensions['size_gb'], '') ELSE '' END) AS size_gb,
-    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached_volume' THEN COALESCE(dimensions['age_days'], '') ELSE '' END) AS age_days
+    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached.volume' THEN COALESCE(dimensions['volume_type'], '') ELSE '' END) AS volume_type,
+    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached.volume' THEN COALESCE(dimensions['size_gb'], '') ELSE '' END) AS size_gb,
+    MAX(CASE WHEN check_id = 'aws.ec2.ebs.unattached.volume' THEN COALESCE(dimensions['age_days'], '') ELSE '' END) AS age_days
   FROM rule_input
   WHERE status = 'fail'
-    AND check_id IN ('aws.ec2.ebs.unattached_volume', 'aws.ec2.ebs.volume_unencrypted')
+    AND check_id IN ('aws.ec2.ebs.unattached.volume', 'aws.ec2.ebs.volume.unencrypted')
     AND scope.resource_type = 'ebs_volume'
   GROUP BY ALL
 )
@@ -64,7 +64,7 @@ SELECT
     resource_arn := v.volume_arn
   ) AS scope,
 
-  'aws.ec2.correlation.ebs_unattached_unencrypted' AS check_id,
+  'aws.ec2.correlation.ebs.unattached.unencrypted' AS check_id,
   'EBS unattached + unencrypted volume (correlated)' AS check_name,
   'governance' AS category,
   'storage' AS sub_category,
@@ -106,7 +106,7 @@ SELECT
     confidence := CASE WHEN v.unattached_monthly_cost > 0 THEN 55 ELSE 30 END,
     notes := CASE
       WHEN v.unattached_monthly_cost > 0
-      THEN 'Cost derived from aws.ec2.ebs.unattached_volume estimate.'
+      THEN 'Cost derived from aws.ec2.ebs.unattached.volume estimate.'
       ELSE 'No cost estimate provided by source findings.'
     END
   ) AS estimated,

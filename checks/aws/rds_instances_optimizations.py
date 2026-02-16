@@ -25,23 +25,42 @@ and a coarse period (default 1 day) to keep the pipeline fast and scalable.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from botocore.exceptions import ClientError
 
 import checks.aws._common as common
-
 from checks.aws._common import (
-    build_scope,
     AwsAccountContext,
-    normalize_tags,
+    build_scope,
+    get_logger,
     money,
+    normalize_tags,
     safe_region_from_client,
 )
+from checks.aws.defaults import (
+    RDS_MARIADB_MIN_VERSION,
+    RDS_MYSQL_BLOCKED_PREFIXES,
+    RDS_OVERPROV_MIN_EXCESS_GB,
+    RDS_OVERPROV_USED_RATIO_THRESHOLD,
+    RDS_POSTGRES_MIN_VERSION,
+    RDS_REPLICA_MIN_COVERAGE_RATIO,
+    RDS_REPLICA_MIN_DATAPOINTS,
+    RDS_REPLICA_PERIOD_SECONDS,
+    RDS_REPLICA_READ_IOPS_P95_THRESHOLD,
+    RDS_REPLICA_UNUSED_WINDOW_DAYS,
+    RDS_STORAGE_GB_MONTH_PRICE_USD,
+    RDS_STORAGE_MIN_COVERAGE_RATIO,
+    RDS_STORAGE_PERIOD_SECONDS,
+    RDS_STORAGE_WINDOW_DAYS,
+)
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
 
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Severity
+# Logger for this module
+_LOGGER = get_logger("rds_instances_optimizations")
 
 _NONPROD_VALUES = {
     "dev", "test", "nprd", "staging", "nonprod", "non-prod", "sandbox", "qa", "uat"
@@ -67,7 +86,7 @@ def _arn_partition(arn: str) -> str:
         parts = arn.split(":")
         if len(parts) >= 2 and parts[0] == "arn":
             return parts[1] or ""
-    except Exception:  # pragma: no cover
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover
         return ""
     return ""
 
@@ -89,7 +108,7 @@ def _resolve_rds_instance_hour_price(
     deployment_option: str,
     engine: str,
     license_model: str,
-) -> Tuple[Optional[float], str, int]:
+) -> tuple[float | None, str, int]:
     """Best-effort pricing lookup for an RDS instance hourly on-demand price.
 
     Returns (hourly_price_usd, notes, confidence).
@@ -98,54 +117,26 @@ def _resolve_rds_instance_hour_price(
     - confidence is a rough indicator used in findings (0-100).
     """
 
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
-    if pricing is None:
-        return (None, "PricingService unavailable; leaving instance pricing unknown.", 20)
-
-    try:
-        quote = pricing.rds_instance_hour(
-            region=region,
-            db_instance_class=db_instance_class,
-            deployment_option=deployment_option,
-            database_engine=engine or None,
-            license_model=license_model or None,
-        )
-    except Exception:
-        quote = None
-
-    if quote is None:
-        return (None, "Pricing lookup failed/unknown; leaving instance pricing unknown.", 20)
-
-    conf = 70 if str(quote.source) == "pricing_api" else 60
-    return (
-        float(quote.unit_price_usd),
-        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-        conf,
+    return common.PricingResolver(ctx).resolve_rds_instance_hour_price(
+        region=region,
+        db_instance_class=db_instance_class,
+        deployment_option=deployment_option,
+        engine=engine,
+        license_model=license_model,
+        call_exceptions=(AttributeError, TypeError, ValueError),
     )
 
 
-def _percentile(values: Sequence[float], p: float) -> Optional[float]:
-    if not values:
-        return None
-    vals = sorted(values)
-    if p <= 0:
-        return vals[0]
-    if p >= 100:
-        return vals[-1]
-    k = (len(vals) - 1) * (p / 100.0)
-    f = int(k)
-    c = min(f + 1, len(vals) - 1)
-    if f == c:
-        return vals[f]
-    return vals[f] * (c - k) + vals[c] * (k - f)
+def _percentile(values: Sequence[float], p: float) -> float | None:
+    return common.percentile(values, p, method="linear")
 
 
-def _extract_tags(tag_list: Sequence[Dict[str, Any]]) -> Dict[str, str]:
+def _extract_tags(tag_list: Sequence[dict[str, Any]]) -> dict[str, str]:
     # Normalize into lower-cased keys/values for consistent suppression and environment checks.
     return normalize_tags(tag_list)
 
 
-def _is_non_prod(tags: Dict[str, str]) -> bool:
+def _is_non_prod(tags: dict[str, str]) -> bool:
     # tags are already normalized by normalize_tags (lower-cased keys and values)
     for k, v in tags.items():
         if k in _ENV_TAG_KEYS and v in {"prod", "production"}:
@@ -169,7 +160,7 @@ def _norm_engine(engine: str) -> str:
     return (engine or "").strip().lower()
 
 
-def _parse_major_minor(version: str) -> Optional[Tuple[int, int]]:
+def _parse_major_minor(version: str) -> tuple[int, int] | None:
     s = (version or "").strip()
     if not s:
         return None
@@ -191,6 +182,7 @@ def _parse_major_minor(version: str) -> Optional[Tuple[int, int]]:
 
         return (_lead_int(major_txt), _lead_int(minor_txt))
     except ValueError:
+        _LOGGER.warning("Failed to parse engine version: %s", version)
         return None
 
 
@@ -199,8 +191,8 @@ def _engine_needs_upgrade(
     engine: str,
     engine_version: str,
     mysql_blocked_prefixes: Sequence[str],
-    postgres_min_version: Optional[Tuple[int, int]],
-    mariadb_min_version: Optional[Tuple[int, int]],
+    postgres_min_version: tuple[int, int] | None,
+    mariadb_min_version: tuple[int, int] | None,
 ) -> bool:
     """
     Return True when engine/version is flagged as outdated by local policy.
@@ -238,7 +230,7 @@ def _is_aurora_engine(engine: str) -> bool:
     return "aurora" in (engine or "").lower()
 
 
-def _tag_suppresses_replica_check(tags: Dict[str, str]) -> bool:
+def _tag_suppresses_replica_check(tags: dict[str, str]) -> bool:
     # Any explicit keep/retain flags
     for k, v in tags.items():
         kk = str(k or "").strip().lower()
@@ -267,7 +259,7 @@ class _CloudWatchBatchMetrics:
     def __init__(self, cw: Any) -> None:
         self._cw = cw
         # Cache within a run: (metric, stat, period, start_iso, end_iso, instance_id) -> values
-        self._cache: Dict[Tuple[str, str, int, str, str, str], List[float]] = {}
+        self._cache: dict[tuple[str, str, int, str, str, str], list[float]] = {}
 
     def fetch_values_by_instance(
         self,
@@ -279,12 +271,12 @@ class _CloudWatchBatchMetrics:
         start: datetime,
         end: datetime,
         instance_ids: Sequence[str],
-    ) -> Dict[str, List[float]]:
+    ) -> dict[str, list[float]]:
         start_key = start.isoformat()
         end_key = end.isoformat()
 
-        results: Dict[str, List[float]] = {}
-        to_query: List[str] = []
+        results: dict[str, list[float]] = {}
+        to_query: list[str] = []
 
         for iid in instance_ids:
             key = (metric_name, stat, period, start_key, end_key, iid)
@@ -302,8 +294,8 @@ class _CloudWatchBatchMetrics:
         batch_size = 400
         for i in range(0, len(to_query), batch_size):
             batch = to_query[i : i + batch_size]
-            metric_data_queries: List[Dict[str, Any]] = []
-            id_to_instance: Dict[str, str] = {}
+            metric_data_queries: list[dict[str, Any]] = []
+            id_to_instance: dict[str, str] = {}
 
             for idx, iid in enumerate(batch):
                 qid = f"m{idx}"
@@ -324,10 +316,10 @@ class _CloudWatchBatchMetrics:
                     }
                 )
 
-            next_token: Optional[str] = None
+            next_token: str | None = None
             # Paginate GetMetricData if needed
             while True:
-                kwargs: Dict[str, Any] = {
+                kwargs: dict[str, Any] = {
                     "MetricDataQueries": metric_data_queries,
                     "StartTime": start,
                     "EndTime": end,
@@ -343,7 +335,7 @@ class _CloudWatchBatchMetrics:
                     if not iid:
                         continue
                     vals = r.get("Values", []) or []
-                    numbers: List[float] = []
+                    numbers: list[float] = []
                     for v in vals:
                         if isinstance(v, (int, float)):
                             numbers.append(float(v))
@@ -373,21 +365,21 @@ class RDSInstancesOptimizationsChecker:
         self,
         *,
         account: AwsAccountContext,
-        storage_gb_month_price_usd: float = 0.115,
-        storage_window_days: int = 14,
-        storage_period_seconds: int = 86400,
-        overprov_used_ratio_threshold: float = 0.40,
-        overprov_min_excess_gb: float = 20.0,
-        replica_unused_window_days: int = 14,
-        replica_period_seconds: int = 86400,
-        replica_read_iops_p95_threshold: float = 0.1,
-        replica_min_datapoints: int = 7,  # at least ~1 week with daily period
-        storage_min_datapoints: Optional[int] = None,
-        storage_min_coverage_ratio: float = 0.60,
-        replica_min_coverage_ratio: float = 0.60,
-        mysql_blocked_prefixes: Sequence[str] = ("5.6", "5.7"),
-        postgres_min_version: Optional[tuple[int, int]] = (12, 0),
-        mariadb_min_version: Optional[tuple[int, int]]= (10, 6),
+        storage_gb_month_price_usd: float = RDS_STORAGE_GB_MONTH_PRICE_USD,
+        storage_window_days: int = RDS_STORAGE_WINDOW_DAYS,
+        storage_period_seconds: int = RDS_STORAGE_PERIOD_SECONDS,
+        overprov_used_ratio_threshold: float = RDS_OVERPROV_USED_RATIO_THRESHOLD,
+        overprov_min_excess_gb: float = RDS_OVERPROV_MIN_EXCESS_GB,
+        replica_unused_window_days: int = RDS_REPLICA_UNUSED_WINDOW_DAYS,
+        replica_period_seconds: int = RDS_REPLICA_PERIOD_SECONDS,
+        replica_read_iops_p95_threshold: float = RDS_REPLICA_READ_IOPS_P95_THRESHOLD,
+        replica_min_datapoints: int = RDS_REPLICA_MIN_DATAPOINTS,  # at least ~1 week with daily period
+        storage_min_datapoints: int | None = None,
+        storage_min_coverage_ratio: float = RDS_STORAGE_MIN_COVERAGE_RATIO,
+        replica_min_coverage_ratio: float = RDS_REPLICA_MIN_COVERAGE_RATIO,
+        mysql_blocked_prefixes: Sequence[str] = RDS_MYSQL_BLOCKED_PREFIXES,
+        postgres_min_version: tuple[int, int] | None = RDS_POSTGRES_MIN_VERSION,
+        mariadb_min_version: tuple[int, int] | None = RDS_MARIADB_MIN_VERSION,
     ) -> None:
         self._account = account
         self._storage_gb_month_price_usd = float(storage_gb_month_price_usd)
@@ -416,32 +408,11 @@ class RDSInstancesOptimizationsChecker:
             else None
         )
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
-        if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
-            raise RuntimeError("RDSInstancesOptimizationsChecker requires ctx.services.rds")
+    @staticmethod
+    def _build_tag_loader(rds: Any) -> Callable[[str], dict[str, str]]:
+        tags_by_arn: dict[str, dict[str, str]] = {}
 
-        rds = ctx.services.rds
-        cw = getattr(ctx.services, "cloudwatch", None)
-        region = safe_region_from_client(rds)
-
-        try:
-            instances = list(self._list_db_instances(rds))
-        except ClientError as exc:
-            yield self._access_error(ctx, region, "describe_db_instances", exc)
-            return
-
-        # Pre-fetch metrics in batches for performance.
-        metric_fetcher: Optional[_CloudWatchBatchMetrics] = _CloudWatchBatchMetrics(cw) if cw is not None else None
-
-        # Build lists for metric queries.
-        ids_for_storage: List[str] = []
-        ids_for_replicas: List[str] = []
-        inst_by_id: Dict[str, Dict[str, Any]] = {}
-
-        # Cache tags by ARN (list_tags_for_resource can be throttled).
-        tags_by_arn: Dict[str, Dict[str, str]] = {}
-
-        def get_tags(arn: str) -> Dict[str, str]:
+        def _load_tags(arn: str) -> dict[str, str]:
             if not arn:
                 return {}
             if arn in tags_by_arn:
@@ -454,9 +425,20 @@ class RDSInstancesOptimizationsChecker:
             tags_by_arn[arn] = tags
             return tags
 
-        # First pass: collect instances and identify metric candidates.
-        replica_candidates: List[str] = []
-        now_ts = common.now_utc()
+        return _load_tags
+
+    def _collect_metric_candidates(
+        self,
+        *,
+        instances: Sequence[dict[str, Any]],
+        metric_fetcher: _CloudWatchBatchMetrics | None,
+        now_ts: datetime,
+        get_tags: Callable[[str], dict[str, str]],
+    ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+        ids_for_storage: list[str] = []
+        ids_for_replicas: list[str] = []
+        inst_by_id: dict[str, dict[str, Any]] = {}
+        replica_candidates: list[str] = []
 
         for inst in instances:
             instance_id = str(inst.get("DBInstanceIdentifier") or "")
@@ -474,12 +456,12 @@ class RDSInstancesOptimizationsChecker:
                     continue
                 created = inst.get("InstanceCreateTime")
                 if isinstance(created, datetime):
-                    created_ts = created.replace(tzinfo=created.tzinfo or timezone.utc)
+                    created_ts = created.replace(tzinfo=created.tzinfo or UTC)
                     if created_ts > (now_ts - timedelta(days=7)):
                         continue
                 replica_candidates.append(instance_id)
 
-        # Resolve replica suppression tags *before* querying CloudWatch to reduce noise and cost.
+        # Resolve replica suppression tags before querying CloudWatch.
         for instance_id in replica_candidates:
             inst = inst_by_id.get(instance_id, {})
             arn = str(inst.get("DBInstanceArn") or "")
@@ -488,13 +470,20 @@ class RDSInstancesOptimizationsChecker:
                 continue
             ids_for_replicas.append(instance_id)
 
-        # Tags are only needed for checks that use them (Multi-AZ non-prod, replica suppression),
-        # so we avoid fetching tags for every instance.
-        tags_by_id: Dict[str, Dict[str, str]] = {}
+        return inst_by_id, ids_for_storage, ids_for_replicas
 
-        storage_metrics: Dict[str, List[float]] = {}
-        replica_read_iops: Dict[str, List[float]] = {}
-        replica_connections: Dict[str, List[float]] = {}
+    def _fetch_prefetched_metrics(
+        self,
+        *,
+        ctx: RunContext,
+        metric_fetcher: _CloudWatchBatchMetrics | None,
+        ids_for_storage: Sequence[str],
+        ids_for_replicas: Sequence[str],
+        region: str,
+    ) -> tuple[dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], FindingDraft | None]:
+        storage_metrics: dict[str, list[float]] = {}
+        replica_read_iops: dict[str, list[float]] = {}
+        replica_connections: dict[str, list[float]] = {}
 
         if metric_fetcher is not None and ids_for_storage:
             end = common.now_utc()
@@ -510,8 +499,12 @@ class RDSInstancesOptimizationsChecker:
                     instance_ids=ids_for_storage,
                 )
             except ClientError as exc:
-                yield self._access_error(ctx, region, "cloudwatch:GetMetricData FreeStorageSpace", exc)
-                storage_metrics = {iid: [] for iid in ids_for_storage}
+                return (
+                    {iid: [] for iid in ids_for_storage},
+                    replica_read_iops,
+                    replica_connections,
+                    self._access_error(ctx, region, "cloudwatch:GetMetricData FreeStorageSpace", exc),
+                )
 
         if metric_fetcher is not None and ids_for_replicas:
             end = common.now_utc()
@@ -526,7 +519,6 @@ class RDSInstancesOptimizationsChecker:
                     end=end,
                     instance_ids=ids_for_replicas,
                 )
-                # Connections is optional evidence; never required to trigger.
                 replica_connections = metric_fetcher.fetch_values_by_instance(
                     namespace="AWS/RDS",
                     metric_name="DatabaseConnections",
@@ -537,9 +529,58 @@ class RDSInstancesOptimizationsChecker:
                     instance_ids=ids_for_replicas,
                 )
             except ClientError as exc:
-                yield self._access_error(ctx, region, "cloudwatch:GetMetricData replica metrics", exc)
-                replica_read_iops = {iid: [] for iid in ids_for_replicas}
-                replica_connections = {iid: [] for iid in ids_for_replicas}
+                return (
+                    storage_metrics,
+                    {iid: [] for iid in ids_for_replicas},
+                    {iid: [] for iid in ids_for_replicas},
+                    self._access_error(ctx, region, "cloudwatch:GetMetricData replica metrics", exc),
+                )
+
+        return storage_metrics, replica_read_iops, replica_connections, None
+
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting RDS instances optimizations check")
+        if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
+            raise RuntimeError("RDSInstancesOptimizationsChecker requires ctx.services.rds")
+
+        rds = ctx.services.rds
+        cw = getattr(ctx.services, "cloudwatch", None)
+        region = safe_region_from_client(rds)
+        _LOGGER.debug("RDS check running", extra={"region": region})
+
+        try:
+            instances = list(self._list_db_instances(rds))
+        except ClientError as exc:
+            yield self._access_error(ctx, region, "describe_db_instances", exc)
+            return
+
+        _LOGGER.info("Listed RDS instances", extra={"count": len(instances), "region": region})
+
+        # Pre-fetch metrics in batches for performance.
+        metric_fetcher: _CloudWatchBatchMetrics | None = _CloudWatchBatchMetrics(cw) if cw is not None else None
+
+        get_tags = self._build_tag_loader(rds)
+        now_ts = common.now_utc()
+        inst_by_id, ids_for_storage, ids_for_replicas = self._collect_metric_candidates(
+            instances=instances,
+            metric_fetcher=metric_fetcher,
+            now_ts=now_ts,
+            get_tags=get_tags,
+        )
+
+        # Tags are only needed for checks that use them (Multi-AZ non-prod, replica suppression),
+        # so we avoid fetching tags for every instance.
+        tags_by_id: dict[str, dict[str, str]] = {}
+
+        storage_metrics, replica_read_iops, replica_connections, metric_access_error = self._fetch_prefetched_metrics(
+            ctx=ctx,
+            metric_fetcher=metric_fetcher,
+            ids_for_storage=ids_for_storage,
+            ids_for_replicas=ids_for_replicas,
+            region=region,
+        )
+        if metric_access_error is not None:
+            yield metric_access_error
 
         # Evaluate instance-level checks
         for instance_id, inst in inst_by_id.items():
@@ -559,14 +600,14 @@ class RDSInstancesOptimizationsChecker:
                 replica_conn_values=replica_connections.get(instance_id, []),
             )
 
-    def _list_db_instances(self, rds: Any) -> Iterator[Dict[str, Any]]:
+    def _list_db_instances(self, rds: Any) -> Iterator[dict[str, Any]]:
         paginator = rds.get_paginator("describe_db_instances")
         for page in paginator.paginate():
             for inst in page.get("DBInstances", []) or []:
                 if isinstance(inst, dict):
                     yield inst
 
-    def _is_read_replica(self, inst: Dict[str, Any]) -> bool:
+    def _is_read_replica(self, inst: dict[str, Any]) -> bool:
         # On replicas, this key is typically present.
         src = inst.get("ReadReplicaSourceDBInstanceIdentifier")
         if src:
@@ -574,21 +615,16 @@ class RDSInstancesOptimizationsChecker:
         # Some cases have ReadReplicaDBInstanceIdentifiers on primary, not the replica.
         return False
 
-    def _evaluate_instance(
+    def _build_instance_scope(
         self,
         *,
-        ctx: Any,
-        inst: Dict[str, Any],
-        tags: Dict[str, str],
+        ctx: RunContext,
         region: str,
-        free_storage_values: Sequence[float],
-        replica_read_iops_values: Sequence[float],
-        replica_conn_values: Sequence[float],
-    ) -> Iterable[FindingDraft]:
-        instance_id = str(inst.get("DBInstanceIdentifier") or "")
-        arn = str(inst.get("DBInstanceArn") or "")
+        instance_id: str,
+        arn: str,
+    ) -> Scope:
         partition = _arn_partition(arn) or self._account.partition
-        scope = build_scope(
+        return build_scope(
             ctx,
             account=AwsAccountContext(
                 account_id=self._account.account_id,
@@ -601,6 +637,21 @@ class RDSInstancesOptimizationsChecker:
             resource_id=instance_id,
             resource_arn=arn,
         )
+
+    def _evaluate_instance(
+        self,
+        *,
+        ctx: RunContext,
+        inst: dict[str, Any],
+        tags: dict[str, str],
+        region: str,
+        free_storage_values: Sequence[float],
+        replica_read_iops_values: Sequence[float],
+        replica_conn_values: Sequence[float],
+    ) -> Iterable[FindingDraft]:
+        instance_id = str(inst.get("DBInstanceIdentifier") or "")
+        arn = str(inst.get("DBInstanceArn") or "")
+        scope = self._build_instance_scope(ctx=ctx, region=region, instance_id=instance_id, arn=arn)
 
         status = str(inst.get("DBInstanceStatus") or "").lower()
         allocated_gb = float(inst.get("AllocatedStorage") or 0.0)
@@ -625,7 +676,7 @@ class RDSInstancesOptimizationsChecker:
             )
             running_monthly = (float(hourly_run) * _hours_per_month()) if hourly_run is not None else None
             yield FindingDraft(
-                check_id="aws.rds.instances.stopped_storage",
+                check_id="aws.rds.instances.stopped.storage",
                 check_name="RDS stopped instances still incur storage cost",
                 category="cost",
                 sub_category="waste",
@@ -739,7 +790,7 @@ class RDSInstancesOptimizationsChecker:
                 )
 
             yield FindingDraft(
-                check_id="aws.rds.multi_az.non_prod",
+                check_id="aws.rds.multi.az.non.prod",
                 check_name="RDS Multi-AZ enabled on non-production",
                 category="cost",
                 sub_category="configuration",
@@ -760,7 +811,7 @@ class RDSInstancesOptimizationsChecker:
         fam = _family_from_instance_class(instance_class)
         if fam in _OLD_FAMILIES:
             yield FindingDraft(
-                check_id="aws.rds.instance_family.old_generation",
+                check_id="aws.rds.instance.family.old.generation",
                 check_name="RDS old-generation instance family",
                 category="cost",
                 sub_category="modernization",
@@ -782,10 +833,10 @@ class RDSInstancesOptimizationsChecker:
             ).with_issue(check="old_generation_family", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, family=fam)
 
         # 5) needs_engine_upgrade (policy)
-        if _engine_needs_upgrade(engine=engine, engine_version=engine_version, mysql_blocked_prefixes=self._mysql_blocked_prefixes, 
+        if _engine_needs_upgrade(engine=engine, engine_version=engine_version, mysql_blocked_prefixes=self._mysql_blocked_prefixes,
                                  postgres_min_version=self._postgres_min_version, mariadb_min_version=self._mariadb_min_version):
             yield FindingDraft(
-                check_id="aws.rds.engine.needs_upgrade",
+                check_id="aws.rds.engine.needs.upgrade",
                 check_name="RDS engine version needs upgrade",
                 category="governance",
                 sub_category="lifecycle",
@@ -836,7 +887,7 @@ class RDSInstancesOptimizationsChecker:
                         est_notes = f"Estimated on-demand instance cost * {hrs:.1f}h/mo. {notes}"
 
                     yield FindingDraft(
-                        check_id="aws.rds.read_replica.unused",
+                        check_id="aws.rds.read.replica.unused",
                         check_name="RDS unused read replica",
                         category="cost",
                         sub_category="waste",
@@ -883,7 +934,7 @@ class RDSInstancesOptimizationsChecker:
         *,
         allocated_gb: float,
         free_storage_avg_bytes: Sequence[float],
-    ) -> Optional[Tuple[float, float, float, int, float, float]]:
+    ) -> tuple[float, float, float, int, float, float] | None:
         values = [float(v) for v in free_storage_avg_bytes if isinstance(v, (int, float))]
         expected = self._expected_datapoints(window_days=self._storage_window_days, period_seconds=self._storage_period_seconds)
         req = self._storage_min_datapoints if self._storage_min_datapoints is not None else self._min_required_datapoints(
@@ -921,7 +972,7 @@ class RDSInstancesOptimizationsChecker:
         *,
         read_iops_values: Sequence[float],
         conn_values: Sequence[float],
-    ) -> Optional[Tuple[float, int, Optional[float]]]:
+    ) -> tuple[float, int, float | None] | None:
         reads = [float(v) for v in read_iops_values if isinstance(v, (int, float))]
         expected = self._expected_datapoints(window_days=self._replica_unused_window_days, period_seconds=self._replica_period_seconds)
         req = self._min_required_datapoints(expected=expected, absolute_min=self._replica_min_datapoints, coverage_ratio=self._replica_min_coverage_ratio)
@@ -944,12 +995,8 @@ class RDSInstancesOptimizationsChecker:
         code = ""
         try:
             code = str(exc.response.get("Error", {}).get("Code", ""))
-        except Exception:  # pragma: no cover
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
             code = ""
-            try:
-                code = str(exc.response.get("Error", {}).get("Code", ""))
-            except Exception:  # pragma: no cover
-                code = ""
 
         scope = build_scope(
             ctx,
@@ -960,9 +1007,9 @@ class RDSInstancesOptimizationsChecker:
             resource_id=self._account.account_id,
             resource_arn="",
         )
-        
+
         return FindingDraft(
-            check_id="aws.rds.instances.access_error",
+            check_id="aws.rds.instances.access.error",
             check_name="RDS access error",
             category="governance",
             status="info",
@@ -985,7 +1032,7 @@ SPEC = "checks.aws.rds_instances_optimizations:RDSInstancesOptimizationsChecker"
 
 
 @register_checker(SPEC)
-def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> RDSInstancesOptimizationsChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> RDSInstancesOptimizationsChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     billing_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     if not account_id:

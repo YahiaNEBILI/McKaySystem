@@ -42,16 +42,40 @@ Notes
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import re
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from checks.aws._common import AwsAccountContext, build_scope, money, now_utc, safe_region_from_client, utc, normalize_tags
-from checks.registry import register_checker
+from checks.aws._common import (
+    AwsAccountContext,
+    PricingResolver,
+    build_scope,
+    get_logger,
+    money,
+    normalize_tags,
+    now_utc,
+    safe_region_from_client,
+    utc,
+)
+from checks.aws.defaults import (
+    EC2_MAX_FINDINGS_PER_TYPE,
+    EC2_REQUIRED_INSTANCE_TAG_KEYS,
+    EC2_STOPPED_LONG_AGE_DAYS,
+    EC2_T_CREDIT_BALANCE_MIN_THRESHOLD,
+    EC2_T_CREDIT_LOOKBACK_DAYS,
+    EC2_UNDERUTILIZED_CPU_AVG_THRESHOLD,
+    EC2_UNDERUTILIZED_LOOKBACK_DAYS,
+    EC2_UNDERUTILIZED_NET_AVG_KIB_PER_HOUR_THRESHOLD,
+)
+from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
+
+# Logger for this module
+_LOGGER = get_logger("ec2_instances")
 
 
 # -----------------------------
@@ -63,31 +87,28 @@ from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
 class EC2InstancesConfig:
     """Configuration knobs for :class:`EC2InstancesChecker`."""
 
-    underutilized_lookback_days: int = 14
-    underutilized_cpu_avg_threshold: float = 10.0
-    underutilized_net_avg_kib_per_hour_threshold: float = 512.0  # ~12 MiB/day
+    underutilized_lookback_days: int = EC2_UNDERUTILIZED_LOOKBACK_DAYS
+    underutilized_cpu_avg_threshold: float = EC2_UNDERUTILIZED_CPU_AVG_THRESHOLD
+    underutilized_net_avg_kib_per_hour_threshold: float = EC2_UNDERUTILIZED_NET_AVG_KIB_PER_HOUR_THRESHOLD  # ~12 MiB/day
 
-    stopped_long_age_days: int = 30
+    stopped_long_age_days: int = EC2_STOPPED_LONG_AGE_DAYS
 
     # Safety valve for environments with millions of resources.
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = EC2_MAX_FINDINGS_PER_TYPE
 
     # CPU credit signals (T-family)
-    t_credit_lookback_days: int = 7
-    t_credit_balance_min_threshold: float = 20.0
+    t_credit_lookback_days: int = EC2_T_CREDIT_LOOKBACK_DAYS
+    t_credit_balance_min_threshold: float = EC2_T_CREDIT_BALANCE_MIN_THRESHOLD
 
     # Tag governance
-    required_instance_tag_keys: Tuple[str, ...] = ("ApplicationId", "Environment", "Application")
-
-    # Safety valve for environments with too much resources.
-    max_findings_per_type: int = 50_000
+    required_instance_tag_keys: tuple[str, ...] = EC2_REQUIRED_INSTANCE_TAG_KEYS
 
 # -----------------------------
 # Pricing helpers
 # -----------------------------
 
 
-_FALLBACK_EBS_USD_PER_GB_MONTH: Dict[str, float] = {
+_FALLBACK_EBS_USD_PER_GB_MONTH: dict[str, float] = {
     "gp2": 0.10,
     "gp3": 0.08,
     "standard": 0.05,
@@ -96,73 +117,25 @@ _FALLBACK_EBS_USD_PER_GB_MONTH: Dict[str, float] = {
 }
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
-def _estimate_instance_monthly_cost_usd(ctx: RunContext, *, region: str, instance_type: str) -> Tuple[Optional[float], int, str]:
+def _estimate_instance_monthly_cost_usd(ctx: RunContext, *, region: str, instance_type: str) -> tuple[float | None, int, str]:
     """Best-effort on-demand Linux shared instance monthly cost estimate.
 
     Returns: (monthly_cost, confidence_0_100, notes)
     """
-
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return None, 30, "pricing service not available"
-
-    location = None
-    try:
-        location = pricing.location_for_region(region)
-    except Exception:
-        location = None
-    if not location:
-        return None, 30, "pricing location unavailable"
-
-    # Pricing catalog is not perfectly stable; try a few filter sets.
-    attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Compute Instance"},
-            {"Field": "instanceType", "Value": instance_type},
-            {"Field": "operatingSystem", "Value": "Linux"},
-            {"Field": "tenancy", "Value": "Shared"},
-            {"Field": "preInstalledSw", "Value": "NA"},
-            {"Field": "capacitystatus", "Value": "Used"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "instanceType", "Value": instance_type},
-            {"Field": "operatingSystem", "Value": "Linux"},
-            {"Field": "tenancy", "Value": "Shared"},
-        ],
-    ]
-
-    quote = None
-    for filters in attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except Exception:
-            quote = None
-        if quote is not None:
-            break
-
-    if quote is None:
-        return None, 35, "no on-demand EC2 price match"
-
-    # Convert hourly -> monthly using a standard 730 hours/month approximation.
-    try:
-        hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-    except Exception:
-        hourly = 0.0
-    if hourly <= 0.0:
-        return None, 35, "invalid on-demand EC2 unit price"
-
-    return money(hourly * 730.0), 75, "on-demand Linux shared"
+    return PricingResolver(ctx).resolve_ec2_instance_monthly_cost(
+        region=region,
+        instance_type=instance_type,
+        call_exceptions=(AttributeError, TypeError, ValueError, BotoCoreError, ClientError),
+    )
 
 
 def _estimate_ebs_monthly_cost_usd(size_gib: float, volume_type: str) -> float:
-    price = float(_FALLBACK_EBS_USD_PER_GB_MONTH.get(str(volume_type or "gp2"), 0.10))
-    return money(float(size_gib) * price)
+    return PricingResolver(None).estimate_ebs_monthly_cost(
+        size_gib=float(size_gib),
+        volume_type=volume_type,
+        fallback_prices=_FALLBACK_EBS_USD_PER_GB_MONTH,
+        default_price=0.10,
+    )
 
 
 # -----------------------------
@@ -173,7 +146,7 @@ def _estimate_ebs_monthly_cost_usd(size_gib: float, volume_type: str) -> float:
 _STOP_REASON_RE = re.compile(r"\((?P<ts>\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)\)")
 
 
-def _parse_stop_time(state_transition_reason: str) -> Optional[datetime]:
+def _parse_stop_time(state_transition_reason: str) -> datetime | None:
     """Parse stop time from AWS' StateTransitionReason string (best-effort)."""
 
     m = _STOP_REASON_RE.search(str(state_transition_reason or ""))
@@ -182,7 +155,7 @@ def _parse_stop_time(state_transition_reason: str) -> Optional[datetime]:
     raw = m.group("ts")
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -194,7 +167,7 @@ def _parse_stop_time(state_transition_reason: str) -> Optional[datetime]:
 
 
 # Conservative list: flag only families that are unequivocally old/previous-gen.
-_OLD_FAMILIES: Set[str] = {
+_OLD_FAMILIES: set[str] = {
     "t1",
     "t2",
     "m1",
@@ -212,6 +185,31 @@ _OLD_FAMILIES: Set[str] = {
 }
 
 
+_INSTANCE_SIZE_ORDER: tuple[str, ...] = (
+    "nano",
+    "micro",
+    "small",
+    "medium",
+    "large",
+    "xlarge",
+    "2xlarge",
+    "3xlarge",
+    "4xlarge",
+    "6xlarge",
+    "8xlarge",
+    "9xlarge",
+    "10xlarge",
+    "12xlarge",
+    "16xlarge",
+    "18xlarge",
+    "24xlarge",
+    "32xlarge",
+    "48xlarge",
+    "56xlarge",
+)
+_INSTANCE_SIZE_INDEX: dict[str, int] = {name: idx for idx, name in enumerate(_INSTANCE_SIZE_ORDER)}
+
+
 def _instance_family(instance_type: str) -> str:
     t = str(instance_type or "").strip().lower()
     if not t:
@@ -219,7 +217,37 @@ def _instance_family(instance_type: str) -> str:
     return t.split(".", 1)[0]
 
 
-def _to_int(value: Any) -> Optional[int]:
+def _split_instance_type(instance_type: str) -> tuple[str, str]:
+    """Split an EC2 instance type into (family, size), e.g. m5.2xlarge."""
+    t = str(instance_type or "").strip().lower()
+    if "." not in t:
+        return "", ""
+    family, size = t.split(".", 1)
+    if not family or not size:
+        return "", ""
+    return family, size
+
+
+def _previous_instance_size(size: str) -> str | None:
+    """Return the next-smaller known size token, if one exists."""
+    idx = _INSTANCE_SIZE_INDEX.get(str(size or "").strip().lower())
+    if idx is None or idx <= 0:
+        return None
+    return _INSTANCE_SIZE_ORDER[idx - 1]
+
+
+def _recommended_smaller_instance_type(instance_type: str) -> str | None:
+    """Return a deterministic same-family one-step downsize recommendation."""
+    family, size = _split_instance_type(instance_type)
+    if not family or not size:
+        return None
+    prev_size = _previous_instance_size(size)
+    if not prev_size:
+        return None
+    return f"{family}.{prev_size}"
+
+
+def _to_int(value: Any) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -242,8 +270,8 @@ def _to_int(value: Any) -> Optional[int]:
 # -----------------------------
 
 
-def _chunked(items: Sequence[str], size: int) -> Iterator[List[str]]:
-    buf: List[str] = []
+def _chunked(items: Sequence[str], size: int) -> Iterator[list[str]]:
+    buf: list[str] = []
     for it in items:
         buf.append(it)
         if len(buf) >= size:
@@ -253,7 +281,7 @@ def _chunked(items: Sequence[str], size: int) -> Iterator[List[str]]:
         yield buf
 
 
-def _metric_query(query_id: str, *, metric: str, namespace: str, dimensions: List[Dict[str, str]], stat: str) -> Dict[str, Any]:
+def _metric_query(query_id: str, *, metric: str, namespace: str, dimensions: list[dict[str, str]], stat: str) -> dict[str, Any]:
     return {
         "Id": query_id,
         "MetricStat": {
@@ -270,7 +298,7 @@ def _fetch_t_credit_metrics(
     *,
     instance_ids: Sequence[str],
     lookback_days: int,
-) -> Dict[str, Dict[str, float]]:
+) -> dict[str, dict[str, float]]:
     """Return per-instance CPU credit summary for T-family instances.
 
     Result shape: {instance_id: {"credit_balance_min": ..., "surplus_charged_sum": ...}}
@@ -283,11 +311,11 @@ def _fetch_t_credit_metrics(
     end = now_utc()
     start = end - timedelta(days=int(max(1, lookback_days)))
 
-    out: Dict[str, Dict[str, float]] = {}
+    out: dict[str, dict[str, float]] = {}
 
-    # 2 queries per instance -> 250 instances/request safely under 500 limit.
-    for batch in _chunked(list(instance_ids), 250):
-        queries: List[Dict[str, Any]] = []
+    # 2 queries per instance -> 200 instances/request (leaving safety margin under 500 limit).
+    for batch in _chunked(list(instance_ids), 200):
+        queries: list[dict[str, Any]] = []
         for i, iid in enumerate(batch):
             dims = [{"Name": "InstanceId", "Value": iid}]
             queries.append(_metric_query(f"cb{i}", metric="CPUCreditBalance", namespace="AWS/EC2", dimensions=dims, stat="Minimum"))
@@ -323,7 +351,7 @@ def _fetch_utilization_metrics(
     region: str,
     instance_ids: Sequence[str],
     lookback_days: int,
-) -> Dict[str, Dict[str, float]]:
+) -> dict[str, dict[str, float]]:
     """Return per-instance utilization summary.
 
     Result shape: {instance_id: {"cpu_avg": ..., "net_kib_per_hour": ...}}
@@ -336,12 +364,12 @@ def _fetch_utilization_metrics(
     end = now_utc()
     start = end - timedelta(days=int(max(1, lookback_days)))
 
-    out: Dict[str, Dict[str, float]] = {}
+    out: dict[str, dict[str, float]] = {}
 
     # CloudWatch GetMetricData limit is 500 MetricDataQueries per request.
     # We use 3 queries per instance (cpu, netin, netout) -> 50 instances per request.
     for batch in _chunked(list(instance_ids), 50):
-        queries: List[Dict[str, Any]] = []
+        queries: list[dict[str, Any]] = []
         for i, iid in enumerate(batch):
             dims = [{"Name": "InstanceId", "Value": iid}]
             queries.append(_metric_query(f"cpu{i}", metric="CPUUtilization", namespace="AWS/EC2", dimensions=dims, stat="Average"))
@@ -390,39 +418,37 @@ class EC2InstancesChecker:
         self,
         *,
         account: AwsAccountContext,
-        cfg: Optional[EC2InstancesConfig] = None,
+        cfg: EC2InstancesConfig | None = None,
     ) -> None:
         self._account = account
         self._cfg = cfg or EC2InstancesConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting EC2 instances check", extra={"region": "unknown"})
         ec2 = getattr(getattr(ctx, "services", None), "ec2", None)
         if ec2 is None:
+            _LOGGER.warning("EC2 client not available in services")
             return []
 
         region = safe_region_from_client(ec2)
+        _LOGGER.debug("EC2 check running", extra={"region": region})
 
         try:
             instances = list(self._list_instances(ec2))
-        except (BotoCoreError, ClientError):
+        except (BotoCoreError, ClientError) as e:
+            _LOGGER.error("Failed to list EC2 instances", extra={"error": str(e)})
             return []
 
-        by_state: Dict[str, List[Mapping[str, Any]]] = {"running": [], "stopped": []}
-        for ins in instances:
-            state = str(((ins.get("State") or {}) if isinstance(ins, Mapping) else {}).get("Name") or "").lower()
-            if state in by_state:
-                by_state[state].append(ins)
+        _LOGGER.info("Listed EC2 instances", extra={"count": len(instances), "region": region})
+
+        by_state = self._group_instances_by_state(instances)
 
         # NEW: load security inventory once (best-effort)
-        try:
-            sgs = list(self._list_security_groups(ec2))
-            enis = list(self._list_network_interfaces(ec2))
-        except (BotoCoreError, ClientError):
-            sgs, enis = [], []
+        sgs, enis = self._load_security_inventory(ec2)
 
-        sg_by_id: Dict[str, Mapping[str, Any]] = {str(sg.get("GroupId") or ""): sg for sg in sgs if sg.get("GroupId")}
+        sg_by_id: dict[str, Mapping[str, Any]] = {str(sg.get("GroupId") or ""): sg for sg in sgs if sg.get("GroupId")}
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
         findings.extend(self._emit_underutilized(ctx, region=region, instances=by_state["running"]))
         findings.extend(self._emit_stopped_long(ctx, region=region, ec2=ec2, instances=by_state["stopped"]))
         findings.extend(self._emit_old_generation(ctx, region=region, instances=by_state["running"] + by_state["stopped"]))
@@ -432,13 +458,31 @@ class EC2InstancesChecker:
         findings.extend(self._emit_missing_tags(ctx, region=region, instances=by_state["running"] + by_state["stopped"]))
         findings.extend(self._emit_unused_security_groups(ctx, region=region, sgs=sgs, enis=enis))
 
+        _LOGGER.info("EC2 check complete", extra={"findings_count": len(findings), "region": region})
+
         return findings
+
+    @staticmethod
+    def _group_instances_by_state(instances: Sequence[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
+        grouped: dict[str, list[Mapping[str, Any]]] = {"running": [], "stopped": []}
+        for ins in instances:
+            state = str(((ins.get("State") or {}) if isinstance(ins, Mapping) else {}).get("Name") or "").lower()
+            if state in grouped:
+                grouped[state].append(ins)
+        return grouped
+
+    def _load_security_inventory(self, ec2: Any) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+        try:
+            return list(self._list_security_groups(ec2)), list(self._list_network_interfaces(ec2))
+        except (BotoCoreError, ClientError):
+            return [], []
 
     # -------------------------
     # Instance listing
     # -------------------------
 
     def _list_instances(self, ec2: Any) -> Iterator[Mapping[str, Any]]:
+        _LOGGER.debug("Fetching EC2 instances via describe_instances")
         paginator = ec2.get_paginator("describe_instances")
         for page in paginator.paginate():
             for res in page.get("Reservations", []) or []:
@@ -456,7 +500,7 @@ class EC2InstancesChecker:
         *,
         region: str,
         instances: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         if not instances:
             return []
 
@@ -467,7 +511,7 @@ class EC2InstancesChecker:
         if not metrics:
             return []
 
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
         for ins in instances:
             iid = str(ins.get("InstanceId") or "")
             if not iid:
@@ -484,6 +528,38 @@ class EC2InstancesChecker:
 
             itype = str(ins.get("InstanceType") or "")
             cost, conf, note = _estimate_instance_monthly_cost_usd(ctx, region=region, instance_type=itype)
+            rec_type = _recommended_smaller_instance_type(itype)
+            rec_cost: float | None = None
+            rec_conf = conf
+            rec_note = ""
+            rightsizing_savings: float | None = None
+
+            if rec_type:
+                rec_cost, rec_conf, rec_note = _estimate_instance_monthly_cost_usd(
+                    ctx,
+                    region=region,
+                    instance_type=rec_type,
+                )
+                if rec_cost is not None and cost is not None and rec_cost < cost:
+                    rightsizing_savings = money(cost - rec_cost)
+
+            recommendation = "Consider rightsizing, scheduling, or stopping this instance."
+            if rec_type:
+                recommendation = (
+                    f"Downsize from {itype} to {rec_type} after validating workload headroom; "
+                    "alternatively schedule or stop this instance if it is not needed."
+                )
+                if rightsizing_savings is not None:
+                    recommendation = (
+                        f"Downsize from {itype} to {rec_type} after validating workload headroom "
+                        f"(estimated savings ~${rightsizing_savings:.2f}/month); alternatively "
+                        "schedule or stop this instance if it is not needed."
+                    )
+
+            estimate_notes_parts = [part for part in (note, rec_note) if part]
+            estimate_notes = "; ".join(estimate_notes_parts)
+            estimate_confidence = min(int(conf), int(rec_conf)) if rec_type else int(conf)
+            estimated_savings = rightsizing_savings if rightsizing_savings is not None else cost
 
             scope = build_scope(
                 ctx,
@@ -508,13 +584,18 @@ class EC2InstancesChecker:
                         f"Average CPU {cpu:.1f}% and network {net_kib_h:.1f} KiB/h over the last "
                         f"{cfg.underutilized_lookback_days} days."  # deterministic
                     ),
-                    recommendation="Consider rightsizing, scheduling, or stopping this instance.",
+                    recommendation=recommendation,
                     estimated_monthly_cost=cost,
-                    estimated_monthly_savings=cost,
-                    estimate_confidence=int(conf),
-                    estimate_notes=note,
+                    estimated_monthly_savings=estimated_savings,
+                    estimate_confidence=estimate_confidence,
+                    estimate_notes=estimate_notes,
                     dimensions={
                         "instance_type": itype,
+                        "recommended_instance_type": rec_type or "",
+                        "recommended_monthly_cost_usd": (f"{rec_cost:.2f}" if rec_cost is not None else ""),
+                        "rightsizing_monthly_savings_usd": (
+                            f"{rightsizing_savings:.2f}" if rightsizing_savings is not None else ""
+                        ),
                         "cpu_avg": f"{cpu:.2f}",
                         "net_kib_per_hour": f"{net_kib_h:.2f}",
                         "lookback_days": str(cfg.underutilized_lookback_days),
@@ -535,7 +616,7 @@ class EC2InstancesChecker:
         region: str,
         ec2: Any,
         instances: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         if not instances:
             return []
 
@@ -543,7 +624,7 @@ class EC2InstancesChecker:
         now = now_utc()
 
         # Best-effort attached EBS storage estimate.
-        vol_ids: List[str] = []
+        vol_ids: list[str] = []
         for ins in instances:
             for bdm in ins.get("BlockDeviceMappings", []) or []:
                 ebs = (bdm or {}).get("Ebs") if isinstance(bdm, Mapping) else None
@@ -551,7 +632,7 @@ class EC2InstancesChecker:
                 if vid:
                     vol_ids.append(vid)
 
-        vol_map: Dict[str, Mapping[str, Any]] = {}
+        vol_map: dict[str, Mapping[str, Any]] = {}
         for batch in _chunked(vol_ids, 200):
             try:
                 resp = ec2.describe_volumes(VolumeIds=batch)
@@ -561,7 +642,7 @@ class EC2InstancesChecker:
                 if isinstance(v, Mapping) and v.get("VolumeId"):
                     vol_map[str(v.get("VolumeId"))] = v
 
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
         for ins in instances:
             iid = str(ins.get("InstanceId") or "")
             if not iid:
@@ -589,7 +670,7 @@ class EC2InstancesChecker:
                     continue
                 try:
                     sz = float(v.get("Size") or 0.0)
-                except Exception:
+                except (TypeError, ValueError):
                     sz = 0.0
                 size_gib += max(sz, 0.0)
                 est_storage_cost += _estimate_ebs_monthly_cost_usd(sz, str(v.get("VolumeType") or "gp2"))
@@ -606,7 +687,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.stopped_long",
+                    check_id="aws.ec2.instances.stopped.long",
                     check_name="EC2 stopped for a long time",
                     category="cost",
                     status="fail",
@@ -642,12 +723,12 @@ class EC2InstancesChecker:
         *,
         region: str,
         instances: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         if not instances:
             return []
 
         cfg = self._cfg
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
         for ins in instances:
             iid = str(ins.get("InstanceId") or "")
             itype = str(ins.get("InstanceType") or "")
@@ -667,7 +748,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.old_generation",
+                    check_id="aws.ec2.instances.old.generation",
                     check_name="EC2 old generation instance family",
                     category="cost",
                     status="info",
@@ -692,9 +773,9 @@ class EC2InstancesChecker:
         *,
         region: str,
         instances: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
 
         for ins in instances:
             iid = str(ins.get("InstanceId") or "")
@@ -719,7 +800,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.security.imdsv1_allowed",
+                    check_id="aws.ec2.instances.security.imdsv1.allowed",
                     check_name="EC2 IMDSv1 allowed (HttpTokens not required)",
                     category="governance",
                     status="fail",
@@ -746,11 +827,11 @@ class EC2InstancesChecker:
         region: str,
         sgs: Sequence[Mapping[str, Any]],
         enis: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
 
-        attached_sg_ids: Set[str] = set()
+        attached_sg_ids: set[str] = set()
         for eni in enis:
             for g in (eni.get("Groups") or []):
                 gid = str((g or {}).get("GroupId") or "")
@@ -758,7 +839,7 @@ class EC2InstancesChecker:
                     attached_sg_ids.add(gid)
 
         # any SG involved in SG-to-SG rules (either as referrer or referenced) is considered "used"
-        sg_ids_in_sg_rules: Set[str] = set()
+        sg_ids_in_sg_rules: set[str] = set()
         for sg in sgs:
             sg_id = str(sg.get("GroupId") or "")
             if not sg_id:
@@ -803,7 +884,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.security_groups.unused",
+                    check_id="aws.ec2.security.groups.unused",
                     check_name="Unused security group",
                     category="governance",
                     status="fail",
@@ -822,7 +903,7 @@ class EC2InstancesChecker:
 
         return out
 
-    
+
 
     def _perm_exposes_port_to_world(self, perm: Mapping[str, Any], port: int) -> bool:
         proto_val = perm.get("IpProtocol")
@@ -860,11 +941,11 @@ class EC2InstancesChecker:
         *,
         region: str,
         instances: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
 
-        t_instances: List[Mapping[str, Any]] = []
-        t_ids: List[str] = []
+        t_instances: list[Mapping[str, Any]] = []
+        t_ids: list[str] = []
         for ins in instances:
             iid = str(ins.get("InstanceId") or "")
             itype = str(ins.get("InstanceType") or "").lower()
@@ -879,7 +960,7 @@ class EC2InstancesChecker:
         if not metrics:
             return []
 
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
         for ins in t_instances:
             iid = str(ins.get("InstanceId") or "")
             itype = str(ins.get("InstanceType") or "")
@@ -902,7 +983,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.t_credit_issues",
+                    check_id="aws.ec2.instances.t.credit.issues",
                     check_name="EC2 burstable CPU credit issues",
                     category="cost",
                     status="fail",
@@ -928,7 +1009,7 @@ class EC2InstancesChecker:
                 break
 
         return out
-    
+
 
     def _emit_missing_tags(
         self,
@@ -936,13 +1017,13 @@ class EC2InstancesChecker:
         *,
         region: str,
         instances: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
         required = tuple(str(k).strip().lower() for k in cfg.required_instance_tag_keys if str(k).strip())
         if not required:
             return []
 
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
         for ins in instances:
             iid = str(ins.get("InstanceId") or "")
             if not iid:
@@ -994,9 +1075,9 @@ class EC2InstancesChecker:
         region: str,
         instances: Sequence[Mapping[str, Any]],
         sg_by_id: Mapping[str, Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
-        out: List[FindingDraft] = []
+        out: list[FindingDraft] = []
         target_ports = (22, 3389)
 
         for ins in instances:
@@ -1004,14 +1085,14 @@ class EC2InstancesChecker:
             if not iid:
                 continue
 
-            sg_ids: List[str] = []
+            sg_ids: list[str] = []
             for g in ins.get("SecurityGroups", []) or []:
                 gid = str((g or {}).get("GroupId") or "")
                 if gid:
                     sg_ids.append(gid)
 
-            open_ports: Set[int] = set()
-            offending_sgs: Set[str] = set()
+            open_ports: set[int] = set()
+            offending_sgs: set[str] = set()
 
             for gid in sg_ids:
                 sg = sg_by_id.get(gid)
@@ -1043,7 +1124,7 @@ class EC2InstancesChecker:
 
             out.append(
                 FindingDraft(
-                    check_id="aws.ec2.instances.security.admin_ports_open_world",
+                    check_id="aws.ec2.instances.security.admin.ports.open.world",
                     check_name="EC2 SSH/RDP open to the world",
                     category="governance",
                     status="fail",
@@ -1078,7 +1159,7 @@ class EC2InstancesChecker:
 
 
 @register_checker("checks.aws.ec2_instances:EC2InstancesChecker")
-def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> EC2InstancesChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> EC2InstancesChecker:
     """Instantiate this checker from runtime bootstrap data."""
 
     account_id = str(bootstrap.get("aws_account_id") or "")

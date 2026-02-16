@@ -72,7 +72,7 @@ Low coverage is **not an error**.
 
 2. Verify export logs:
    ```bash
-   python export_findings.py
+   python -m apps.worker.export_findings
    ```
    Look for:
    ```
@@ -86,7 +86,7 @@ Low coverage is **not an error**.
 
 ### Fix
 - Re-run enrichment with correct tenant
-- Do **not** hardcode enriched paths in `export_findings.py`
+- Do **not** hardcode enriched paths in `apps/worker/export_findings.py`
 
 ---
 
@@ -103,7 +103,7 @@ Low coverage is **not an error**.
 
 1. Was correlation explicitly disabled?
    ```bash
-   python runner.py --no-correlation
+   python -m apps.worker.runner --no-correlation
    ```
 
 2. Is the module present?

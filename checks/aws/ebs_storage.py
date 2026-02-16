@@ -21,16 +21,27 @@ Caveat:
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
 import checks.aws._common as common
-
+from checks.aws.defaults import (
+    EBS_MAX_FINDINGS_PER_TYPE,
+    EBS_SNAPSHOT_OLD_AGE_DAYS,
+    EBS_SUPPRESS_TAG_KEYS,
+    EBS_SUPPRESS_TAG_VALUES,
+    EBS_SUPPRESS_VALUE_PREFIXES,
+    EBS_UNATTACHED_MIN_AGE_DAYS,
+)
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = common.get_logger("ebs_storage")
 
 
 
@@ -41,44 +52,20 @@ from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, 
 
 @dataclass(frozen=True)
 class EBSStorageConfig:
-    unattached_min_age_days: int = 7
-    snapshot_old_age_days: int = 45
+    unattached_min_age_days: int = EBS_UNATTACHED_MIN_AGE_DAYS
+    snapshot_old_age_days: int = EBS_SNAPSHOT_OLD_AGE_DAYS
 
-    suppress_tag_keys: Tuple[str, ...] = (
-        "retain",
-        "retention",
-        "keep",
-        "do_not_delete",
-        "donotdelete",
-        "backup",
-        "purpose",
-        "lifecycle",
-    )
-    suppress_tag_values: Tuple[str, ...] = (
-        "retain",
-        "retained",
-        "keep",
-        "true",
-        "yes",
-        "1",
-        "permanent",
-        "legal-hold",
-    )
+    suppress_tag_keys: tuple[str, ...] = EBS_SUPPRESS_TAG_KEYS
+    suppress_tag_values: tuple[str, ...] = EBS_SUPPRESS_TAG_VALUES
     # Prefix-based suppression for common retention tags such as:
     #   retention_policy=keep-90-days
     #   purpose=backup-prod
     # This keeps strict equality matching but also treats any value starting with
     # one of these prefixes as a suppress signal when the key is in suppress_tag_keys.
-    suppress_value_prefixes: Tuple[str, ...] = (
-        "keep",
-        "retain",
-        "do-not-delete",
-        "do_not_delete",
-        "donotdelete",
-    )
+    suppress_value_prefixes: tuple[str, ...] = EBS_SUPPRESS_VALUE_PREFIXES
 
 
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = EBS_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------
@@ -87,7 +74,7 @@ class EBSStorageConfig:
 
 # Conservative USD/GB-month defaults.
 # If you later inject a Pricing client into Services, replace this with a cached lookup.
-_FALLBACK_USD_PER_GB_MONTH: Dict[str, float] = {
+_FALLBACK_USD_PER_GB_MONTH: dict[str, float] = {
     "gp2": 0.10,
     "gp3": 0.08,
     "io1": 0.125,
@@ -102,11 +89,6 @@ def _usd_per_gb_month(volume_type: str) -> float:
     return float(_FALLBACK_USD_PER_GB_MONTH.get(str(volume_type or "gp2"), 0.10))
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    """Return PricingService if injected in ctx.services, else None."""
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
 def _resolve_ebs_volume_storage_price_usd_per_gb_month(
     ctx: RunContext,
     *,
@@ -117,58 +99,12 @@ def _resolve_ebs_volume_storage_price_usd_per_gb_month(
 
     Returns: (usd_per_gb_month, notes, confidence)
     """
-    default_price = _usd_per_gb_month(volume_type)
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using fallback pricing.", 30)
-
-    location = getattr(pricing, "location_for_region", None)
-    if callable(location):
-        try:
-            if not pricing.location_for_region(region):
-                return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
-        except (AttributeError, TypeError, ValueError, ClientError):
-            return (default_price, "Pricing lookup failed; using fallback pricing.", 30)
-
-    # Pricing API attributes for EBS can change; we attempt common usageType patterns.
-    vt = str(volume_type or "gp2").strip().lower()
-    usage_types: List[str] = []
-    if vt == "gp2":
-        usage_types = ["EBS:VolumeUsage.gp2", "EBS:VolumeUsage"]
-    elif vt == "gp3":
-        usage_types = ["EBS:VolumeUsage.gp3", "EBS:VolumeUsage"]
-    elif vt in ("io1", "io2"):
-        # Some catalogs use piops naming for io1.
-        usage_types = ["EBS:VolumeUsage.piops", "EBS:VolumeUsage.io2", "EBS:VolumeUsage"]
-    elif vt == "st1":
-        usage_types = ["EBS:VolumeUsage.st1", "EBS:VolumeUsage"]
-    elif vt == "sc1":
-        usage_types = ["EBS:VolumeUsage.sc1", "EBS:VolumeUsage"]
-    else:
-        usage_types = ["EBS:VolumeUsage"]
-
-    try:
-        for ut in usage_types:
-            quote = pricing.get_on_demand_unit_price(
-                service_code="AmazonEC2",
-                filters=[
-                    {"Field": "location", "Value": pricing.location_for_region(region) or ""},
-                    {"Field": "productFamily", "Value": "Storage"},
-                    {"Field": "usagetype", "Value": ut},
-                ],
-                unit="GB-Mo",
-            )
-            if quote is not None:
-                return (
-                    float(getattr(quote, "unit_price_usd", None) or getattr(quote, "unit_price", None) or getattr(quote, "price", None)),
-                    f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                    60 if quote.source == "cache" else 70,
-                )
-    except (AttributeError, TypeError, ValueError, ClientError):
-        # Pricing is best-effort; never fail the checker.
-        pass
-
-    return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
+    return common.PricingResolver(ctx).resolve_ebs_volume_storage_price(
+        region=region,
+        volume_type=volume_type,
+        fallback_prices=_FALLBACK_USD_PER_GB_MONTH,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
 
 
 def _resolve_ebs_snapshot_storage_price_usd_per_gb_month(
@@ -177,31 +113,11 @@ def _resolve_ebs_snapshot_storage_price_usd_per_gb_month(
     region: str,
 ) -> tuple[float, str, int]:
     """Resolve EBS snapshot storage unit price (GB-Mo) best-effort."""
-    default_price = _usd_per_gb_month("gp2")
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using fallback pricing.", 30)
-
-    try:
-        quote = pricing.get_on_demand_unit_price(
-            service_code="AmazonEC2",
-            filters=[
-                {"Field": "location", "Value": pricing.location_for_region(region) or ""},
-                {"Field": "productFamily", "Value": "Storage"},
-                {"Field": "usagetype", "Value": "EBS:SnapshotUsage"},
-            ],
-            unit="GB-Mo",
-        )
-        if quote is not None:
-            return (
-                float(getattr(quote, "unit_price_usd", None) or getattr(quote, "unit_price", None) or getattr(quote, "price", None)),
-                f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                60 if quote.source == "cache" else 70,
-            )
-    except (AttributeError, TypeError, ValueError, ClientError):
-        pass
-
-    return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
+    return common.PricingResolver(ctx).resolve_ebs_snapshot_storage_price(
+        region=region,
+        default_price=_usd_per_gb_month("gp2"),
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
 
 
 # -----------------------------
@@ -219,11 +135,11 @@ def _days_ago(ts: datetime, now: datetime) -> int:
     return max(0, int((now - ts).total_seconds() // 86400))
 
 
-def _tags_to_dict(tags: Any) -> Dict[str, str]:
+def _tags_to_dict(tags: Any) -> dict[str, str]:
     if isinstance(tags, dict):
         return {str(k): str(v) for k, v in tags.items()}
     if isinstance(tags, list):
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for t in tags:
             if not isinstance(t, dict):
                 continue
@@ -287,11 +203,11 @@ def _paginate(paginator: Any, **kwargs: Any) -> Iterable[Mapping[str, Any]]:
             yield page
 
 
-def _collect_ami_snapshot_ids(ec2: Any) -> Set[str]:
+def _collect_ami_snapshot_ids(ec2: Any) -> set[str]:
     """
     Collect snapshot IDs referenced by self-owned AMIs (strong false-positive guardrail).
     """
-    referenced: Set[str] = set()
+    referenced: set[str] = set()
     paginator = ec2.get_paginator("describe_images")
     for page in _paginate(paginator, Owners=["self"]):
         for img in page.get("Images", []) or []:
@@ -326,16 +242,16 @@ def _money_val(val: float) -> float:
 
 
 class EBSStorageChecker(Checker):
-    checker_id = "checks.aws.ebs_storage"
+    checker_id = "aws.ec2.ebs.storage"
 
-    def __init__(self, *, account_id: str, cfg: Optional[EBSStorageConfig] = None) -> None:
+    def __init__(self, *, account_id: str, cfg: EBSStorageConfig | None = None) -> None:
         self._account_id = str(account_id)
         self._cfg = cfg or EBSStorageConfig()
 
 
     def _access_error(self, ctx: RunContext, *, region: str, operation: str, exc: Exception) -> FindingDraft:
         """Emit an informational finding when required permissions/APIs are missing."""
-        check_id = "aws.ec2.ebs.access_error"
+        check_id = "aws.ec2.ebs.access.error"
         return FindingDraft(
             check_id=check_id,
             check_name="EBS inventory access error",
@@ -370,21 +286,24 @@ class EBSStorageChecker(Checker):
         )
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting EBS storage check")
         if ctx.services is None or getattr(ctx.services, "ec2", None) is None:
+            _LOGGER.warning("EC2 client not available in services")
             return
         ec2 = ctx.services.ec2
         region = _region_from_ec2(ec2) or "unknown"
+        _LOGGER.debug("EBS check running", extra={"region": region})
         now_ts = common.now_utc()
         cfg = self._cfg
 
         # Resolve storage prices best-effort (PricingService if available, else fallback).
         # Keep lookups cached to avoid repeated Pricing API calls.
-        volume_price_cache: Dict[str, Tuple[float, str, int]] = {}
+        volume_price_cache: dict[str, tuple[float, str, int]] = {}
         snapshot_price_usd_per_gb_month, snapshot_pricing_notes, snapshot_pricing_conf = (
             _resolve_ebs_snapshot_storage_price_usd_per_gb_month(ctx, region=region)
         )
 
-        def _vol_price(vol_type: str) -> Tuple[float, str, int]:
+        def _vol_price(vol_type: str) -> tuple[float, str, int]:
             key = str(vol_type or "gp2").strip().lower()
             cached = volume_price_cache.get(key)
             if cached is not None:
@@ -468,7 +387,7 @@ class EBSStorageChecker(Checker):
                                             pricing_notes_out = pricing_notes
                                             pricing_hint = "(PricingService)"
 
-                                        check_id = "aws.ec2.ebs.unattached_volume"
+                                        check_id = "aws.ec2.ebs.unattached.volume"
                                         yield FindingDraft(
                                             check_id=check_id,
                                             check_name="Unattached EBS volume",
@@ -528,7 +447,7 @@ class EBSStorageChecker(Checker):
                                     pricing_notes_out = f"gp2: {gp2_notes}; gp3: {gp3_notes}"
                                     pricing_hint = "(PricingService)"
 
-                                check_id = "aws.ec2.ebs.gp2_to_gp3"
+                                check_id = "aws.ec2.ebs.gp2.to.gp3"
                                 yield FindingDraft(
                                     check_id=check_id,
                                     check_name="gp2 to gp3 migration opportunity",
@@ -576,7 +495,7 @@ class EBSStorageChecker(Checker):
                     # -------------------------
                     if emitted_vol_unencrypted < cfg.max_findings_per_type:
                         if vol.get("Encrypted") is not True:
-                            check_id = "aws.ec2.ebs.volume_unencrypted"
+                            check_id = "aws.ec2.ebs.volume.unencrypted"
                             yield FindingDraft(
                                 check_id=check_id,
                                 check_name="Unencrypted EBS volume",
@@ -685,7 +604,7 @@ class EBSStorageChecker(Checker):
                                 else Severity(level="medium", score=620)
                             )
 
-                            check_id = "aws.ec2.ebs.old_snapshot"
+                            check_id = "aws.ec2.ebs.old.snapshot"
                             yield FindingDraft(
                                 check_id=check_id,
                                 check_name="Old EBS snapshot (not referenced by AMI)",
@@ -743,7 +662,7 @@ class EBSStorageChecker(Checker):
                     # -------------------------
                     if emitted_snap_unencrypted < cfg.max_findings_per_type:
                         if snap.get("Encrypted") is not True:
-                            check_id = "aws.ec2.ebs.snapshot_unencrypted"
+                            check_id = "aws.ec2.ebs.snapshot.unencrypted"
                             yield FindingDraft(
                                 check_id=check_id,
                                 check_name="Unencrypted EBS snapshot",

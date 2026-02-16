@@ -7,9 +7,9 @@ signals later in the pipeline.
 from __future__ import annotations
 
 import glob
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
 
 import duckdb
 
@@ -23,8 +23,8 @@ def _qident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _expand_globs(globs: Sequence[str]) -> List[str]:
-    files: List[str] = []
+def _expand_globs(globs: Sequence[str]) -> list[str]:
+    files: list[str] = []
     for g in globs:
         for m in glob.glob(str(g), recursive=True):
             if m.endswith(".parquet"):
@@ -32,7 +32,7 @@ def _expand_globs(globs: Sequence[str]) -> List[str]:
     return sorted(set(files))
 
 
-def _first_present(cols: Iterable[str], candidates: Sequence[str]) -> Optional[str]:
+def _first_present(cols: Iterable[str], candidates: Sequence[str]) -> str | None:
     colset = {c.lower(): c for c in cols}
     for cand in candidates:
         if cand.lower() in colset:
@@ -40,7 +40,7 @@ def _first_present(cols: Iterable[str], candidates: Sequence[str]) -> Optional[s
     return None
 
 
-def _tag_columns(cols: Iterable[str]) -> List[str]:
+def _tag_columns(cols: Iterable[str]) -> list[str]:
     """Best-effort detection of CUR tag columns.
 
     AWS CUR tag columns vary by format, but common parquet exports include:
@@ -49,7 +49,7 @@ def _tag_columns(cols: Iterable[str]) -> List[str]:
       - resource_tags_<TagKey>
       - resource_tags:<TagKey>
     """
-    out: List[str] = []
+    out: list[str] = []
     prefixes = (
         "resource_tags_user_",
         "resource_tags_user:",
@@ -87,7 +87,7 @@ class CurNormalizeConfig:
     """
 
     tenant_id: str
-    input_globs: List[str]
+    input_globs: list[str]
 
     out_dir: str = "data/cur_facts"
     workspace_id: str = ""
@@ -117,14 +117,14 @@ class CurNormalizer:
     def close(self) -> None:
         self._con.close()
 
-    def _detect_columns(self, sample_files: Sequence[str]) -> List[str]:
+    def _detect_columns(self, sample_files: Sequence[str]) -> list[str]:
         rel = "read_parquet(?, union_by_name=true)"
         cur = self._con.execute(f"DESCRIBE SELECT * FROM {rel} LIMIT 0", [list(sample_files)])
         rows = cur.fetchall()
         # DESCRIBE returns: column_name, column_type, null, key, default, extra
         return [r[0] for r in rows]
 
-    def _build_select_sql(self, cols: List[str]) -> Tuple[str, List[str]]:
+    def _build_select_sql(self, cols: list[str]) -> tuple[str, list[str]]:
         # Canonical CUR columns (best effort)
         c_usage_start = _first_present(
             cols,
@@ -167,7 +167,7 @@ class CurNormalizer:
 
         tag_cols = _tag_columns(cols)
 
-        def _safe(col: Optional[str], *, cast: Optional[str] = None, default_sql: str = "NULL") -> str:
+        def _safe(col: str | None, *, cast: str | None = None, default_sql: str = "NULL") -> str:
             if not col:
                 return default_sql
             if cast:
@@ -260,7 +260,7 @@ class CurNormalizer:
         FROM read_parquet(?, union_by_name=true)
         """.strip()
 
-        partition_cols: List[str] = []
+        partition_cols: list[str] = []
         if self.cfg.partition_by_period and period_expr != "NULL":
             partition_cols.append("billing_period")
         if self.cfg.partition_by_account:

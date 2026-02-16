@@ -3,50 +3,19 @@
 # tests/test_rds_instances_optimizations.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Any, cast
+
 import pytest
+from botocore.exceptions import ClientError
 
 from checks.aws.rds_instances_optimizations import (
     AwsAccountContext,
     RDSInstancesOptimizationsChecker,
+    _arn_partition,
 )
-
-from botocore.exceptions import ClientError
-
-
-# -------------------------
-# Minimal fakes (no boto3)
-# -------------------------
-
-class _FakePaginator:
-    def __init__(self, pages: List[Dict[str, Any]]):
-        self._pages = pages
-
-    def paginate(self) -> Iterable[Dict[str, Any]]:
-        yield from self._pages
-
-
-class _FakeRdsClient:
-    def __init__(
-        self,
-        *,
-        region: str,
-        instances: Optional[List[Dict[str, Any]]] = None,
-        tags_by_arn: Optional[Dict[str, Dict[str, str]]] = None,
-    ):
-        self.meta = type("Meta", (), {"region_name": region})()
-        self._instances = instances or []
-        self._tags_by_arn = tags_by_arn or {}
-
-    def get_paginator(self, op_name: str) -> _FakePaginator:
-        assert op_name == "describe_db_instances"
-        return _FakePaginator([{"DBInstances": self._instances}])
-
-    def list_tags_for_resource(self, *, ResourceName: str) -> Dict[str, Any]:
-        tags = self._tags_by_arn.get(ResourceName, {})
-        return {"TagList": [{"Key": k, "Value": v} for k, v in tags.items()]}
+from tests.aws_mocks import FakeRdsClient, make_run_ctx
 
 
 def _gb_to_bytes(gb: float) -> float:
@@ -60,13 +29,13 @@ class _FakeCloudWatchClient:
     It inspects MetricDataQueries and returns the configured values for each:
       (MetricName, DBInstanceIdentifier) -> values
     """
-    def __init__(self, *, series_by_metric_and_instance: Optional[Dict[str, Dict[str, List[float]]]] = None) -> None:
+    def __init__(self, *, series_by_metric_and_instance: dict[str, dict[str, list[float]]] | None = None) -> None:
         # e.g. {"FreeStorageSpace": {"db2":[...bytes...]}, "ReadIOPS":{"replica1":[...]} }
         self._data = series_by_metric_and_instance or {}
 
-    def get_metric_data(self, **kwargs: Any) -> Dict[str, Any]:
-        queries: Sequence[Dict[str, Any]] = kwargs.get("MetricDataQueries", []) or []
-        results: List[Dict[str, Any]] = []
+    def get_metric_data(self, **kwargs: Any) -> dict[str, Any]:
+        queries: Sequence[dict[str, Any]] = kwargs.get("MetricDataQueries", []) or []
+        results: list[dict[str, Any]] = []
 
         for q in queries:
             qid = q.get("Id")
@@ -96,17 +65,6 @@ class _FakeCloudWatchClient:
         return {"MetricDataResults": results}
 
 
-@dataclass
-class _FakeServices:
-    rds: Any
-    cloudwatch: Any = None
-
-
-class _FakeCtx:
-    cloud: str = "aws"
-    services: Any = None
-
-
 def _mk_checker() -> RDSInstancesOptimizationsChecker:
     return RDSInstancesOptimizationsChecker(
         account=AwsAccountContext(account_id="111111111111", billing_account_id="111111111111"),
@@ -124,7 +82,7 @@ def _mk_checker() -> RDSInstancesOptimizationsChecker:
 
 def test_stopped_instances_with_storage_emits() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db1"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -141,11 +99,10 @@ def test_stopped_instances_with_storage_emits() -> None:
         tags_by_arn={arn: {"env": "dev"}},
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    f = next(x for x in findings if x.check_id == "aws.rds.instances.stopped_storage")
+    f = next(x for x in findings if x.check_id == "aws.rds.instances.stopped.storage")
     assert f.status == "fail"
     assert f.estimated_monthly_cost is not None
     assert float(f.estimated_monthly_cost) > 0.0
@@ -162,7 +119,7 @@ def test_storage_overprovisioned_emits_using_free_storage_p95() -> None:
             "FreeStorageSpace": {"db2": free_series},
         }
     )
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -178,8 +135,7 @@ def test_storage_overprovisioned_emits_using_free_storage_p95() -> None:
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     f = next(x for x in findings if x.check_id == "aws.rds.storage.overprovisioned")
@@ -192,7 +148,7 @@ def test_storage_overprovisioned_emits_using_free_storage_p95() -> None:
 
 def test_multi_az_non_prod_emits_when_env_tag_non_prod() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db3"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -209,11 +165,10 @@ def test_multi_az_non_prod_emits_when_env_tag_non_prod() -> None:
         tags_by_arn={arn: {"env": "staging"}},
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    f = next(x for x in findings if x.check_id == "aws.rds.multi_az.non_prod")
+    f = next(x for x in findings if x.check_id == "aws.rds.multi.az.non.prod")
     assert f.status == "fail"
     assert f.estimate_confidence is not None
     assert int(f.estimate_confidence) <= 40
@@ -221,7 +176,7 @@ def test_multi_az_non_prod_emits_when_env_tag_non_prod() -> None:
 
 def test_multi_az_non_prod_suppressed_when_env_prod() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db4"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -238,16 +193,15 @@ def test_multi_az_non_prod_suppressed_when_env_prod() -> None:
         tags_by_arn={arn: {"env": "prod"}},
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(x.check_id != "aws.rds.multi_az.non_prod" for x in findings)
+    assert all(x.check_id != "aws.rds.multi.az.non.prod" for x in findings)
 
 
 def test_instance_family_old_generation_emits() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db5"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -264,11 +218,10 @@ def test_instance_family_old_generation_emits() -> None:
         tags_by_arn={arn: {"env": "dev"}},
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    f = next(x for x in findings if x.check_id == "aws.rds.instance_family.old_generation")
+    f = next(x for x in findings if x.check_id == "aws.rds.instance.family.old.generation")
     assert f.status == "fail"
     assert f.dimensions.get("family") == "m3"
 
@@ -289,7 +242,7 @@ def test_instance_family_old_generation_emits() -> None:
 )
 def test_engine_needs_upgrade_policy(engine: str, version: str, should_emit: bool) -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db6"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -306,11 +259,10 @@ def test_engine_needs_upgrade_policy(engine: str, version: str, should_emit: boo
         tags_by_arn={arn: {"env": "dev"}},
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    has = any(x.check_id == "aws.rds.engine.needs_upgrade" for x in findings)
+    has = any(x.check_id == "aws.rds.engine.needs.upgrade" for x in findings)
     assert has is should_emit
 
 def test_storage_overprovisioned_no_finding_when_datapoints_too_sparse() -> None:
@@ -320,7 +272,7 @@ def test_storage_overprovisioned_no_finding_when_datapoints_too_sparse() -> None
     cw = _FakeCloudWatchClient(
         series_by_metric_and_instance={"FreeStorageSpace": {"db_sparse": free_series}}
     )
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -336,8 +288,7 @@ def test_storage_overprovisioned_no_finding_when_datapoints_too_sparse() -> None
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     assert all(x.check_id != "aws.rds.storage.overprovisioned" for x in findings)
@@ -355,7 +306,7 @@ def test_storage_overprovisioned_no_finding_when_allocated_storage_missing_or_ze
             }
         }
     )
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -381,8 +332,7 @@ def test_storage_overprovisioned_no_finding_when_allocated_storage_missing_or_ze
         ],
         tags_by_arn={arn0: {"env": "dev"}, arn_missing: {"env": "dev"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
     assert all(x.check_id != "aws.rds.storage.overprovisioned" for x in findings)
@@ -390,7 +340,7 @@ def test_storage_overprovisioned_no_finding_when_allocated_storage_missing_or_ze
 
 def test_multi_az_missing_env_tag_no_finding() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db_no_env"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -407,11 +357,10 @@ def test_multi_az_missing_env_tag_no_finding() -> None:
         tags_by_arn={arn: {"owner": "team-a"}},  # no env-related tag
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(x.check_id != "aws.rds.multi_az.non_prod" for x in findings)
+    assert all(x.check_id != "aws.rds.multi.az.non.prod" for x in findings)
 
 
 @pytest.mark.parametrize(
@@ -439,7 +388,7 @@ def test_engine_versions_do_not_crash_and_follow_policy(
     engine: str, version: str, should_emit: bool
 ) -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db_weird"
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -456,12 +405,11 @@ def test_engine_versions_do_not_crash_and_follow_policy(
         tags_by_arn={arn: {"env": "dev"}},
     )
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
 
-    emitted = any(f.check_id == "aws.rds.engine.needs_upgrade" for f in findings)
+    emitted = any(f.check_id == "aws.rds.engine.needs.upgrade" for f in findings)
     assert emitted is should_emit
 
 
@@ -474,7 +422,7 @@ def test_unused_read_replica_emits_when_p95_read_iops_zero() -> None:
             "DatabaseConnections": {"replica1": [0.0] * 14},
         }
     )
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -488,16 +436,15 @@ def test_unused_read_replica_emits_when_p95_read_iops_zero() -> None:
                 "EngineVersion": "15.4",
                 "ReadReplicaSourceDBInstanceIdentifier": "primary1",
                 # Old enough to not be filtered out (<7d)
-                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
             }
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert any(f.check_id == "aws.rds.read_replica.unused" for f in findings)
+    assert any(f.check_id == "aws.rds.read.replica.unused" for f in findings)
 
 
 def test_unused_read_replica_suppressed_by_purpose_tag() -> None:
@@ -508,7 +455,7 @@ def test_unused_read_replica_suppressed_by_purpose_tag() -> None:
             "DatabaseConnections": {"replica_suppressed": [0.0] * 14},
         }
     )
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -521,17 +468,16 @@ def test_unused_read_replica_suppressed_by_purpose_tag() -> None:
                 "Engine": "postgres",
                 "EngineVersion": "15.4",
                 "ReadReplicaSourceDBInstanceIdentifier": "primary1",
-                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
             }
         ],
         # Suppression: purpose/failover/migration etc
         tags_by_arn={arn: {"env": "dev", "purpose": "migration"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(f.check_id != "aws.rds.read_replica.unused" for f in findings)
+    assert all(f.check_id != "aws.rds.read.replica.unused" for f in findings)
 
 
 def test_unused_read_replica_skipped_for_aurora() -> None:
@@ -542,7 +488,7 @@ def test_unused_read_replica_skipped_for_aurora() -> None:
             "DatabaseConnections": {"aurora_replica": [0.0] * 14},
         }
     )
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -555,20 +501,19 @@ def test_unused_read_replica_skipped_for_aurora() -> None:
                 "Engine": "aurora-postgresql",
                 "EngineVersion": "15.4",
                 "ReadReplicaSourceDBInstanceIdentifier": "aurora_primary",
-                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
             }
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert all(f.check_id != "aws.rds.read_replica.unused" for f in findings)
+    assert all(f.check_id != "aws.rds.read.replica.unused" for f in findings)
 
 
 class _FakeCloudWatchClientDeny:
-    def get_metric_data(self, **kwargs: Any) -> Dict[str, Any]:
+    def get_metric_data(self, **kwargs: Any) -> dict[str, Any]:
         raise ClientError(
             error_response={"Error": {"Code": "AccessDenied", "Message": "Denied"}},
             operation_name="GetMetricData",
@@ -578,7 +523,7 @@ class _FakeCloudWatchClientDeny:
 def test_cloudwatch_access_error_emits_and_checker_continues() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db_cw_denied"
     cw = _FakeCloudWatchClientDeny()
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-3",
         instances=[
             {
@@ -594,10 +539,31 @@ def test_cloudwatch_access_error_emits_and_checker_continues() -> None:
         ],
         tags_by_arn={arn: {"env": "staging"}},
     )
-    ctx = _FakeCtx()
-    ctx.services = _FakeServices(rds=rds, cloudwatch=cw)
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
 
-    assert any(f.check_id == "aws.rds.instances.access_error" for f in findings)
-    assert any(f.check_id == "aws.rds.multi_az.non_prod" for f in findings)
+    assert any(f.check_id == "aws.rds.instances.access.error" for f in findings)
+    assert any(f.check_id == "aws.rds.multi.az.non.prod" for f in findings)
+
+
+def test_arn_partition_returns_empty_on_malformed_value() -> None:
+    assert _arn_partition(cast(Any, None)) == ""
+
+
+def test_access_error_handles_malformed_clienterror_response() -> None:
+    checker = _mk_checker()
+    ctx = make_run_ctx(rds=None, cloudwatch=None)
+
+    class _BadClientError(Exception):
+        response = 123
+
+    finding = checker._access_error(
+        ctx,
+        region="eu-west-3",
+        action="describe_db_instances",
+        exc=cast(ClientError, _BadClientError()),
+    )
+    assert finding.check_id == "aws.rds.instances.access.error"
+    assert "ErrorCode=" in finding.message
+

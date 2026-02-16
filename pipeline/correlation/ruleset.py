@@ -22,14 +22,14 @@ Why this exists:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from .contracts import CorrelationRule
 
 # ---- SQL header parsing ----
 
-def _parse_sql_header(sql_text: str) -> Dict[str, str]:
+def _parse_sql_header(sql_text: str) -> dict[str, str]:
     """
     Parse leading SQL comment lines of the form:
       -- key: value
@@ -37,7 +37,7 @@ def _parse_sql_header(sql_text: str) -> Dict[str, str]:
     Stops at the first non-comment, non-empty line.
     Keys are lowercased.
     """
-    meta: Dict[str, str] = {}
+    meta: dict[str, str] = {}
     for line in sql_text.splitlines():
         s = line.strip()
         if not s:
@@ -54,7 +54,7 @@ def _parse_sql_header(sql_text: str) -> Dict[str, str]:
     return meta
 
 
-def _coerce_bool(value: Optional[str], default: bool = True) -> bool:
+def _coerce_bool(value: str | None, default: bool = True) -> bool:
     if value is None:
         return default
     s = value.strip().lower()
@@ -65,7 +65,7 @@ def _coerce_bool(value: Optional[str], default: bool = True) -> bool:
     return default
 
 
-def _parse_csv_list(value: str) -> Tuple[str, ...]:
+def _parse_csv_list(value: str) -> tuple[str, ...]:
     """
     Parses 'a, b, c' -> ('a','b','c')
     """
@@ -91,9 +91,9 @@ def default_rules_dir(repo_root: Path) -> Path:
 
 def load_rules_from_dir(
     rules_dir: Path,
-    allow_rule_ids: Optional[Sequence[str]] = None,
-    deny_rule_ids: Optional[Sequence[str]] = None,
-) -> List[CorrelationRule]:
+    allow_rule_ids: Sequence[str] | None = None,
+    deny_rule_ids: Sequence[str] | None = None,
+) -> list[CorrelationRule]:
     """
     Load rules from a directory and return List[CorrelationRule] for the engine.
 
@@ -106,7 +106,7 @@ def load_rules_from_dir(
     allow = {r.strip().lower() for r in (allow_rule_ids or []) if r.strip()}
     deny = {r.strip().lower() for r in (deny_rule_ids or []) if r.strip()}
 
-    rules: List[CorrelationRule] = []
+    rules: list[CorrelationRule] = []
 
     for sql_path in sorted(rules_dir.glob("*.sql")):
         sql_text = sql_path.read_text(encoding="utf-8")
@@ -144,7 +144,7 @@ def load_rules_from_dir(
 
 
 # Backward-compatible alias if you had build_rules() before.
-def build_rules(rules_dir: Path) -> List[CorrelationRule]:
+def build_rules(rules_dir: Path) -> list[CorrelationRule]:
     """
     Backward-compatible wrapper.
     If old code calls build_rules(...), it still works.

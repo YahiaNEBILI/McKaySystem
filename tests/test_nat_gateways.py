@@ -144,7 +144,7 @@ def test_orphaned_nat_gateway_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.orphaned"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.orphaned"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "nat-1"
 
@@ -187,7 +187,7 @@ def test_idle_nat_gateway_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.idle"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.idle"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "nat-1"
 
@@ -230,7 +230,7 @@ def test_high_data_processing_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.high_data_processing"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.high.data.processing"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "nat-1"
 
@@ -276,7 +276,7 @@ def test_cross_az_nat_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.cross_az"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.cross.az"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "nat-1"
 
@@ -295,7 +295,7 @@ def test_access_denied_emits_access_error(monkeypatch: pytest.MonkeyPatch) -> No
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.ec2.nat_gateways.access_error" for f in findings)
+    assert any(f.check_id == "aws.ec2.nat.gateways.access.error" for f in findings)
 
 
 def test_cloudwatch_access_denied_emits_missing_permission_and_inventory_findings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,8 +330,8 @@ def test_cloudwatch_access_denied_emits_missing_permission_and_inventory_finding
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.ec2.nat_gateways.orphaned" for f in findings)
-    perm = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.missing_permission"]
+    assert any(f.check_id == "aws.ec2.nat.gateways.orphaned" for f in findings)
+    perm = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.missing.permission"]
     assert len(perm) == 1
     assert perm[0].issue_key.get("operation") == "cloudwatch:GetMetricData"
 
@@ -416,7 +416,7 @@ def test_pagination_multiple_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.orphaned"]
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.orphaned"]
     assert {f.scope.resource_id for f in hits} == {"nat-1", "nat-2"}
 
 
@@ -516,7 +516,7 @@ def test_public_route_table_skips_cross_az(monkeypatch: pytest.MonkeyPatch) -> N
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    assert not any(f.check_id == "aws.ec2.nat_gateways.cross_az" for f in findings)
+    assert not any(f.check_id == "aws.ec2.nat.gateways.cross.az" for f in findings)
 
 
 def test_nat_states_deleted_skipped_deleting_no_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -569,7 +569,7 @@ def test_nat_states_deleted_skipped_deleting_no_orphan(monkeypatch: pytest.Monke
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    orphaned = [f for f in findings if f.check_id == "aws.ec2.nat_gateways.orphaned"]
+    orphaned = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.orphaned"]
     assert {f.scope.resource_id for f in orphaned} == {"nat-pending"}
     assert not any(f.scope.resource_id == "nat-deleting" for f in orphaned)
     assert not any(f.scope.resource_id == "nat-deleted" for f in orphaned)
@@ -618,8 +618,8 @@ def test_low_datapoint_count_blocks_metric_findings(monkeypatch: pytest.MonkeyPa
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    assert not any(f.check_id == "aws.ec2.nat_gateways.idle" for f in findings)
-    assert not any(f.check_id == "aws.ec2.nat_gateways.high_data_processing" for f in findings)
+    assert not any(f.check_id == "aws.ec2.nat.gateways.idle" for f in findings)
+    assert not any(f.check_id == "aws.ec2.nat.gateways.high.data.processing" for f in findings)
 
 
 def test_p95_computation_floor_index_regression(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -664,4 +664,4 @@ def test_p95_computation_floor_index_regression(monkeypatch: pytest.MonkeyPatch)
     checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.ec2.nat_gateways.idle" for f in findings)
+    assert any(f.check_id == "aws.ec2.nat.gateways.idle" for f in findings)

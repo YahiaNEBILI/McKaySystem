@@ -7,15 +7,15 @@ populate ``actual_*`` fields where possible.
 from __future__ import annotations
 
 import glob
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
 
 import duckdb
 
 
-def _expand_globs(globs: Sequence[str]) -> List[str]:
-    files: List[str] = []
+def _expand_globs(globs: Sequence[str]) -> list[str]:
+    files: list[str] = []
     for g in globs:
         for m in glob.glob(str(g), recursive=True):
             if m.endswith(".parquet"):
@@ -30,10 +30,10 @@ class CostEnrichConfig:
     tenant_id: str
 
     # Findings inputs (raw + correlated, etc.)
-    findings_globs: List[str]
+    findings_globs: list[str]
 
     # Normalized CUR facts inputs (output of normalize_cur.py)
-    cur_facts_globs: List[str]
+    cur_facts_globs: list[str]
 
     # Output dataset
     out_dir: str = "data/finops_findings_enriched"

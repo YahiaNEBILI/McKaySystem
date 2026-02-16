@@ -4,7 +4,7 @@ AWS Backup Vaults Audit Checker
 
 This module adds two governance-oriented checks for AWS Backup vaults:
 
-1) aws.backup.vaults.no_lifecycle
+1) aws.backup.vaults.no.lifecycle
    IMPORTANT NOTE (AWS reality):
    AWS Backup retention "lifecycle" (cold storage / delete after) is defined on
    *backup plan rules*, not on vaults. However, AWS Backup provides a vault-level
@@ -23,7 +23,7 @@ This module adds two governance-oriented checks for AWS Backup vaults:
        *current* recovery point storage cost in the vault (warm/cold), using
        PricingService when available.
 
-2) aws.backup.vaults.access_policy_misconfig
+2) aws.backup.vaults.access.policy.misconfig
    Detects common misconfigurations in backup vault access policies:
      - No access policy (low signal, but useful governance gap)
      - Wildcard principals in Allow statements ("*" or {"AWS":"*"})
@@ -49,23 +49,31 @@ Permissions required (minimum):
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set
+from collections.abc import Iterable
+from typing import Any
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
     AwsAccountContext,
+    PricingResolver,
     build_scope,
+    get_logger,
     money,
+    paginate_items,
     safe_region_from_client,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import BACKUP_VAULTS_COLD_FALLBACK_USD, BACKUP_VAULTS_WARM_FALLBACK_USD
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("backup_vaults_audit")
 
 
 # Actions that are generally high-impact if granted broadly.
-_SENSITIVE_ACTIONS: Set[str] = {
+_SENSITIVE_ACTIONS: set[str] = {
     "backup:deletebackupvault",
     "backup:deletebackupvaultaccesspolicy",
     "backup:putbackupvaultaccesspolicy",
@@ -80,42 +88,6 @@ _SENSITIVE_ACTIONS: Set[str] = {
     "backup:*",
     "*",
 }
-
-
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    params = dict(params or {})
-
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except Exception:
-            # Fall back to NextToken pagination
-            pass
-
-    next_token: Optional[str] = None
-    while True:
-        call = getattr(client, operation)
-        req = dict(params)
-        if next_token:
-            req["NextToken"] = next_token
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_token = resp.get("NextToken")
-        if not next_token:
-            break
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -140,27 +112,33 @@ def _pricing_backup_gb_month_price(
 
     Returns: (unit_price_usd, notes, confidence)
     """
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
-    if pricing is None:
-        return fallback_usd, "Fallback pricing (no PricingService)", 0
+    return PricingResolver(ctx).resolve_backup_storage_price(
+        region=region,
+        storage_class=storage_class,
+        fallback_usd=fallback_usd,
+        method_names=(
+            "backup_storage_gb_month",
+            "backup_storage_gb_month_price",
+            "backup_gb_month_price",
+            "aws_backup_storage_gb_month_price",
+            "aws_backup_gb_month_price",
+        ),
+        kwargs_variants=(
+            {"region": "{region}", "storage_class": "{storage_class}"},
+            {"region": "{region}", "storage_class": "{tier}"},
+            {"region": "{region}", "tier": "{tier}"},
+        ),
+        args_variants=(("{region}", "{storage_class}"), ("{region}", "{tier}")),
+        resolved_confidence=70,
+        fallback_confidence_when_no_service=0,
+        fallback_confidence_when_lookup_fails=0,
+        no_service_note="Fallback pricing (no PricingService)",
+        lookup_failed_note="Fallback pricing (PricingService unavailable/unknown)",
+        resolved_note_template="PricingService ({method_name})",
+    )
 
-    fn = getattr(pricing, "backup_storage_gb_month", None)
-    if fn is None:
-        return fallback_usd, "Fallback pricing (PricingService missing backup_storage_gb_month)", 0
 
-    try:
-        val = fn(region=region, storage_class=storage_class)
-        if val is None:
-            return fallback_usd, "Fallback pricing (PricingService returned None)", 0
-        unit = float(val)
-        if unit <= 0.0:
-            return fallback_usd, "Fallback pricing (PricingService returned non-positive)", 0
-        return unit, "PricingService", 70
-    except Exception as exc:  # pragma: no cover
-        return fallback_usd, f"Fallback pricing (PricingService error: {exc})", 0
-
-
-def _parse_account_id_from_principal(principal: str) -> Optional[str]:
+def _parse_account_id_from_principal(principal: str) -> str | None:
     """
     Supports:
       - "123456789012"
@@ -182,7 +160,7 @@ def _parse_account_id_from_principal(principal: str) -> Optional[str]:
     return None
 
 
-def _as_list(value: Any) -> List[Any]:
+def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, list):
@@ -190,9 +168,9 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
-def _normalize_action(action: Any) -> Set[str]:
+def _normalize_action(action: Any) -> set[str]:
     """Action can be a string or list; normalize to lowercase set."""
-    actions: Set[str] = set()
+    actions: set[str] = set()
     for a in _as_list(action):
         if a is None:
             continue
@@ -213,9 +191,9 @@ def _principal_is_wildcard(principal: Any) -> bool:
     return False
 
 
-def _extract_principals(principal: Any) -> List[str]:
+def _extract_principals(principal: Any) -> list[str]:
     """Return a list of principal strings (best-effort)."""
-    principals: List[str] = []
+    principals: list[str] = []
     if principal is None:
         return principals
 
@@ -241,12 +219,12 @@ def _extract_principals(principal: Any) -> List[str]:
     return principals
 
 
-def _extract_org_ids_from_condition(condition: Any) -> List[str]:
+def _extract_org_ids_from_condition(condition: Any) -> list[str]:
     """Best-effort extraction of aws:PrincipalOrgID values from a policy Condition."""
     if not isinstance(condition, dict):
         return []
 
-    org_ids: List[str] = []
+    org_ids: list[str] = []
     for op in (
         "StringEquals",
         "StringLike",
@@ -265,8 +243,8 @@ def _extract_org_ids_from_condition(condition: Any) -> List[str]:
                 org_ids.append(s)
 
     # de-dupe, keep order
-    seen: Set[str] = set()
-    out: List[str] = []
+    seen: set[str] = set()
+    out: list[str] = []
     for x in org_ids:
         if x in seen:
             continue
@@ -278,8 +256,8 @@ def _extract_org_ids_from_condition(condition: Any) -> List[str]:
 class AwsBackupVaultsAuditChecker:
     """
     One checker module, two check_id outputs:
-      - aws.backup.vaults.no_lifecycle
-      - aws.backup.vaults.access_policy_misconfig
+      - aws.backup.vaults.no.lifecycle
+      - aws.backup.vaults.access.policy.misconfig
     """
 
     checker_id = "aws.backup.vaults.audit"
@@ -288,27 +266,31 @@ class AwsBackupVaultsAuditChecker:
         self,
         *,
         account: AwsAccountContext,
-        expected_lock_min_days: Optional[int] = None,
-        expected_lock_max_days: Optional[int] = None,
-        allowed_cross_account_ids: Optional[Set[str]] = None,
+        expected_lock_min_days: int | None = None,
+        expected_lock_max_days: int | None = None,
+        allowed_cross_account_ids: set[str] | None = None,
     ) -> None:
         self._account = account
         self._expected_lock_min_days = expected_lock_min_days
         self._expected_lock_max_days = expected_lock_max_days
         self._allowed_cross_account_ids = allowed_cross_account_ids or set()
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting AWS Backup vaults audit check")
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupVaultsAuditChecker requires ctx.services.backup")
 
         backup: BaseClient = ctx.services.backup
         region = safe_region_from_client(backup)
+        _LOGGER.debug("Backup vaults check running", extra={"region": region})
 
         try:
-            vaults = list(_paginate_items(backup, "list_backup_vaults", "BackupVaultList"))
+            vaults = list(paginate_items(backup, "list_backup_vaults", "BackupVaultList"))
         except ClientError as exc:
             yield self._access_error_finding(ctx, region, "list_backup_vaults", exc)
             return
+
+        _LOGGER.info("Listed Backup vaults", extra={"count": len(vaults), "region": region})
 
         # Per-vault evaluation:
         # 1) Vault Lock / lifecycle guardrail
@@ -322,8 +304,7 @@ class AwsBackupVaultsAuditChecker:
                 return
 
             if lock_findings:
-                for f in lock_findings:
-                    yield f
+                yield from lock_findings
                 # If retention guardrail is failing, do not emit policy findings too
                 continue
 
@@ -340,13 +321,12 @@ class AwsBackupVaultsAuditChecker:
         ctx,
         backup: BaseClient,
         region: str,
-        vault: Dict[str, Any],
+        vault: dict[str, Any],
     ) -> Iterable[FindingDraft]:
         """
         Vault Lock / retention guardrails.
 
-        Keeps legacy check_id 'aws.backup.vaults.no_lifecycle' to avoid regressions,
-        but sets issue_key['rule'] to match existing test expectations.
+        Uses canonical check_id 'aws.backup.vaults.no.lifecycle'.
         """
         vault_name = str(vault.get("BackupVaultName") or "unknown")
         vault_arn = str(vault.get("BackupVaultArn") or "")
@@ -393,7 +373,7 @@ class AwsBackupVaultsAuditChecker:
             rule = "vault_lock_out_of_standard"
 
         # (2) Attach best-effort monthly storage cost estimate for "no max retention"
-        est_cost: Optional[float] = None
+        est_cost: float | None = None
         est_notes: str = ""
         est_conf: int = 0
         if rule == "vault_lock_no_max":
@@ -409,7 +389,7 @@ class AwsBackupVaultsAuditChecker:
             try:
                 est_cost_rounded = money(float(est_cost))
                 est_cost_str = f"${est_cost_rounded:,.2f}"
-            except Exception:
+            except (TypeError, ValueError, OverflowError):
                 est_cost_str = ""
 
         # Severity mapping: out_of_standard is low, everything else medium
@@ -437,7 +417,7 @@ class AwsBackupVaultsAuditChecker:
             cost_suffix = f" Observed recovery point storage estimate: {est_cost_str}/month."
 
         yield FindingDraft(
-            check_id="aws.backup.vaults.no_lifecycle",
+            check_id="aws.backup.vaults.no.lifecycle",
             check_name="AWS Backup vault retention guardrails",
             category="backup.governance",
             status="fail",
@@ -482,7 +462,7 @@ class AwsBackupVaultsAuditChecker:
         ctx,
         backup: BaseClient,
         region: str,
-        vault: Dict[str, Any],
+        vault: dict[str, Any],
     ) -> Iterable[FindingDraft]:
         vault_name = str(vault.get("BackupVaultName") or "")
         vault_arn = str(vault.get("BackupVaultArn") or "")
@@ -520,15 +500,15 @@ class AwsBackupVaultsAuditChecker:
                 return a.startswith(p[:-1])
             return a == p
 
-        def _has_sensitive_action(actions: Set[str]) -> bool:
+        def _has_sensitive_action(actions: set[str]) -> bool:
             for a in actions:
                 for pat in _SENSITIVE_ACTIONS:
                     if _matches_action_pattern(a, pat):
                         return True
             return False
 
-        def _matched_sensitive_actions(actions: Set[str]) -> List[str]:
-            out: List[str] = []
+        def _matched_sensitive_actions(actions: set[str]) -> list[str]:
+            out: list[str] = []
             for a in sorted(actions):
                 if any(_matches_action_pattern(a, pat) for pat in _SENSITIVE_ACTIONS):
                     out.append(a)
@@ -543,7 +523,7 @@ class AwsBackupVaultsAuditChecker:
             if code in {"ResourceNotFoundException", "ResourceNotFound"}:
                 # No access policy exists
                 yield FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="governance",
                     status="fail",
@@ -576,7 +556,7 @@ class AwsBackupVaultsAuditChecker:
 
         if not policy_str:
             yield FindingDraft(
-                check_id="aws.backup.vaults.access_policy_misconfig",
+                check_id="aws.backup.vaults.access.policy.misconfig",
                 check_name="AWS Backup vault access policy misconfiguration",
                 category="governance",
                 status="fail",
@@ -604,7 +584,7 @@ class AwsBackupVaultsAuditChecker:
             policy = json.loads(policy_str)
         except json.JSONDecodeError:
             yield FindingDraft(
-                check_id="aws.backup.vaults.access_policy_misconfig",
+                check_id="aws.backup.vaults.access.policy.misconfig",
                 check_name="AWS Backup vault access policy misconfiguration",
                 category="governance",
                 status="fail",
@@ -636,7 +616,7 @@ class AwsBackupVaultsAuditChecker:
         if not isinstance(statements, list):
             statements = []
 
-        worst: Optional[FindingDraft] = None
+        worst: FindingDraft | None = None
 
         for st in statements:
             if not isinstance(st, dict):
@@ -656,7 +636,7 @@ class AwsBackupVaultsAuditChecker:
             # --- 0) NotPrincipal: we don't fully interpret it; surface as info to avoid silent misses.
             if not_principal is not None:
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="governance",
                     status="info",
@@ -708,7 +688,7 @@ class AwsBackupVaultsAuditChecker:
                         sev = Severity(level="medium", score=65)
 
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
@@ -746,7 +726,7 @@ class AwsBackupVaultsAuditChecker:
 
             # --- 2) Cross-account principals (not in allowlist)
             principals = _extract_principals(principal)
-            cross_accounts: Set[str] = set()
+            cross_accounts: set[str] = set()
             for p in principals:
                 acct = _parse_account_id_from_principal(p)
                 if acct and acct != self._account.account_id and acct not in self._allowed_cross_account_ids:
@@ -761,7 +741,7 @@ class AwsBackupVaultsAuditChecker:
                     title = "Backup vault access policy grants broad sensitive permissions cross-account"
 
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
@@ -802,7 +782,7 @@ class AwsBackupVaultsAuditChecker:
             if has_sensitive and principals:
                 matched = _matched_sensitive_actions(actions)
                 candidate = FindingDraft(
-                    check_id="aws.backup.vaults.access_policy_misconfig",
+                    check_id="aws.backup.vaults.access.policy.misconfig",
                     check_name="AWS Backup vault access policy misconfiguration",
                     category="security",
                     status="fail",
@@ -838,7 +818,7 @@ class AwsBackupVaultsAuditChecker:
             yield worst
 
 
-    def _pick_worst(self, current: Optional[FindingDraft], candidate: FindingDraft) -> FindingDraft:
+    def _pick_worst(self, current: FindingDraft | None, candidate: FindingDraft) -> FindingDraft:
         if current is None:
             return candidate
 
@@ -864,9 +844,9 @@ class AwsBackupVaultsAuditChecker:
         *,
         region: str,
         vault_name: str,
-        warm_fallback_usd: float = 0.05,
-        cold_fallback_usd: float = 0.01,
-    ) -> tuple[Optional[float], str, int]:
+        warm_fallback_usd: float = BACKUP_VAULTS_WARM_FALLBACK_USD,
+        cold_fallback_usd: float = BACKUP_VAULTS_COLD_FALLBACK_USD,
+    ) -> tuple[float | None, str, int]:
         """Estimate monthly storage cost for recovery points currently in a vault.
 
         Best-effort only:
@@ -879,7 +859,7 @@ class AwsBackupVaultsAuditChecker:
         total_warm_bytes = 0
         total_cold_bytes = 0
         try:
-            for rp in _paginate_items(
+            for rp in paginate_items(
                 backup,
                 "list_recovery_points_by_backup_vault",
                 "RecoveryPoints",
@@ -889,7 +869,7 @@ class AwsBackupVaultsAuditChecker:
                 size_bytes = rp.get("BackupSizeInBytes")
                 try:
                     b = int(size_bytes or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     b = 0
                 if b <= 0:
                     continue
@@ -899,7 +879,7 @@ class AwsBackupVaultsAuditChecker:
                     total_warm_bytes += b
         except ClientError:
             return None, "Unable to enumerate recovery points", 0
-        except Exception:  # pragma: no cover
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover
             return None, "Unable to enumerate recovery points", 0
 
         gb_warm = float(total_warm_bytes) / (1024.0**3)
@@ -930,7 +910,7 @@ class AwsBackupVaultsAuditChecker:
     def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
         code = exc.response.get("Error", {}).get("Code", "ClientError")
         return FindingDraft(
-            check_id="aws.backup.access_error",
+            check_id="aws.backup.access.error",
             check_name="AWS Backup access error",
             category="inventory",
             status="info",
@@ -976,7 +956,7 @@ class AwsBackupVaultsAuditChecker:
 
 
 @register_checker("checks.aws.backup_vaults_audit:AwsBackupVaultsAuditChecker")
-def _factory(ctx, bootstrap):
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> AwsBackupVaultsAuditChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:
         raise RuntimeError("aws_account_id missing from bootstrap (required for AwsBackupVaultsAuditChecker)")
@@ -993,7 +973,7 @@ def _factory(ctx, bootstrap):
         expected_lock_max_days = int(expected_lock_max_days)
 
     # Allowlist for legitimate cross-account access (comma-separated or list).
-    allowlist: Set[str] = set()
+    allowlist: set[str] = set()
     raw_allow = bootstrap.get("backup_vault_allowed_cross_account_ids")
     if isinstance(raw_allow, list):
         for x in raw_allow:

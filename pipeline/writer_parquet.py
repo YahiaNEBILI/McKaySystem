@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -26,7 +27,7 @@ class ParquetWriteError(RuntimeError):
 
 
 def _utc_today_str() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+    return datetime.now(UTC).date().isoformat()
 
 
 def _safe_str(value: Any) -> str:
@@ -89,7 +90,7 @@ class ParquetWriterStats:
     received: int = 0
     written: int = 0
     dropped_cast_errors: int = 0
-    cast_errors: List[str] = field(default_factory=list)
+    cast_errors: list[str] = field(default_factory=list)
 
 
 class FindingsParquetWriter:
@@ -106,7 +107,7 @@ class FindingsParquetWriter:
 
     def __init__(self, config: ParquetWriterConfig) -> None:
         self._cfg = config
-        self._buffer: List[Dict[str, Any]] = []
+        self._buffer: list[dict[str, Any]] = []
         self.stats = ParquetWriterStats()
 
         os.makedirs(self._cfg.base_dir, exist_ok=True)
@@ -148,7 +149,7 @@ class FindingsParquetWriter:
             return
 
         # Group by (tenant_id, run_date) to avoid mixing partitions in one file
-        groups: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for rec in self._buffer:
             tenant = _safe_str(rec.get(self._cfg.partition_tenant_field))
             run_date = _safe_str(rec.get(self._cfg.partition_date_field)) or _utc_today_str()
@@ -171,7 +172,7 @@ class FindingsParquetWriter:
     # Internal helpers
     # -------------------------
 
-    def _cast_and_add_partition_fields(self, wire_record: Mapping[str, Any]) -> Dict[str, Any]:
+    def _cast_and_add_partition_fields(self, wire_record: Mapping[str, Any]) -> dict[str, Any]:
         """
         Cast wire record to storage types and add derived partition fields (run_date).
         """
@@ -190,7 +191,7 @@ class FindingsParquetWriter:
         storage[self._cfg.partition_date_field] = run_date
         return storage
 
-    def _write_partition_group(self, tenant: str, run_date: str, rows: Sequence[Dict[str, Any]]) -> None:
+    def _write_partition_group(self, tenant: str, run_date: str, rows: Sequence[dict[str, Any]]) -> None:
         """
         Write a list of storage-format records into one or more Parquet files, splitting by max_rows_per_file.
         """
@@ -227,7 +228,7 @@ class FindingsParquetWriter:
             self.stats.written += len(chunk)
             start = end
 
-    def _table_from_rows(self, rows: Sequence[Dict[str, Any]]) -> pa.Table:
+    def _table_from_rows(self, rows: Sequence[dict[str, Any]]) -> pa.Table:
         """
         Build an Arrow table from storage-format rows using the configured schema.
 

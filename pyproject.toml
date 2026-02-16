@@ -9,6 +9,9 @@ dependencies = [
   "botocore>=1.31",
   "duckdb>=0.9",
   "pyarrow>=14",
+  "Flask>=3.0",
+  "pydantic>=2.7,<3",
+  "pytz>=2024.1",
 
   # DB ingestion
   "psycopg2-binary>=2.9",
@@ -23,6 +26,7 @@ dependencies = [
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.1",
+  "hypothesis>=6.0",
 
   # Lint/format/type
   "ruff>=0.6",
@@ -43,6 +47,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
+  "apps*",
   "mckaysystem*",
   "infra*",
   "checks*",
@@ -55,16 +60,11 @@ exclude = ["tests*", "docs*", "data*", "webapp_data*", "build*", "dist*"]
 
 [tool.setuptools]
 py-modules = [
-  "cli",
-  "runner",
-  "db",
-  "export_findings",
-  "ingest_exported_json",
   "version",
 ]
 
 [project.scripts]
-mckay = "cli:main"
+mckay = "apps.worker.cli:main"
 
 
 [tool.pytest.ini_options]

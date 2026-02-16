@@ -102,7 +102,7 @@ def test_log_group_retention_missing_emits() -> None:
     ctx = _mk_ctx(logs=logs)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.logs.log_groups.retention_missing"]
+    hits = [f for f in findings if f.check_id == "aws.logs.log.groups.retention.missing"]
     assert len(hits) == 1
     assert hits[0].scope.service == "logs"
     assert hits[0].issue_key.get("log_group") == "/aws/lambda/fn-a"
@@ -137,7 +137,7 @@ def test_metric_filters_custom_metrics_emits_with_pricing() -> None:
     ctx = _mk_ctx(logs=logs, pricing=FakePricing())
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.cloudwatch.custom_metrics.from_log_filters"]
+    hits = [f for f in findings if f.check_id == "aws.cloudwatch.custom.metrics.from.log.filters"]
     assert len(hits) == 2
     assert all(f.estimated_monthly_cost == pytest.approx(0.25) for f in hits)
     assert {f.dimensions.get("metric_name") for f in hits} == {"Errors", "Latency"}
@@ -149,6 +149,6 @@ def test_access_denied_emits_info_finding() -> None:
     ctx = _mk_ctx(logs=logs)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.cloudwatch.access_error"]
+    hits = [f for f in findings if f.check_id == "aws.cloudwatch.access.error"]
     assert len(hits) == 1
     assert hits[0].status == "info"

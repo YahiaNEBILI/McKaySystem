@@ -1,0 +1,511 @@
+"""Tests for remediation API endpoints."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any, Literal
+
+import apps.flask_api.blueprints.remediations as remediations_blueprint
+import apps.flask_api.flask_app as flask_app
+
+
+class _DummyConn:
+    """Minimal context manager returned by db_conn during unit tests."""
+
+    def __enter__(self) -> _DummyConn:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:  # type: ignore[no-untyped-def]
+        return False
+
+    def commit(self) -> None:
+        return
+
+
+def _disable_runtime_guards(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Disable auth/schema guards so request tests focus on SQL behavior."""
+    monkeypatch.setattr(flask_app, "_schema_gate_enabled", False)
+    monkeypatch.setattr(flask_app, "_schema_gate_checked", True)
+    monkeypatch.setattr(flask_app, "_API_BEARER_TOKEN", "")
+    monkeypatch.setattr(flask_app, "db_conn", lambda: _DummyConn())
+    monkeypatch.setattr(remediations_blueprint, "db_conn", lambda: _DummyConn())
+    monkeypatch.setattr(
+        remediations_blueprint,
+        "fetch_all_dict_conn",
+        lambda conn, sql, params=None: flask_app.fetch_all_dict_conn(conn, sql, params),  # type: ignore[no-untyped-def]
+    )
+    monkeypatch.setattr(
+        remediations_blueprint,
+        "fetch_one_dict_conn",
+        lambda conn, sql, params=None: flask_app.fetch_one_dict_conn(conn, sql, params),  # type: ignore[no-untyped-def]
+    )
+    monkeypatch.setattr(
+        remediations_blueprint,
+        "execute_conn",
+        lambda conn, sql, params=None: flask_app.execute_conn(conn, sql, params),  # type: ignore[no-untyped-def]
+    )
+
+
+def test_remediations_list_query_is_scoped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/remediations` must query remediation_actions with tenant/workspace scope."""
+    _disable_runtime_guards(monkeypatch)
+    captured_sql: list[str] = []
+
+    def _fake_fetch_all(_conn: object, sql: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        _ = params
+        captured_sql.append(sql)
+        return []
+
+    def _fake_fetch_one(_conn: object, sql: str, params: Sequence[Any] | None = None) -> dict[str, Any]:
+        _ = params
+        captured_sql.append(sql)
+        return {"n": 0}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get(
+        "/api/remediations?tenant_id=acme&workspace=prod&status=pending_approval&action_type=noop"
+    )
+
+    assert resp.status_code == 200
+    sql_blob = "\n".join(captured_sql).lower()
+    assert "from remediation_actions" in sql_blob
+    assert "ra.tenant_id = %s" in sql_blob
+    assert "ra.workspace = %s" in sql_blob
+    assert "ra.status = any(%s)" in sql_blob
+    assert "ra.action_type = any(%s)" in sql_blob
+
+
+def test_remediations_impact_query_is_scoped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/remediations/impact` must query remediation_impact with tenant/workspace scope."""
+    _disable_runtime_guards(monkeypatch)
+    captured_sql: list[str] = []
+
+    def _fake_fetch_all(_conn: object, sql: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        _ = params
+        captured_sql.append(sql)
+        return []
+
+    call_no = {"n": 0}
+
+    def _fake_fetch_one(_conn: object, sql: str, params: Sequence[Any] | None = None) -> dict[str, Any]:
+        _ = params
+        captured_sql.append(sql)
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return {"n": 0}
+        return {
+            "actions_count": 0,
+            "resolved_count": 0,
+            "persistent_count": 0,
+            "pending_count": 0,
+            "failed_count": 0,
+            "baseline_total_monthly_savings": 0.0,
+            "realized_total_monthly_savings": 0.0,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get(
+        "/api/remediations/impact?tenant_id=acme&workspace=prod"
+        "&verification_status=verified_resolved&action_status=completed&action_type=rightsize"
+    )
+
+    assert resp.status_code == 200
+    sql_blob = "\n".join(captured_sql).lower()
+    assert "from remediation_impact ri" in sql_blob
+    assert "ri.tenant_id = %s" in sql_blob
+    assert "ri.workspace = %s" in sql_blob
+    assert "ri.verification_status = any(%s)" in sql_blob
+    assert "ri.action_status = any(%s)" in sql_blob
+    assert "ri.action_type = any(%s)" in sql_blob
+
+
+def test_remediations_impact_summary_returns_realization_rate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Impact endpoint should return deterministic summary totals and realization rate."""
+    _disable_runtime_guards(monkeypatch)
+
+    monkeypatch.setattr(
+        flask_app,
+        "fetch_all_dict_conn",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "action_id": "act-1",
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "action_type": "rightsize",
+                "action_status": "completed",
+                "verification_status": "verified_resolved",
+                "baseline_estimated_monthly_savings": 100.0,
+                "current_estimated_monthly_savings": None,
+                "realized_monthly_savings": 80.0,
+                "realization_rate_pct": 80.0,
+                "latest_run_id": "run-2",
+                "latest_run_ts": "2026-02-15T10:00:00Z",
+                "present_in_latest": False,
+                "finalized_at": "2026-02-15T09:00:00Z",
+                "computed_at": "2026-02-15T10:00:00Z",
+                "version": 1,
+            }
+        ],
+    )
+
+    call_no = {"n": 0}
+
+    def _fake_fetch_one(*_args, **_kwargs) -> dict[str, Any]:
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return {"n": 1}
+        return {
+            "actions_count": 1,
+            "resolved_count": 1,
+            "persistent_count": 0,
+            "pending_count": 0,
+            "failed_count": 0,
+            "baseline_total_monthly_savings": 100.0,
+            "realized_total_monthly_savings": 80.0,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/remediations/impact?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    summary = payload.get("summary") or {}
+    assert summary.get("actions_count") == 1
+    assert summary.get("baseline_total_monthly_savings") == 100.0
+    assert summary.get("realized_total_monthly_savings") == 80.0
+    assert summary.get("realization_rate_pct") == 80.0
+
+
+def test_remediation_approve_transitions_pending_to_approved(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Approve endpoint should allow `pending_approval` -> `approved` only."""
+    _disable_runtime_guards(monkeypatch)
+    fetch_calls = {"n": 0}
+    execute_calls: list[tuple[str, Sequence[Any] | None]] = []
+
+    def _fake_fetch_one(_conn: object, sql: str, params: Sequence[Any] | None = None) -> dict[str, Any] | None:
+        _ = sql
+        fetch_calls["n"] += 1
+        if fetch_calls["n"] == 1:
+            return {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "action_id": "act-1",
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "action_type": "rightsize",
+                "status": "pending_approval",
+                "action_payload": {},
+                "dry_run": True,
+                "reason": None,
+                "requested_by": "alice@acme.io",
+                "approved_by": None,
+                "rejected_by": None,
+                "requested_at": "2026-02-15T10:00:00Z",
+                "approved_at": None,
+                "rejected_at": None,
+                "updated_at": "2026-02-15T10:00:00Z",
+                "version": 1,
+            }
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-1",
+            "fingerprint": "fp-1",
+            "check_id": "aws.ec2.instances.underutilized",
+            "action_type": "rightsize",
+            "status": "approved",
+            "action_payload": {},
+            "dry_run": True,
+            "reason": "approved for phase1",
+            "requested_by": "alice@acme.io",
+            "approved_by": "bob@acme.io",
+            "rejected_by": None,
+            "requested_at": "2026-02-15T10:00:00Z",
+            "approved_at": "2026-02-15T10:05:00Z",
+            "rejected_at": None,
+            "updated_at": "2026-02-15T10:05:00Z",
+            "version": 2,
+        }
+
+    def _fake_execute(_conn: object, sql: str, params: Sequence[Any] | None = None) -> None:
+        execute_calls.append((sql, params))
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "execute_conn", _fake_execute)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/remediations/approve",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-1",
+            "approved_by": "bob@acme.io",
+            "reason": "approved for phase1",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    action = payload.get("action") or {}
+    assert action.get("status") == "approved"
+    assert action.get("approved_by") == "bob@acme.io"
+    assert execute_calls
+    _, params = execute_calls[0]
+    assert params is not None
+    assert params[-3:] == ("acme", "prod", "act-1")
+
+
+def test_remediation_approve_rejects_invalid_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Approve endpoint should return 409 when action is not pending approval."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-1",
+            "fingerprint": "fp-1",
+            "check_id": "aws.ec2.instances.underutilized",
+            "action_type": "rightsize",
+            "status": "approved",
+            "action_payload": {},
+            "dry_run": True,
+            "reason": None,
+            "requested_by": "alice@acme.io",
+            "approved_by": "bob@acme.io",
+            "rejected_by": None,
+            "requested_at": "2026-02-15T10:00:00Z",
+            "approved_at": "2026-02-15T10:05:00Z",
+            "rejected_at": None,
+            "updated_at": "2026-02-15T10:05:00Z",
+            "version": 2,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "execute_conn", lambda *args, **kwargs: None)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/remediations/approve",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-1",
+            "approved_by": "bob@acme.io",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 409
+    assert payload.get("ok") is False
+    assert payload.get("error") == "invalid_state"
+
+
+def test_remediation_reject_returns_not_found(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Reject endpoint should return 404 when action is missing in scope."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(flask_app, "execute_conn", lambda *args, **kwargs: None)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/remediations/reject",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "missing-action",
+            "rejected_by": "bob@acme.io",
+            "reason": "out of scope",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 404
+    assert payload.get("ok") is False
+    assert payload.get("error") == "not_found"
+
+
+def test_remediation_request_creates_action(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Request endpoint should insert a new remediation action for an actionable finding."""
+    _disable_runtime_guards(monkeypatch)
+    execute_calls: list[tuple[str, Sequence[Any] | None]] = []
+    fetch_calls = {"n": 0}
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any] | None:
+        fetch_calls["n"] += 1
+        if fetch_calls["n"] == 1:
+            return {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "effective_state": "open",
+                "service": "ec2",
+            }
+        if fetch_calls["n"] == 2:
+            return None
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-created",
+            "fingerprint": "fp-1",
+            "check_id": "aws.ec2.instances.underutilized",
+            "action_type": "rightsize",
+            "status": "pending_approval",
+            "action_payload": {
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "recommendation_type": "rightsizing.ec2.instance",
+            },
+            "dry_run": True,
+            "reason": "phase1",
+            "requested_by": "alice@acme.io",
+            "approved_by": None,
+            "rejected_by": None,
+            "requested_at": "2026-02-15T10:00:00Z",
+            "approved_at": None,
+            "rejected_at": None,
+            "updated_at": "2026-02-15T10:00:00Z",
+            "version": 1,
+        }
+
+    def _fake_execute(_conn: object, sql: str, params: Sequence[Any] | None = None) -> None:
+        execute_calls.append((sql, params))
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "execute_conn", _fake_execute)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/remediations/request",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "fingerprint": "fp-1",
+            "action_id": "act-created",
+            "requested_by": "alice@acme.io",
+            "reason": "phase1",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("created") is True
+    action = payload.get("action") or {}
+    assert action.get("status") == "pending_approval"
+    assert action.get("action_type") == "rightsize"
+    assert execute_calls
+    sql, params = execute_calls[0]
+    assert "INSERT INTO remediation_actions" in sql
+    assert params is not None
+    assert params[0:4] == ("acme", "prod", "act-created", "fp-1")
+
+
+def test_remediation_request_is_idempotent_for_existing_action(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Request endpoint should return existing action without reinserting."""
+    _disable_runtime_guards(monkeypatch)
+    execute_calls: list[tuple[str, Sequence[Any] | None]] = []
+    fetch_calls = {"n": 0}
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any] | None:
+        fetch_calls["n"] += 1
+        if fetch_calls["n"] == 1:
+            return {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "fingerprint": "fp-1",
+                "check_id": "aws.ec2.instances.underutilized",
+                "effective_state": "open",
+                "service": "ec2",
+            }
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "action_id": "act-existing",
+            "fingerprint": "fp-1",
+            "check_id": "aws.ec2.instances.underutilized",
+            "action_type": "rightsize",
+            "status": "pending_approval",
+            "action_payload": {},
+            "dry_run": True,
+            "reason": None,
+            "requested_by": None,
+            "approved_by": None,
+            "rejected_by": None,
+            "requested_at": "2026-02-15T10:00:00Z",
+            "approved_at": None,
+            "rejected_at": None,
+            "updated_at": "2026-02-15T10:00:00Z",
+            "version": 1,
+        }
+
+    def _fake_execute(_conn: object, sql: str, params: Sequence[Any] | None = None) -> None:
+        execute_calls.append((sql, params))
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "execute_conn", _fake_execute)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/remediations/request",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "fingerprint": "fp-1",
+            "action_id": "act-existing",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("created") is False
+    assert payload.get("idempotent") is True
+    assert not execute_calls
+
+
+def test_remediation_request_rejects_terminal_finding(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Request endpoint should reject resolved/ignored findings."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "fingerprint": "fp-1",
+            "check_id": "aws.ec2.instances.underutilized",
+            "effective_state": "resolved",
+            "service": "ec2",
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "execute_conn", lambda *args, **kwargs: None)
+
+    client = flask_app.app.test_client()
+    resp = client.post(
+        "/api/remediations/request",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "fingerprint": "fp-1",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 409
+    assert payload.get("ok") is False
+    assert payload.get("error") == "invalid_state"

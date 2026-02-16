@@ -153,7 +153,7 @@ def test_no_listeners_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.elbv2.load_balancers.no_listeners"]
+    hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.listeners"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "test"
 
@@ -194,7 +194,7 @@ def test_idle_alb_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.elbv2.load_balancers.idle"]
+    hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.idle"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "idle"
 
@@ -235,7 +235,7 @@ def test_no_registered_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.elbv2.load_balancers.no_registered_targets"]
+    hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.registered.targets"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "notargets"
 
@@ -275,7 +275,7 @@ def test_no_healthy_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    hits = [f for f in findings if f.check_id == "aws.elbv2.load_balancers.no_healthy_targets"]
+    hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.healthy.targets"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "unhealthy"
 
@@ -292,4 +292,4 @@ def test_access_denied_emits_access_error(monkeypatch: pytest.MonkeyPatch) -> No
     checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123")
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.elbv2.load_balancers.access_error" for f in findings)
+    assert any(f.check_id == "aws.elbv2.load.balancers.access.error" for f in findings)

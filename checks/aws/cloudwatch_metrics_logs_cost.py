@@ -20,15 +20,30 @@ Design notes
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
 import checks.aws._common as common
-from checks.aws._common import AwsAccountContext, build_scope
+from checks.aws._common import AwsAccountContext, build_scope, get_logger
+from checks.aws.defaults import (
+    CLOUDWATCH_ALARMS_COUNT_WARN_THRESHOLD,
+    CLOUDWATCH_FALLBACK_USD_PER_ALARM_MONTH,
+    CLOUDWATCH_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH,
+    CLOUDWATCH_MAX_CUSTOM_METRIC_FINDINGS,
+    CLOUDWATCH_MIN_CUSTOM_METRICS_FOR_SIGNAL,
+    CLOUDWATCH_REQUIRE_RETENTION_POLICY,
+    CLOUDWATCH_SUPPRESS_TAG_KEYS,
+    CLOUDWATCH_SUPPRESS_TAG_VALUES,
+    CLOUDWATCH_SUPPRESS_VALUE_PREFIXES,
+)
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
+
+# Logger for this module
+_LOGGER = get_logger("cloudwatch_metrics_logs_cost")
 
 
 # -----------------------------
@@ -41,39 +56,17 @@ class CloudWatchMetricsLogsCostConfig:
     """Configuration for CloudWatch Metrics & Logs cost checker."""
 
     # Log groups
-    require_retention_policy: bool = True
-    suppress_tag_keys: Tuple[str, ...] = (
-        "retain",
-        "retention",
-        "keep",
-        "do_not_delete",
-        "donotdelete",
-        "lifecycle",
-    )
-    suppress_tag_values: Tuple[str, ...] = (
-        "retain",
-        "retained",
-        "keep",
-        "true",
-        "yes",
-        "1",
-        "permanent",
-        "legal-hold",
-    )
-    suppress_value_prefixes: Tuple[str, ...] = (
-        "keep",
-        "retain",
-        "do-not-delete",
-        "do_not_delete",
-        "donotdelete",
-    )
+    require_retention_policy: bool = CLOUDWATCH_REQUIRE_RETENTION_POLICY
+    suppress_tag_keys: tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_KEYS
+    suppress_tag_values: tuple[str, ...] = CLOUDWATCH_SUPPRESS_TAG_VALUES
+    suppress_value_prefixes: tuple[str, ...] = CLOUDWATCH_SUPPRESS_VALUE_PREFIXES
 
     # Custom metrics
-    min_custom_metrics_for_signal: int = 1
-    max_custom_metric_findings: int = 50_000
+    min_custom_metrics_for_signal: int = CLOUDWATCH_MIN_CUSTOM_METRICS_FOR_SIGNAL
+    max_custom_metric_findings: int = CLOUDWATCH_MAX_CUSTOM_METRIC_FINDINGS
 
     # Alarms
-    alarms_count_warn_threshold: int = 100
+    alarms_count_warn_threshold: int = CLOUDWATCH_ALARMS_COUNT_WARN_THRESHOLD
 
 
 # -----------------------------
@@ -81,8 +74,8 @@ class CloudWatchMetricsLogsCostConfig:
 # -----------------------------
 
 
-_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH: float = 0.30
-_FALLBACK_USD_PER_ALARM_MONTH: float = 0.10
+_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH: float = CLOUDWATCH_FALLBACK_USD_PER_CUSTOM_METRIC_MONTH
+_FALLBACK_USD_PER_ALARM_MONTH: float = CLOUDWATCH_FALLBACK_USD_PER_ALARM_MONTH
 
 
 def _pricing_service(ctx: RunContext) -> Any:
@@ -122,7 +115,7 @@ def _resolve_custom_metric_price_usd_per_month(ctx: RunContext, *, region: str) 
             30,
         )
 
-    attempts: List[List[Dict[str, str]]] = [
+    attempts: list[list[dict[str, str]]] = [
         [
             {"Field": "location", "Value": location},
             {"Field": "productFamily", "Value": "Metric"},
@@ -185,7 +178,7 @@ def _resolve_alarm_price_usd_per_month(ctx: RunContext, *, region: str) -> tuple
             30,
         )
 
-    attempts: List[List[Dict[str, str]]] = [
+    attempts: list[list[dict[str, str]]] = [
         [
             {"Field": "location", "Value": location},
             {"Field": "productFamily", "Value": "Alarm"},
@@ -235,8 +228,8 @@ def _paginate(
     op_name: str,
     result_key: str,
     *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterable[Dict[str, Any]]:
+    params: dict[str, Any] | None = None,
+) -> Iterable[dict[str, Any]]:
     """Yield items from a paginator, raising errors to the caller."""
 
     paginator = client.get_paginator(op_name)
@@ -260,18 +253,19 @@ def _safe_str(value: Any) -> str:
 class CloudWatchMetricsLogsCostChecker(Checker):
     """CloudWatch Logs retention + custom metrics + alarms count signals."""
 
-    checker_id = "aws.cloudwatch.metrics_logs_cost"
+    checker_id = "aws.cloudwatch.metrics.logs.cost"
 
     def __init__(
         self,
         *,
         account: AwsAccountContext,
-        cfg: Optional[CloudWatchMetricsLogsCostConfig] = None,
+        cfg: CloudWatchMetricsLogsCostConfig | None = None,
     ) -> None:
         self._account = account
         self._cfg = cfg or CloudWatchMetricsLogsCostConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting CloudWatch metrics and logs cost check")
         services = getattr(ctx, "services", None)
         if services is None:
             return []
@@ -283,11 +277,12 @@ class CloudWatchMetricsLogsCostChecker(Checker):
             or common.safe_region_from_client(logs)
             or common.safe_region_from_client(cw)
         )
+        _LOGGER.debug("CloudWatch check running", extra={"region": region})
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
 
         # Logs inventory is shared by multiple signals; fetch once.
-        log_groups: Optional[List[Dict[str, Any]]] = None
+        log_groups: list[dict[str, Any]] | None = None
         if logs is not None:
             try:
                 log_groups = list(_paginate(logs, "describe_log_groups", "logGroups"))
@@ -343,7 +338,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         )
 
         return FindingDraft(
-            check_id="aws.cloudwatch.access_error",
+            check_id="aws.cloudwatch.access.error",
             check_name="CloudWatch access error",
             category="governance",
             status="info",
@@ -378,12 +373,12 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         logs: Any,
         region: str,
         log_groups: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
         if not cfg.require_retention_policy:
             return []
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
         for g in log_groups:
             name = _safe_str(g.get("logGroupName"))
             if not name:
@@ -413,7 +408,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
             findings.append(
                 FindingDraft(
-                    check_id="aws.logs.log_groups.retention_missing",
+                    check_id="aws.logs.log.groups.retention.missing",
                     check_name="CloudWatch Logs retention policy",
                     category="governance",
                     status="fail",
@@ -471,10 +466,10 @@ class CloudWatchMetricsLogsCostChecker(Checker):
         logs: Any,
         region: str,
         log_groups: Sequence[Mapping[str, Any]],
-    ) -> List[FindingDraft]:
+    ) -> list[FindingDraft]:
         cfg = self._cfg
 
-        by_metric: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        by_metric: dict[tuple[str, str], dict[str, Any]] = {}
         for g in log_groups:
             name = _safe_str(g.get("logGroupName"))
             if not name:
@@ -520,7 +515,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
         unit_price, notes, confidence = _resolve_custom_metric_price_usd_per_month(ctx, region=region)
 
-        findings: List[FindingDraft] = []
+        findings: list[FindingDraft] = []
         emitted = 0
         for (namespace, metric_name), meta in sorted(by_metric.items()):
             if emitted >= cfg.max_custom_metric_findings:
@@ -544,7 +539,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
             findings.append(
                 FindingDraft(
-                    check_id="aws.cloudwatch.custom_metrics.from_log_filters",
+                    check_id="aws.cloudwatch.custom.metrics.from.log.filters",
                     check_name="CloudWatch custom metrics created by log metric filters",
                     category="waste",
                     status="info",
@@ -585,7 +580,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
     # Alarm count signal
     # -------------------------
 
-    def _alarms_count_findings(self, ctx: RunContext, *, cloudwatch: Any, region: str) -> List[FindingDraft]:
+    def _alarms_count_findings(self, ctx: RunContext, *, cloudwatch: Any, region: str) -> list[FindingDraft]:
         cfg = self._cfg
         try:
             alarms = list(_paginate(cloudwatch, "describe_alarms", "MetricAlarms"))
@@ -621,7 +616,7 @@ class CloudWatchMetricsLogsCostChecker(Checker):
 
         return [
             FindingDraft(
-                check_id="aws.cloudwatch.alarms.high_count",
+                check_id="aws.cloudwatch.alarms.high.count",
                 check_name="CloudWatch alarms count",
                 category="waste",
                 status="info",
@@ -651,7 +646,7 @@ SPEC = "checks.aws.cloudwatch_metrics_logs_cost:CloudWatchMetricsLogsCostChecker
 
 
 @register_checker(SPEC)
-def _factory(ctx: Any, bootstrap: Bootstrap) -> CloudWatchMetricsLogsCostChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> CloudWatchMetricsLogsCostChecker:
     account_id = _safe_str(bootstrap.get("aws_account_id")).strip()
     billing_id = _safe_str(bootstrap.get("aws_billing_account_id")).strip() or account_id
     if not account_id:

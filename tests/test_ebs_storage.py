@@ -109,7 +109,7 @@ def test_unattached_volume_emits_with_cost(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2, cfg=EBSStorageConfig(unattached_min_age_days=7))
-    hits = _find(findings, "aws.ec2.ebs.unattached_volume")
+    hits = _find(findings, "aws.ec2.ebs.unattached.volume")
     assert len(hits) == 1
     f = hits[0]
     assert f.status == "fail"
@@ -146,7 +146,7 @@ def test_unattached_volume_suppressed_by_tag(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2)
-    assert _find(findings, "aws.ec2.ebs.unattached_volume") == []
+    assert _find(findings, "aws.ec2.ebs.unattached.volume") == []
 
 
 def test_gp2_to_gp3_emits_savings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,7 +175,7 @@ def test_gp2_to_gp3_emits_savings(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2)
-    hits = _find(findings, "aws.ec2.ebs.gp2_to_gp3")
+    hits = _find(findings, "aws.ec2.ebs.gp2.to.gp3")
     assert len(hits) == 1
     f = hits[0]
     assert f.scope.resource_id == "vol-gp2"
@@ -210,7 +210,7 @@ def test_old_snapshot_emits_when_not_referenced_by_ami(monkeypatch: pytest.Monke
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2, cfg=cfg)
-    hits = _find(findings, "aws.ec2.ebs.old_snapshot")
+    hits = _find(findings, "aws.ec2.ebs.old.snapshot")
     assert len(hits) == 1
     f = hits[0]
     assert f.scope.resource_id == "snap-old"
@@ -258,7 +258,7 @@ def test_old_snapshot_skipped_when_referenced_by_ami(monkeypatch: pytest.MonkeyP
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2, cfg=cfg)
-    assert _find(findings, "aws.ec2.ebs.old_snapshot") == []
+    assert _find(findings, "aws.ec2.ebs.old.snapshot") == []
 
 
 def test_aws_backup_managed_snapshots_are_guardrailed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,8 +300,8 @@ def test_aws_backup_managed_snapshots_are_guardrailed(monkeypatch: pytest.Monkey
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2, cfg=cfg)
-    assert _find(findings, "aws.ec2.ebs.old_snapshot") == []
-    assert _find(findings, "aws.ec2.ebs.snapshot_unencrypted") == []
+    assert _find(findings, "aws.ec2.ebs.old.snapshot") == []
+    assert _find(findings, "aws.ec2.ebs.snapshot.unencrypted") == []
 
 
 def test_unencrypted_volume_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,7 +330,7 @@ def test_unencrypted_volume_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2)
-    hits = _find(findings, "aws.ec2.ebs.volume_unencrypted")
+    hits = _find(findings, "aws.ec2.ebs.volume.unencrypted")
     assert len(hits) == 1
     f = hits[0]
     assert f.scope.resource_id == "vol-unenc"
@@ -363,7 +363,7 @@ def test_unencrypted_snapshot_emits_when_not_backup(monkeypatch: pytest.MonkeyPa
     )
 
     findings = _run(monkeypatch=monkeypatch, ec2=ec2)
-    hits = _find(findings, "aws.ec2.ebs.snapshot_unencrypted")
+    hits = _find(findings, "aws.ec2.ebs.snapshot.unencrypted")
     assert len(hits) == 1
     f = hits[0]
     assert f.scope.resource_id == "snap-unenc"

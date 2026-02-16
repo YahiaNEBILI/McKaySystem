@@ -15,17 +15,40 @@ Authoritative design contracts and deep dives live under `docs/`.
 
 ## Getting started
 
-- New here? Read `docs/onboarding.md`.
-- Want the detailed architecture? Start with `docs/architecture/architecture.md`
-  and `docs/architecture/pipeline_overview.md`.
+- New here? Read `docs/00_overview/introduction.md`.
+- Want the detailed architecture? Start with `docs/01_architecture/architecture.md`
+  and `docs/02_pipeline/pipeline_overview.md`.
 
 Quick commands:
 
 ```bash
 pip install -e ".[dev]"
 pytest
-python runner.py --tenant acme --workspace prod
-python export_findings.py
+python -m apps.worker.runner --tenant acme --workspace prod
+python -m apps.worker.export_findings
+```
+
+Note: `python -m apps.worker.export_findings` writes `run_manifest.json`. DB ingestion reads Parquet via `run_manifest.json`.
+Migrations: run `python -m apps.backend.db_migrate` (or `mckay migrate`) before first ingest.
+
+Monorepo separation:
+- Backend/API: `apps/flask_api/` + `apps/backend/` (deployment docs: `deploy/backend/`)
+- Worker/Scanner: `apps/worker/` + engine paths (deployment docs: `deploy/worker/`)
+- Layout guard: `python tools/repo/check_layout.py`
+- Release tracks:
+  - `make ci-backend` (or GitHub workflow: `.github/workflows/backend-ci.yml`)
+  - `make ci-worker` (or GitHub workflow: `.github/workflows/worker-ci.yml`)
+
+CloudShell worker sparse checkout:
+
+```bash
+bash tools/cloudshell/sparse_checkout_worker.sh .
+```
+
+CloudShell sparse clone bootstrap:
+
+```bash
+bash tools/cloudshell/bootstrap_sparse_clone.sh <repo-url> <target-dir> worker
 ```
 
 ---
@@ -36,7 +59,7 @@ Start here depending on your goal:
 
 - **Architecture & mental model**
   - `docs/01_architecture/architecture.md`
-  - `docs/01_architecture/pipeline_overview.md`
+  - `docs/02_pipeline/pipeline_overview.md`
 
 - **Checker philosophy & contracts**
   - `docs/03_checkers/checker_contract.md`
@@ -100,7 +123,7 @@ Canonical definitions live in `docs/00_overview/glossary.md`.
 
 ```
 .
-├── runner.py                    # Main orchestration entrypoint
+├── apps/worker/runner.py        # Main orchestration entrypoint
 ├── contracts/                   # Canonical schema & validation
 │   ├── schema.py                # Arrow schema (source of truth)
 │   ├── finops_contracts.py      # Canonicalization & hashing
@@ -313,8 +336,8 @@ This fully decouples backend evolution from the UI.
 ## Typical end-to-end run
 
 ```bash
-python runner.py --tenant acme --workspace prod
-python export_findings.py
+python -m apps.worker.runner --tenant acme --workspace prod
+python -m apps.worker.export_findings
 ```
 
 If CUR data exists, costs appear automatically. If not, the UI degrades gracefully.
@@ -336,3 +359,4 @@ data/finops_findings_enriched/**/*.parquet
 - Modular pipeline → Iceberg / Trino ready
 
 ---
+

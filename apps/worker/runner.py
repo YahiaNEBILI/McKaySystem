@@ -1,5 +1,5 @@
 """
-runner.py
+apps.worker.runner
 
 FinOps SaaS runner (checkers -> validated wire findings -> storage-cast -> parquet).
 
@@ -22,19 +22,20 @@ Regions are configured in infra/aws_config.py (AWS_REGIONS).
 No CLI args are used for region selection.
 
 Run everything (default):
-python runner.py --tenant acme --workspace prod
+python -m apps.worker.runner --tenant acme --workspace prod
 
 Disable correlation:
-python runner.py --tenant acme --workspace prod --no-correlation
+python -m apps.worker.runner --tenant acme --workspace prod --no-correlation
 
 Custom correlated output directory:
-python runner.py --tenant acme --workspace prod --correlation-out data/finops_findings_correlated
+python -m apps.worker.runner --tenant acme --workspace prod --correlation-out data/finops_findings_correlated
 
 Run everything except one checker:
-python runner.py --tenant acme --workspace prod --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
+python -m apps.worker.runner --tenant acme --workspace prod \
+  --exclude-checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
 
 Run a subset:
-python runner.py --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
+python -m apps.worker.runner --tenant acme --workspace prod --checker checks.aws.s3_lifecycle_missing:S3LifecycleMissingChecker
 """
 
 from __future__ import annotations
@@ -42,29 +43,46 @@ from __future__ import annotations
 import argparse
 import glob
 import importlib
+import logging
 import os
 import pkgutil
 import sys
-import logging
-from datetime import datetime, timezone
-from typing import Dict, List, Sequence, Tuple
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import boto3
 
 import checks  # IMPORTANT: used for module discovery
 from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
-from contracts.services import ServicesFactory, Services
+from contracts.services import Services, ServicesFactory
 from infra.aws_config import SDK_CONFIG
+from infra.config import get_settings
 from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
+from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _clean_path(value: str) -> str:
+    return str(value or "").strip()
+
+
+def _derive_sibling_dir(raw_out_dir: str, sibling_name: str) -> str:
+    if not raw_out_dir:
+        return ""
+    try:
+        return str(Path(raw_out_dir).parent / sibling_name)
+    except Exception:
+        return ""
 
 
 def _has_parquet(globs_list: Sequence[str]) -> bool:
@@ -78,8 +96,57 @@ def _non_empty_dir(path: str) -> bool:
     return os.path.isdir(path) and bool(glob.glob(f"{path}/**/*.parquet", recursive=True))
 
 
+def _optional_non_empty_text(value: Any) -> str | None:
+    """Return normalized optional text."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _derive_pricing_metadata_from_services(services: Services) -> tuple[str | None, str | None]:
+    """Best-effort derive pricing source/version from runtime services."""
+    pricing = getattr(services, "pricing", None)
+    if pricing is None:
+        return None, None
+
+    run_metadata = getattr(pricing, "run_metadata", None)
+    if callable(run_metadata):
+        try:
+            metadata = run_metadata()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            metadata = None
+        if isinstance(metadata, dict):
+            source = _optional_non_empty_text(
+                metadata.get("pricing_source") or metadata.get("price_source")
+            )
+            version = _optional_non_empty_text(metadata.get("pricing_version"))
+            return source, version
+
+    source = _optional_non_empty_text(
+        getattr(pricing, "pricing_source", None) or getattr(pricing, "source", None)
+    )
+    version = _optional_non_empty_text(
+        getattr(pricing, "pricing_version", None) or getattr(pricing, "version", None)
+    )
+    return source, version
+
+
+def _resolve_run_pricing_metadata(*, services: Services) -> tuple[str | None, str | None]:
+    """Resolve run pricing metadata with explicit env override precedence."""
+    auto_source, auto_version = _derive_pricing_metadata_from_services(services)
+
+    worker_cfg = get_settings(reload=True).worker
+    pricing_version = str(worker_cfg.pricing_version or "").strip()
+    pricing_source = str(worker_cfg.pricing_source or "").strip()
+
+    resolved_version = pricing_version or auto_version or ""
+    resolved_source = pricing_source or auto_source or ""
+    return (resolved_version or None), (resolved_source or None)
+
+
 def _make_run_id(run_ts: datetime) -> str:
-    return f"run-{run_ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}"
+    return f"run-{run_ts.astimezone(UTC).isoformat().replace('+00:00', 'Z')}"
 
 
 def _discover_all_checker_specs() -> list[str]:
@@ -252,9 +319,9 @@ def _run_correlation_step(
 def run_cost_enrichment_if_available(
     *,
     tenant_id: str,
-    findings_globs: List[str],
-    raw_cur_globs: List[str],
-    cur_facts_globs: List[str],
+    findings_globs: list[str],
+    raw_cur_globs: list[str],
+    cur_facts_globs: list[str],
     enriched_out_dir: str,
 ) -> bool:
     """
@@ -265,8 +332,8 @@ def run_cost_enrichment_if_available(
       False -> enrichment skipped (CUR unavailable)
     """
     try:
-        from pipeline.cur.normalize_cur import CurNormalizeConfig, normalize_cur
         from pipeline.cur.cost_enrich import CostEnrichConfig, enrich_findings_with_cur
+        from pipeline.cur.normalize_cur import CurNormalizeConfig, normalize_cur
     except Exception as exc:  # pragma: no cover
         logger.warning("CUR enrichment unavailable (modules missing): %s", exc)
         return False
@@ -299,7 +366,7 @@ def run_cost_enrichment_if_available(
     return True
 
 
-def _get_configured_regions() -> List[str]:
+def _get_configured_regions() -> list[str]:
     """
     Read region list from configuration (infra/aws_config.py).
 
@@ -320,7 +387,7 @@ def _get_configured_regions() -> List[str]:
         )
 
     seen = set()
-    ordered: List[str] = []
+    ordered: list[str] = []
     for r in regions:
         if r not in seen:
             seen.add(r)
@@ -352,10 +419,10 @@ def _make_ctx(
 
 def _partition_checkers_by_scope(
     *,
-    checker_specs: List[str],
+    checker_specs: list[str],
     ctx_control: RunContext,
     bootstrap: dict,
-) -> Tuple[List[Checker], List[str]]:
+) -> tuple[list[Checker], list[str]]:
     """
     Instantiate once using the control ctx so we can detect checker.is_regional.
 
@@ -363,8 +430,8 @@ def _partition_checkers_by_scope(
       - global_checkers: instantiated (run once)
       - regional_specs: specs to instantiate per region
     """
-    global_checkers: List[Checker] = []
-    regional_specs: List[str] = []
+    global_checkers: list[Checker] = []
+    regional_specs: list[str] = []
 
     for spec in checker_specs:
         inst = _load_checker(spec, ctx=ctx_control, bootstrap=bootstrap)
@@ -386,14 +453,25 @@ def main(argv: Sequence[str]) -> int:
         print(f"RULEPACK_VERSION={RULEPACK_VERSION}")
         print(f"SCHEMA_VERSION={SCHEMA_VERSION}")
         return 0
-    
+
     setup_logging(extra_fields={"app": "mckay", "component": "runner"})
 
-    paths = PipelinePaths()
+    raw_arg = _clean_path(args.out)
+    corr_arg = _clean_path(args.correlation_out)
+
+    # If raw output is overridden, derive correlated/enriched defaults alongside it
+    derived_corr = _derive_sibling_dir(raw_arg, "finops_findings_correlated") if raw_arg else ""
+    derived_enriched = _derive_sibling_dir(raw_arg, "finops_findings_enriched") if raw_arg else ""
+
+    paths = PipelinePaths.with_overrides(
+        findings_raw_dir=raw_arg or None,
+        findings_correlated_dir=corr_arg or (derived_corr or None),
+        findings_enriched_dir=derived_enriched or None,
+    )
 
     # Centralized defaults (CLI overrides still win)
-    raw_out_dir = args.out.strip() or str(paths.findings_raw_dir())
-    corr_out_dir = args.correlation_out.strip() or str(paths.findings_correlated_dir())
+    raw_out_dir = str(paths.findings_raw_dir())
+    corr_out_dir = str(paths.findings_correlated_dir())
     enriched_out_dir = str(paths.findings_enriched_dir())
 
     run_ts = _utc_now()
@@ -451,8 +529,8 @@ def main(argv: Sequence[str]) -> int:
 
     total_valid = 0
     total_invalid_count = 0
-    total_invalid_errors: List[str] = []
-    per_region_valid: Dict[str, int] = {}
+    total_invalid_errors: list[str] = []
+    per_region_valid: dict[str, int] = {}
 
     # --- Run global checkers (once, in control region) ---
     if global_checkers:
@@ -468,7 +546,7 @@ def main(argv: Sequence[str]) -> int:
         svcs = factory.for_region(region)
         ctx_region = _make_ctx(args=args, run_id=run_id, run_ts=run_ts, services=svcs)
 
-        regional_checkers: List[Checker] = []
+        regional_checkers: list[Checker] = []
         for spec in regional_specs:
             regional_checkers.append(_load_checker(spec, ctx=ctx_region, bootstrap=bootstrap))
 
@@ -527,7 +605,7 @@ def main(argv: Sequence[str]) -> int:
     logger.info("workspace: %s", args.workspace)
     logger.info("cloud: %s", args.cloud)
     logger.info("run_id: %s", run_id)
-    logger.info("run_ts: %s", run_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+    logger.info("run_ts: %s", run_ts.astimezone(UTC).isoformat().replace("+00:00", "Z"))
 
     logger.info("regions_configured: %s", len(regions))
     logger.info("regions: %s", ", ".join(regions))
@@ -582,6 +660,33 @@ def main(argv: Sequence[str]) -> int:
     # --- Error counts ---
     logger.info("validation_errors_count: %s", len(total_invalid_errors))
     logger.info("cast_errors_count: %s", len(stats.cast_errors or []))
+
+    # --- Persist run manifest (single source of truth across steps) ---
+    # Downstream steps (export/ingest) should NOT rely on hidden defaults for
+    # tenant/workspace or dataset paths.
+    try:
+        pricing_version, pricing_source = _resolve_run_pricing_metadata(services=control_services)
+        manifest = RunManifest(
+            tenant_id=args.tenant,
+            workspace=args.workspace,
+            run_id=run_id,
+            run_ts=run_ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            engine_name=ENGINE_NAME,
+            engine_version=ENGINE_VERSION,
+            rulepack_version=RULEPACK_VERSION,
+            schema_version=SCHEMA_VERSION,
+            pricing_version=pricing_version,
+            pricing_source=pricing_source,
+            out_raw=str(raw_out_dir),
+            out_correlated=str(corr_out_dir),
+            out_enriched=str(enriched_out_dir),
+            export_dir=str(paths.export_dir()),
+        )
+        mp = write_manifest(raw_out_dir, manifest)
+        logger.info("run_manifest: %s", mp)
+    except Exception as exc:  # pragma: no cover
+        # Never fail the run for a manifest write, but make it loud.
+        logger.warning("failed to write run manifest: %s", exc)
 
     # Non-zero exit code if nothing was written but we did receive records
     if stats.written == 0 and stats.received > 0:

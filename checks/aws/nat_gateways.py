@@ -26,28 +26,41 @@ Notes
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, cast
 
-from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError, OperationNotPageableError
 
 from checks.aws._common import (
     AwsAccountContext,
+    PricingResolver,
     build_scope,
     gb_from_bytes,
+    get_logger,
     is_suppressed,
     money,
     normalize_tags,
     now_utc,
+    paginate_items,
+    percentile,
     safe_float,
     safe_region_from_client,
 )
-
+from checks.aws.defaults import (
+    NAT_FALLBACK_DATA_USD_PER_GB,
+    NAT_FALLBACK_HOURLY_USD,
+    NAT_HIGH_DATA_PROCESSING_GIB_MONTH_THRESHOLD,
+    NAT_IDLE_P95_DAILY_BYTES_THRESHOLD,
+    NAT_LOOKBACK_DAYS,
+    NAT_MAX_FINDINGS_PER_TYPE,
+    NAT_MIN_DAILY_DATAPOINTS,
+    NAT_ORPHAN_MIN_AGE_DAYS,
+    NAT_SUPPRESS_TAG_KEYS,
+)
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
-
 
 # -----------------------------
 # Config
@@ -58,23 +71,23 @@ from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, 
 class NatGatewaysConfig:
     """Configuration knobs for :class:`NatGatewaysChecker`."""
 
-    lookback_days: int = 14
+    lookback_days: int = NAT_LOOKBACK_DAYS
     # For idle detection: p95 daily bytes threshold (default ~1 MiB/day).
-    idle_p95_daily_bytes_threshold: float = 1_048_576.0
+    idle_p95_daily_bytes_threshold: float = NAT_IDLE_P95_DAILY_BYTES_THRESHOLD
     # Minimum number of datapoints (daily) to consider metrics meaningful.
-    min_daily_datapoints: int = 7
+    min_daily_datapoints: int = NAT_MIN_DAILY_DATAPOINTS
 
     # High data processing: if monthly-equivalent traffic exceeds this threshold (GiB).
-    high_data_processing_gib_month_threshold: float = 100.0
+    high_data_processing_gib_month_threshold: float = NAT_HIGH_DATA_PROCESSING_GIB_MONTH_THRESHOLD
 
     # "Orphaned" detection: ignore NATs created very recently.
-    orphan_min_age_days: int = 1
+    orphan_min_age_days: int = NAT_ORPHAN_MIN_AGE_DAYS
 
     # Tag-based suppression (lowercased by normalize_tags)
-    suppress_tag_keys: Tuple[str, ...] = ("finops:ignore", "do-not-delete", "keep")
+    suppress_tag_keys: tuple[str, ...] = NAT_SUPPRESS_TAG_KEYS
 
     # Safety valve for very large environments
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = NAT_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------
@@ -82,153 +95,24 @@ class NatGatewaysConfig:
 # -----------------------------
 
 
-_FALLBACK_NAT_HOURLY_USD: float = 0.045
-_FALLBACK_NAT_DATA_USD_PER_GB: float = 0.045
+_FALLBACK_NAT_HOURLY_USD: float = NAT_FALLBACK_HOURLY_USD
+_FALLBACK_NAT_DATA_USD_PER_GB: float = NAT_FALLBACK_DATA_USD_PER_GB
+# Logger for this module
+_LOGGER = get_logger("nat_gateways")
 
 
-def _pricing_service(ctx: RunContext) -> Any:
-    return getattr(getattr(ctx, "services", None), "pricing", None)
-
-
-def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> Tuple[float, float, str, int]:
+def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> tuple[float, float, str, int]:
     """
     Best-effort pricing for NAT Gateway.
 
     Returns: (usd_per_hour, usd_per_gb_processed, notes, confidence_0_100)
     """
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "PricingService unavailable; using fallback pricing.", 30
-
-    location = ""
-    try:
-        location = str(pricing.location_for_region(region) or "")
-    except (AttributeError, TypeError, ValueError):
-        location = ""
-    if not location:
-        return _FALLBACK_NAT_HOURLY_USD, _FALLBACK_NAT_DATA_USD_PER_GB, "Pricing region mapping missing; using fallback pricing.", 30
-
-    # NAT pricing is published under AmazonEC2. Catalog attributes are not perfectly stable,
-    # so we try a few filter sets and fall back if none match.
-    hourly: Optional[float] = None
-    per_gb: Optional[float] = None
-    notes: List[str] = []
-
-    # Hourly (Hrs)
-    hourly_attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "NAT Gateway"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "usagetype", "Value": "NatGateway-Hours"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "group", "Value": "NAT Gateway"},
-        ],
-    ]
-
-    for filters in hourly_attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="Hrs")
-        except (AttributeError, TypeError, ValueError, ClientError):
-            quote = None
-        if quote is None:
-            continue
-        try:
-            hourly = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except (TypeError, ValueError):
-            hourly = None
-        if hourly and hourly > 0.0:
-            notes.append("on-demand hourly price resolved via PricingService")
-            break
-        hourly = None
-
-    # Data processing (GB)
-    data_attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "usagetype", "Value": "NatGateway-Bytes"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "group", "Value": "NAT Gateway"},
-            {"Field": "operation", "Value": "DataProcessing"},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "NAT Gateway"},
-            {"Field": "operation", "Value": "DataProcessing"},
-        ],
-    ]
-    for filters in data_attempts:
-        try:
-            quote = pricing.get_on_demand_unit_price(service_code="AmazonEC2", filters=filters, unit="GB")
-        except (AttributeError, TypeError, ValueError, ClientError):
-            quote = None
-        if quote is None:
-            continue
-        try:
-            per_gb = float(getattr(quote, "unit_price", None) or getattr(quote, "price", None) or 0.0)
-        except (TypeError, ValueError):
-            per_gb = None
-        if per_gb and per_gb > 0.0:
-            notes.append("on-demand data processing price resolved via PricingService")
-            break
-        per_gb = None
-
-    final_hourly = float(hourly if hourly and hourly > 0.0 else _FALLBACK_NAT_HOURLY_USD)
-    final_per_gb = float(per_gb if per_gb and per_gb > 0.0 else _FALLBACK_NAT_DATA_USD_PER_GB)
-    confidence = 75 if hourly and per_gb else 55 if (hourly or per_gb) else 30
-    if not notes:
-        notes.append("using fallback pricing")
-    return final_hourly, final_per_gb, "; ".join(notes), confidence
-
-
-# -----------------------------
-# Pagination helpers
-# -----------------------------
-
-
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    params = dict(params or {})
-
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except OperationNotPageableError:
-            # Fall back to token-based pagination.
-            pass
-        except (AttributeError, KeyError, TypeError, ValueError):
-            # Best-effort: some fakes/mocks or unusual clients may not behave like boto3.
-            pass
-
-    next_token: Optional[str] = None
-    while True:
-        call = getattr(client, operation)
-        req = dict(params)
-        if next_token:
-            req["NextToken"] = next_token
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_token = cast(Optional[str], resp.get("NextToken"))
-        if not next_token:
-            break
+    return PricingResolver(ctx).resolve_nat_pricing(
+        region=region,
+        fallback_hourly_usd=_FALLBACK_NAT_HOURLY_USD,
+        fallback_data_usd_per_gb=_FALLBACK_NAT_DATA_USD_PER_GB,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
 
 
 # -----------------------------
@@ -241,7 +125,7 @@ class _NatCloudWatchMetrics:
 
     def __init__(self, cw: Any) -> None:
         self._cw = cw
-        self._cache: Dict[Tuple[str, int, str, str, str], List[float]] = {}
+        self._cache: dict[tuple[str, int, str, str, str], list[float]] = {}
 
     def daily_bytes(
         self,
@@ -249,7 +133,7 @@ class _NatCloudWatchMetrics:
         nat_gateway_ids: Sequence[str],
         start: datetime,
         end: datetime,
-    ) -> Dict[str, List[float]]:
+    ) -> dict[str, list[float]]:
         """
         Return daily traffic byte series per NAT Gateway id.
 
@@ -264,9 +148,9 @@ class _NatCloudWatchMetrics:
         start_key = start.date().isoformat()
         end_key = end.date().isoformat()
 
-        out: Dict[str, List[float]] = {nid: [] for nid in nat_gateway_ids}
-        missing_out: List[str] = []
-        missing_in: List[str] = []
+        out: dict[str, list[float]] = {nid: [] for nid in nat_gateway_ids}
+        missing_out: list[str] = []
+        missing_in: list[str] = []
 
         for nid in nat_gateway_ids:
             key_out = (metric_name_out, period, start_key, end_key, nid)
@@ -300,7 +184,7 @@ class _NatCloudWatchMetrics:
         for nid in nat_gateway_ids:
             series_out = self._cache.get((metric_name_out, period, start_key, end_key, nid), [])
             series_in = self._cache.get((metric_name_in, period, start_key, end_key, nid), [])
-            merged: List[float] = []
+            merged: list[float] = []
             # Merge by index (timestamps are ascending); keep safe if lengths mismatch.
             max_len = max(len(series_out), len(series_in))
             for i in range(max_len):
@@ -337,8 +221,8 @@ class _NatCloudWatchMetrics:
         for i in range(0, len(nat_gateway_ids), batch_size):
             batch = list(nat_gateway_ids[i:i + batch_size])
 
-            queries: List[Dict[str, Any]] = []
-            id_to_nat: Dict[str, str] = {}
+            queries: list[dict[str, Any]] = []
+            id_to_nat: dict[str, str] = {}
             for j, nid in enumerate(batch):
                 qid = f"m{i+j}"
                 id_to_nat[qid] = nid
@@ -358,10 +242,10 @@ class _NatCloudWatchMetrics:
                     }
                 )
 
-            next_token: Optional[str] = None
-            merged: Dict[str, List[float]] = {}
+            next_token: str | None = None
+            merged: dict[str, list[float]] = {}
             while True:
-                kwargs: Dict[str, Any] = {
+                kwargs: dict[str, Any] = {
                     "MetricDataQueries": queries,
                     "StartTime": start,
                     "EndTime": end,
@@ -376,12 +260,12 @@ class _NatCloudWatchMetrics:
                     if not nid:
                         continue
                     vals = r.get("Values", []) or []
-                    numbers: List[float] = []
+                    numbers: list[float] = []
                     for v in vals:
                         if isinstance(v, (int, float)):
                             numbers.append(float(v))
                     merged.setdefault(nid, []).extend(numbers)
-                next_token = cast(Optional[str], resp.get("NextToken"))
+                next_token = cast(str | None, resp.get("NextToken"))
                 if not next_token:
                     break
 
@@ -397,15 +281,15 @@ class _NatCloudWatchMetrics:
 class NatGatewaysChecker:
     """Detect idle, orphaned, and costly NAT Gateways."""
 
-    checker_id = "aws.ec2.nat_gateways"
+    checker_id = "aws.ec2.nat.gateways"
 
     def __init__(
         self,
         *,
         account_id: str,
-        billing_account_id: Optional[str] = None,
+        billing_account_id: str | None = None,
         partition: str = "aws",
-        cfg: Optional[NatGatewaysConfig] = None,
+        cfg: NatGatewaysConfig | None = None,
     ) -> None:
 
         self._account = AwsAccountContext(
@@ -416,6 +300,7 @@ class NatGatewaysChecker:
         self._cfg = cfg or NatGatewaysConfig()
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting NAT gateways check")
         services = getattr(ctx, "services", None)
         if services is None:
             raise RuntimeError("RunContext.services is required")
@@ -423,10 +308,18 @@ class NatGatewaysChecker:
         ec2 = services.ec2
         cw = getattr(ctx.services, "cloudwatch", None)
         region = safe_region_from_client(ec2) or str(getattr(ctx.services, "region", "") or "")
+        _LOGGER.debug("NAT gateways check running", extra={"region": region})
 
         # Inventory NAT gateways
         try:
-            nat_gateways = list(_paginate_items(ec2, "describe_nat_gateways", "NatGateways"))
+            nat_gateways = list(
+                paginate_items(
+                    ec2,
+                    "describe_nat_gateways",
+                    "NatGateways",
+                    paginator_fallback_exceptions=(OperationNotPageableError, AttributeError, KeyError, TypeError, ValueError),
+                )
+            )
         except ClientError as exc:
             yield self._access_error(ctx, region, "describe_nat_gateways", exc)
             return
@@ -434,8 +327,10 @@ class NatGatewaysChecker:
         if not nat_gateways:
             return
 
+        _LOGGER.info("Listed NAT gateways", extra={"count": len(nat_gateways), "region": region})
+
         # Normalize & filter to "available" NATs (best-effort)
-        nats: List[Dict[str, Any]] = []
+        nats: list[dict[str, Any]] = []
         for nat in nat_gateways:
             state = str(nat.get("State") or "").lower()
             if state == "deleting":
@@ -455,7 +350,7 @@ class NatGatewaysChecker:
             return
 
         # Tags suppression map
-        nat_tags: Dict[str, Dict[str, str]] = {}
+        nat_tags: dict[str, dict[str, str]] = {}
         for nat in nats:
             nid = str(nat.get("NatGatewayId") or "")
             if not nid:
@@ -465,14 +360,14 @@ class NatGatewaysChecker:
         suppress_keys = frozenset([str(k).strip().lower() for k in self._cfg.suppress_tag_keys])
 
         # Route table references (best-effort; filter by nat ids when supported)
-        referenced_by_routes: Set[str] = set()
-        cross_az_pairs: Dict[str, Set[Tuple[str, str]]] = {nid: set() for nid in nat_ids}
+        referenced_by_routes: set[str] = set()
+        cross_az_pairs: dict[str, set[tuple[str, str]]] = {nid: set() for nid in nat_ids}
 
-        nat_subnet_ids: Set[str] = {str(n.get("SubnetId") or "") for n in nats if n.get("SubnetId")}
+        nat_subnet_ids: set[str] = {str(n.get("SubnetId") or "") for n in nats if n.get("SubnetId")}
         nat_subnet_ids.discard("")
 
-        route_tables: List[Mapping[str, Any]] = []
-        assoc_subnet_ids: Set[str] = set()
+        route_tables: list[Mapping[str, Any]] = []
+        assoc_subnet_ids: set[str] = set()
 
         try:
             for rt in self._route_tables_by_nat(ec2, nat_ids):
@@ -492,15 +387,15 @@ class NatGatewaysChecker:
             assoc_subnet_ids = set()
 
         # subnet_id -> az (for NAT and associated subnets)
-        subnet_az: Dict[str, str] = {}
+        subnet_az: dict[str, str] = {}
         all_subnet_ids = set(nat_subnet_ids) | set(assoc_subnet_ids)
         try:
             subnet_az = self._describe_subnet_az(ec2, sorted(all_subnet_ids))
         except ClientError:
             subnet_az = {}
 
-        nat_az: Dict[str, str] = {}
-        nat_vpc: Dict[str, str] = {}
+        nat_az: dict[str, str] = {}
+        nat_vpc: dict[str, str] = {}
         for nat in nats:
             nid = str(nat.get("NatGatewayId") or "")
             sid = str(nat.get("SubnetId") or "")
@@ -511,8 +406,8 @@ class NatGatewaysChecker:
             self._process_route_table_page(rt, referenced_by_routes, nat_ids, cross_az_pairs, subnet_az, nat_az)
 
         # Metrics (best-effort)
-        daily_bytes: Dict[str, List[float]] = {}
-        emitted_perm: Set[str] = set()
+        daily_bytes: dict[str, list[float]] = {}
+        emitted_perm: set[str] = set()
         if cw is not None:
             lookback = int(self._cfg.lookback_days)
             end = now_utc()
@@ -540,7 +435,7 @@ class NatGatewaysChecker:
         # Pricing
         usd_per_hour, usd_per_gb, pricing_notes, pricing_conf = _resolve_nat_pricing(ctx, region=region)
 
-        emitted: Dict[str, int] = {"orphaned": 0, "idle": 0, "high_data": 0, "cross_az": 0}
+        emitted: dict[str, int] = {"orphaned": 0, "idle": 0, "high_data": 0, "cross_az": 0}
 
         for nat in nats:
             nid = str(nat.get("NatGatewayId") or "")
@@ -560,7 +455,7 @@ class NatGatewaysChecker:
             az = nat_az.get(nid, "")
 
             created = nat.get("CreateTime")
-            created_dt: Optional[datetime]
+            created_dt: datetime | None
             if isinstance(created, datetime):
                 created_dt = created
             else:
@@ -655,10 +550,10 @@ class NatGatewaysChecker:
     # AWS helpers
     # -----------------------------
 
-    def _describe_subnet_az(self, ec2: Any, subnet_ids: Sequence[str]) -> Dict[str, str]:
+    def _describe_subnet_az(self, ec2: Any, subnet_ids: Sequence[str]) -> dict[str, str]:
         if not subnet_ids:
             return {}
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         # describe_subnets allows up to 200 IDs per call
         chunk = 200
         for i in range(0, len(subnet_ids), chunk):
@@ -683,30 +578,41 @@ class NatGatewaysChecker:
             params = {"Filters": [{"Name": "route.nat-gateway-id", "Values": chunk_ids}]}
             yielded = False
             try:
-                for item in _paginate_items(ec2, "describe_route_tables", "RouteTables", params=params):
+                for item in paginate_items(
+                    ec2,
+                    "describe_route_tables",
+                    "RouteTables",
+                    params=params,
+                    paginator_fallback_exceptions=(OperationNotPageableError, AttributeError, KeyError, TypeError, ValueError),
+                ):
                     yielded = True
                     yield item
             except ClientError:
                 if yielded:
                     raise
                 # Fallback: list all route tables once
-                for item in _paginate_items(ec2, "describe_route_tables", "RouteTables"):
+                for item in paginate_items(
+                    ec2,
+                    "describe_route_tables",
+                    "RouteTables",
+                    paginator_fallback_exceptions=(OperationNotPageableError, AttributeError, KeyError, TypeError, ValueError),
+                ):
                     yield item
                 return
 
     def _process_route_table_page(
         self,
         route_table: Mapping[str, Any],
-        referenced_by_routes: Set[str],
+        referenced_by_routes: set[str],
         nat_ids: Sequence[str],
-        cross_az_pairs: Dict[str, Set[Tuple[str, str]]],
+        cross_az_pairs: dict[str, set[tuple[str, str]]],
         subnet_az: Mapping[str, str],
         nat_az: Mapping[str, str],
     ) -> None:
         nat_set = set(nat_ids)
 
         # Determine which subnets this route table is associated to (subnet_id -> az)
-        assoc_subnets: List[Tuple[str, str]] = []
+        assoc_subnets: list[tuple[str, str]] = []
         for a in route_table.get("Associations", []) or []:
             if not isinstance(a, Mapping):
                 continue
@@ -757,7 +663,7 @@ class NatGatewaysChecker:
 
     def _access_error(self, ctx: RunContext, region: str, operation: str, exc: ClientError) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.access_error",
+            check_id="aws.ec2.nat.gateways.access.error",
             check_name="EC2 NAT Gateways access error",
             category="governance",
             status="unknown",
@@ -776,7 +682,7 @@ class NatGatewaysChecker:
 
     def _cloudwatch_error(self, ctx: RunContext, region: str, operation: str, exc: Exception) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.cloudwatch_error",
+            check_id="aws.ec2.nat.gateways.cloudwatch.error",
             check_name="NAT Gateways CloudWatch error",
             category="governance",
             status="unknown",
@@ -803,7 +709,7 @@ class NatGatewaysChecker:
         message: str,
     ) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.missing_permission",
+            check_id="aws.ec2.nat.gateways.missing.permission",
             check_name="NAT Gateways missing permission",
             category="governance",
             status="info",
@@ -836,13 +742,13 @@ class NatGatewaysChecker:
         vpc_id: str,
         subnet_id: str,
         az: str,
-        tags: Dict[str, str],
+        tags: dict[str, str],
         monthly_cost: float,
         pricing_conf: int,
         pricing_notes: str,
     ) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.orphaned",
+            check_id="aws.ec2.nat.gateways.orphaned",
             check_name="Orphaned NAT Gateway",
             category="cost",
             status="fail",
@@ -880,7 +786,7 @@ class NatGatewaysChecker:
         vpc_id: str,
         subnet_id: str,
         az: str,
-        tags: Dict[str, str],
+        tags: dict[str, str],
         monthly_cost: float,
         pricing_conf: int,
         pricing_notes: str,
@@ -889,7 +795,7 @@ class NatGatewaysChecker:
     ) -> FindingDraft:
         daily_gib = gb_from_bytes(p95_daily_bytes)
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.idle",
+            check_id="aws.ec2.nat.gateways.idle",
             check_name="Idle NAT Gateway",
             category="cost",
             status="fail",
@@ -926,7 +832,7 @@ class NatGatewaysChecker:
         nat_id: str,
         vpc_id: str,
         az: str,
-        tags: Dict[str, str],
+        tags: dict[str, str],
         monthly_gib: float,
         est_monthly_data_cost: float,
         est_monthly_total_cost: float,
@@ -934,7 +840,7 @@ class NatGatewaysChecker:
         pricing_notes: str,
     ) -> FindingDraft:
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.high_data_processing",
+            check_id="aws.ec2.nat.gateways.high.data.processing",
             check_name="High NAT Gateway data processing",
             category="cost",
             status="fail",
@@ -972,12 +878,12 @@ class NatGatewaysChecker:
         nat_id: str,
         vpc_id: str,
         nat_az: str,
-        tags: Dict[str, str],
-        pairs: Set[Tuple[str, str]],
+        tags: dict[str, str],
+        pairs: set[tuple[str, str]],
     ) -> FindingDraft:
         sample = ", ".join([f"{sid}({az})" for sid, az in sorted(list(pairs))[:5]])
         return FindingDraft(
-            check_id="aws.ec2.nat_gateways.cross_az",
+            check_id="aws.ec2.nat.gateways.cross.az",
             check_name="Cross-AZ NAT Gateway routing",
             category="cost",
             status="fail",
@@ -1007,7 +913,7 @@ class NatGatewaysChecker:
     # Utilities
     # -----------------------------
 
-    def _old_enough(self, created: Optional[datetime], *, min_age_days: int) -> bool:
+    def _old_enough(self, created: datetime | None, *, min_age_days: int) -> bool:
         if created is None:
             return True
         try:
@@ -1019,13 +925,10 @@ class NatGatewaysChecker:
 
 def _p95(values: Sequence[float]) -> float:
     vals = [safe_float(v, default=0.0) for v in values if safe_float(v, default=0.0) >= 0.0]
-    if not vals:
+    p95_value = percentile(vals, 95.0, method="floor")
+    if p95_value is None:
         return 0.0
-    vals_sorted = sorted(vals)
-    # p95 index (floor) to avoid rounding bias; matches common statistical convention.
-    idx = int(0.95 * (len(vals_sorted) - 1))
-    idx = max(0, min(idx, len(vals_sorted) - 1))
-    return float(vals_sorted[idx])
+    return float(p95_value)
 
 
 @register_checker("checks.aws.nat_gateways:NatGatewaysChecker")

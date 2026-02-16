@@ -1,31 +1,61 @@
-# AWS RDS_INSTANCES checker
+# AWS RDS Instances checker
 
-Status: Derived  
-Last reviewed: 2026-02-01
+Status: Canonical  
+Last reviewed: 2026-02-15
 
 **Source code:** `checks/aws/rds_instances_optimizations.py`
 
 ## Purpose
 
-checks/aws/rds_instances_optimizations.py
+Detect RDS instance optimization and governance opportunities using inventory and CloudWatch signals.
 
-## Signals
+## Checker identity
 
-This page is generated from module docstrings and static analysis of `check_id` constants.
-Use it as an index; detailed semantics are in code and in the checker contract.
+- `checker_id`: `aws.rds.instances.optimizations`
+- `spec`: `checks.aws.rds_instances_optimizations:RDSInstancesOptimizationsChecker`
 
 ## Check IDs emitted
 
-- `aws.rds.engine.needs_upgrade`
-- `aws.rds.instance_family.old_generation`
-- `aws.rds.instances.access_error`
-- `aws.rds.instances.optimizations`
-- `aws.rds.instances.stopped_storage`
-- `aws.rds.multi_az.non_prod`
-- `aws.rds.read_replica.unused`
+- `aws.rds.instances.stopped.storage`
 - `aws.rds.storage.overprovisioned`
+- `aws.rds.multi.az.non.prod`
+- `aws.rds.instance.family.old.generation`
+- `aws.rds.engine.needs.upgrade`
+- `aws.rds.read.replica.unused`
+- `aws.rds.instances.access.error`
 
-## Notes / limitations
+## Key signals
 
-- API access can be partial; AccessDenied should downgrade to informational findings where applicable.
-- Cost estimates are best-effort unless explicitly enriched from CUR.
+- Stopped instances still incurring storage cost.
+- Overprovisioned storage via FreeStorageSpace usage patterns.
+- Non-production Multi-AZ posture opportunities.
+- Legacy instance family and engine-version policy drift.
+- Unused read replicas by sustained low read IOPS.
+
+## Configuration and defaults
+
+Defaults are sourced from `checks/aws/defaults.py`, including:
+- storage analysis windows/coverage thresholds
+- overprovisioning thresholds
+- replica lookback and p95 read-IOPS thresholds
+- blocked/allowed engine-version policy bounds
+
+## IAM permissions
+
+Typical read-only permissions:
+- `rds:DescribeDBInstances`
+- `rds:ListTagsForResource`
+- `cloudwatch:GetMetricData`
+
+Optional for improved cost-confidence:
+- `pricing:GetProducts` (via pricing service)
+
+## Determinism and limitations
+
+- CloudWatch-dependent findings require metric coverage thresholds.
+- Cost estimates are best-effort and should be refined by CUR enrichment.
+- Access gaps surface as informational findings instead of hard failures.
+
+## Related tests
+
+- `tests/test_rds_instances_optimizations.py`

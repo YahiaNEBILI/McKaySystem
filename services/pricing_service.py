@@ -22,21 +22,21 @@ Minimal IAM permission:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
-
 
 # -------------------------
 # Region -> "location" mapping (commercial partition)
 # Extend as needed.
 # -------------------------
-_REGION_TO_LOCATION: Dict[str, str] = {
+_REGION_TO_LOCATION: dict[str, str] = {
     "us-east-1": "US East (N. Virginia)",
     "us-east-2": "US East (Ohio)",
     "us-west-1": "US West (N. California)",
@@ -67,7 +67,7 @@ _REGION_TO_LOCATION: Dict[str, str] = {
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _sha1(text: str) -> str:
@@ -78,7 +78,7 @@ def _json_dumps_stable(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _safe_float(value: Any) -> Optional[float]:
+def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
@@ -119,7 +119,7 @@ class PricingCache:
     def __init__(self, *, path: Path, ttl: timedelta) -> None:
         self._path = path
         self._ttl = ttl
-        self._mem: Dict[str, Dict[str, Any]] = {}
+        self._mem: dict[str, dict[str, Any]] = {}
         self._loaded = False
 
     def _load(self) -> None:
@@ -137,7 +137,7 @@ class PricingCache:
             # Cache is optional; ignore corrupt files.
             self._mem = {}
 
-    def get(self, key: str) -> Optional[PriceQuote]:
+    def get(self, key: str) -> PriceQuote | None:
         self._load()
         item = self._mem.get(key)
         if not isinstance(item, dict):
@@ -164,7 +164,7 @@ class PricingCache:
         self._mem[key] = {
             "value": quote.unit_price_usd,
             "unit": quote.unit,
-            "ts": quote.as_of.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ts": quote.as_of.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
         self._flush_best_effort()
 
@@ -194,19 +194,59 @@ class PricingService:
         self,
         *,
         pricing_client: Any,
-        cache: Optional[PricingCache] = None,
+        cache: PricingCache | None = None,
         partition: str = "aws",
     ) -> None:
         self._client = pricing_client
         self._cache = cache
         self._partition = partition
-        self._memo: Dict[str, PriceQuote] = {}
+        self._memo: dict[str, PriceQuote] = {}
+        self._sources_seen: set[str] = set()
+
+    def _record_quote_source(self, quote: PriceQuote | None) -> PriceQuote | None:
+        """Track quote source to expose best-effort run metadata."""
+        if quote is None:
+            return None
+        source = str(getattr(quote, "source", "") or "").strip().lower()
+        if source:
+            self._sources_seen.add(source)
+        return quote
+
+    def derived_pricing_source(self) -> str:
+        """Return a deterministic run-level pricing source label."""
+        if self._sources_seen:
+            normalized = sorted(self._sources_seen)
+            if normalized == ["cache", "pricing_api"]:
+                return "pricing_api+cache"
+            if len(normalized) == 1:
+                return normalized[0]
+            return "mixed+" + "+".join(normalized)
+        if self._cache is not None:
+            return "pricing_api+cache"
+        return "pricing_api"
+
+    def derived_pricing_version(self) -> str | None:
+        """Return a best-effort version label for pricing metadata."""
+        meta = getattr(self._client, "meta", None)
+        service_model = getattr(meta, "service_model", None)
+        api_version = str(getattr(service_model, "api_version", "") or "").strip()
+        if not api_version:
+            return None
+        partition = str(self._partition or "").strip() or "aws"
+        return f"{partition}_pricing_api_{api_version}"
+
+    def run_metadata(self) -> dict[str, str | None]:
+        """Return best-effort run-level pricing metadata."""
+        return {
+            "pricing_source": self.derived_pricing_source(),
+            "pricing_version": self.derived_pricing_version(),
+        }
 
     # -------------------------
     # Public helpers
     # -------------------------
 
-    def rds_backup_storage_gb_month(self, *, region: str) -> Optional[PriceQuote]:
+    def rds_backup_storage_gb_month(self, *, region: str) -> PriceQuote | None:
         """
         Best-effort RDS backup/snapshot storage price per GB-month.
 
@@ -221,7 +261,7 @@ class PricingService:
 
         # Multiple attempts because Pricing catalog attributes can vary by partition/updates.
         # All attempts are TERM_MATCH filters.
-        attempts: List[List[Dict[str, str]]] = [
+        attempts: list[list[dict[str, str]]] = [
             # Attempt 1: product family only + location (broad)
             [
                 {"Field": "location", "Value": location},
@@ -263,7 +303,7 @@ class PricingService:
 
         return None
 
-    def location_for_region(self, region: str) -> Optional[str]:
+    def location_for_region(self, region: str) -> str | None:
         return _REGION_TO_LOCATION.get(str(region or "").strip())
 
     def get_on_demand_unit_price(
@@ -272,7 +312,7 @@ class PricingService:
         service_code: str,
         filters: Sequence[Mapping[str, str]],
         unit: str,
-    ) -> Optional[PriceQuote]:
+    ) -> PriceQuote | None:
         """
         Return a PriceQuote for the given AWS Pricing query.
 
@@ -297,14 +337,14 @@ class PricingService:
         # in-run memo
         memo = self._memo.get(cache_key)
         if memo is not None:
-            return memo
+            return self._record_quote_source(memo)
 
         # disk cache
         if self._cache is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 self._memo[cache_key] = cached
-                return cached
+                return self._record_quote_source(cached)
 
         # pricing API
         try:
@@ -322,7 +362,7 @@ class PricingService:
         self._memo[cache_key] = api_quote
         if self._cache is not None:
             self._cache.put(cache_key, api_quote)
-        return api_quote
+        return self._record_quote_source(api_quote)
 
     # -------------------------
     # Convenience methods (start small; add more as you need)
@@ -334,9 +374,9 @@ class PricingService:
         region: str,
         db_instance_class: str,
         deployment_option: str = "Single-AZ",
-        database_engine: Optional[str] = None,
-        license_model: Optional[str] = None,
-    ) -> Optional[PriceQuote]:
+        database_engine: str | None = None,
+        license_model: str | None = None,
+    ) -> PriceQuote | None:
         """
         Best-effort RDS on-demand instance hourly price.
 
@@ -351,7 +391,7 @@ class PricingService:
         if instance_type.startswith("db."):
             instance_type = instance_type[3:]
 
-        filters: List[Dict[str, str]] = [
+        filters: list[dict[str, str]] = [
             {"Field": "location", "Value": location},
             {"Field": "productFamily", "Value": "Database Instance"},
             {"Field": "instanceType", "Value": instance_type},
@@ -377,7 +417,7 @@ class PricingService:
         tenancy: str = "Shared",
         capacitystatus: str = "Used",
         preinstalled_sw: str = "NA",
-    ) -> Optional[PriceQuote]:
+    ) -> PriceQuote | None:
         """
         Best-effort EC2 on-demand hourly price for common right-sizing checks.
         """
@@ -385,7 +425,7 @@ class PricingService:
         if not location:
             return None
 
-        filters: List[Dict[str, str]] = [
+        filters: list[dict[str, str]] = [
             {"Field": "location", "Value": location},
             {"Field": "productFamily", "Value": "Compute Instance"},
             {"Field": "instanceType", "Value": str(instance_type)},
@@ -410,7 +450,7 @@ class PricingService:
         service_code: str,
         filters: Sequence[Mapping[str, str]],
         unit: str,
-    ) -> Optional[PriceQuote]:
+    ) -> PriceQuote | None:
         """
         Calls Pricing:GetProducts, parses first matching on-demand unit price for `unit`.
         """
@@ -420,9 +460,9 @@ class PricingService:
         ]
 
         # Pricing API can return large pages; we only need the first usable product.
-        next_token: Optional[str] = None
+        next_token: str | None = None
         for _ in range(0, 5):  # safety limit
-            kwargs: Dict[str, Any] = {
+            kwargs: dict[str, Any] = {
                 "ServiceCode": service_code,
                 "Filters": api_filters,
                 "MaxResults": 100,
@@ -443,7 +483,7 @@ class PricingService:
 
         return None
 
-    def _parse_price_item(self, item: Any, *, expected_unit: str) -> Optional[PriceQuote]:
+    def _parse_price_item(self, item: Any, *, expected_unit: str) -> PriceQuote | None:
         """
         Parse Pricing API PriceList entry (JSON string or dict).
         We look for an OnDemand term and a price dimension matching expected_unit.

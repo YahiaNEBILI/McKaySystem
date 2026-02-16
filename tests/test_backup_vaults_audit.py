@@ -2,128 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
-import json
-from botocore.exceptions import ClientError
-
 from checks.aws._common import AwsAccountContext
 from checks.aws.backup_vaults_audit import AwsBackupVaultsAuditChecker
-
-
-class _FakePaginator:
-    def __init__(self, paginate_fn):
-        self._paginate_fn = paginate_fn
-
-    def paginate(self, **kwargs):
-        yield from self._paginate_fn(**kwargs)
-
-
-class _FakeBackupClient:
-    """
-    Fake backup client with both paginator and direct-call methods, to match
-    _paginate_items() behavior (it may fall back to direct call).
-    """
-
-    def __init__(
-        self,
-        *,
-        region: str,
-        vaults: Optional[List[Dict[str, Any]]] = None,
-        describe_by_name: Optional[Dict[str, Dict[str, Any]]] = None,
-        policy_by_name: Optional[Dict[str, Any]] = None,
-        recovery_points_by_vault: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        raise_on: Optional[str] = None,
-        raise_code: str = "AccessDeniedException",
-    ):
-        self.meta = type("Meta", (), {"region_name": region})()
-        self._vaults = vaults or []
-        self._describe_by_name = describe_by_name or {}
-        self._policy_by_name = policy_by_name or {}
-        self._recovery_points_by_vault = recovery_points_by_vault or {}
-        self._raise_on = raise_on
-        self._raise_code = raise_code
-
-    # ------------- paginator -------------
-    def get_paginator(self, op: str) -> _FakePaginator:
-        # Simulate AWS permission errors at paginator creation time too.
-        if self._raise_on == op:
-            raise ClientError({"Error": {"Code": self._raise_code, "Message": "Denied"}}, op)
-
-        if op == "list_backup_vaults":
-            return _FakePaginator(lambda **_kwargs: [{"BackupVaultList": self._vaults}])
-
-        if op == "list_recovery_points_by_backup_vault":
-
-            def _pages(**kwargs):
-                vault_name = str(kwargs.get("BackupVaultName") or "")
-                rps = self._recovery_points_by_vault.get(vault_name, [])
-                return [{"RecoveryPoints": rps}]
-
-            return _FakePaginator(_pages)
-
-        raise AssertionError(f"Unexpected paginator op: {op}")
-
-    # ------------- direct calls (fallback path in _paginate_items) -------------
-
-    def list_backup_vaults(self, **_kwargs) -> Dict[str, Any]:
-        if self._raise_on == "list_backup_vaults":
-            raise ClientError(
-                {"Error": {"Code": self._raise_code, "Message": "Denied"}},
-                "list_backup_vaults",
-            )
-        return {"BackupVaultList": self._vaults}
-
-    def describe_backup_vault(self, *, BackupVaultName: str) -> Dict[str, Any]:
-        if self._raise_on == "describe_backup_vault":
-            raise ClientError(
-                {"Error": {"Code": self._raise_code, "Message": "Denied"}},
-                "describe_backup_vault",
-            )
-
-        if BackupVaultName not in self._describe_by_name:
-            raise ClientError(
-                {"Error": {"Code": "ResourceNotFoundException", "Message": "NotFound"}},
-                "describe_backup_vault",
-            )
-        return self._describe_by_name[BackupVaultName]
-
-    def get_backup_vault_access_policy(self, *, BackupVaultName: str) -> Dict[str, Any]:
-        if self._raise_on == "get_backup_vault_access_policy":
-            raise ClientError(
-                {"Error": {"Code": self._raise_code, "Message": "Denied"}},
-                "get_backup_vault_access_policy",
-            )
-
-        val = self._policy_by_name.get(BackupVaultName, None)
-        if val is None:
-            raise ClientError(
-                {"Error": {"Code": "ResourceNotFoundException", "Message": "NotFound"}},
-                "get_backup_vault_access_policy",
-            )
-        if isinstance(val, str):
-            return {"Policy": val}
-        return {"Policy": json.dumps(val)}
-
-    def list_recovery_points_by_backup_vault(self, *, BackupVaultName: str, **_kwargs) -> Dict[str, Any]:
-        if self._raise_on == "list_recovery_points_by_backup_vault":
-            raise ClientError(
-                {"Error": {"Code": self._raise_code, "Message": "Denied"}},
-                "list_recovery_points_by_backup_vault",
-            )
-        rps = self._recovery_points_by_vault.get(BackupVaultName, [])
-        return {"RecoveryPoints": rps}
+from tests.aws_mocks import FakeBackupClient, make_run_ctx
 
 
 class _FakePricing:
     """Minimal PricingService stub for backup storage GB-month prices."""
 
-    def __init__(self, *, warm: Optional[float] = None, cold: Optional[float] = None):
+    def __init__(self, *, warm: float | None = None, cold: float | None = None):
         self._warm = warm
         self._cold = cold
 
-    def backup_storage_gb_month(self, *, region: str, storage_class: str) -> Optional[float]:
+    def backup_storage_gb_month(self, *, region: str, storage_class: str) -> float | None:
         _ = region
         sc = str(storage_class).upper()
         if sc == "COLD":
@@ -131,25 +22,11 @@ class _FakePricing:
         return self._warm
 
 
-@dataclass
-class _FakeServices:
-    backup: Any
-    pricing: Any = None
-    rds: Any = None
-    s3: Any = None
-
-
-@dataclass
-class _FakeCtx:
-    cloud: str = "aws"
-    services: Any = None
-
-
 def _mk_checker(
     *,
-    expected_min: Optional[int] = None,
-    expected_max: Optional[int] = None,
-    allowlist: Optional[List[str]] = None,
+    expected_min: int | None = None,
+    expected_max: int | None = None,
+    allowlist: list[str] | None = None,
 ) -> AwsBackupVaultsAuditChecker:
     return AwsBackupVaultsAuditChecker(
         account=AwsAccountContext(account_id="111111111111", billing_account_id="111111111111"),
@@ -174,13 +51,13 @@ def test_vault_lock_missing_fields_emits_no_lifecycle():
         # No Locked/MinRetentionDays/MaxRetentionDays fields => treated as "no vault lock"
         "vault-a": {"BackupVaultName": "vault-a"},
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-a": {}})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-a": {}})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_missing"
     assert f.scope.resource_id == "vault-a"
 
@@ -196,7 +73,7 @@ def test_vault_lock_no_max_cost_estimate_enumeration_denied_sets_none():
         "vault-deny": {"BackupVaultName": "vault-deny", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
     }
 
-    backup = _FakeBackupClient(
+    backup = FakeBackupClient(
         region="eu-west-1",
         vaults=vaults,
         describe_by_name=describe,
@@ -204,7 +81,7 @@ def test_vault_lock_no_max_cost_estimate_enumeration_denied_sets_none():
         recovery_points_by_vault={"vault-deny": [{"StorageClass": "WARM", "BackupSizeInBytes": 123}]},
         raise_on="list_recovery_points_by_backup_vault",
     )
-    ctx = _FakeCtx(services=_FakeServices(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01)))
+    ctx = make_run_ctx(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01))
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
@@ -227,14 +104,14 @@ def test_vault_lock_no_max_cost_estimate_empty_vault_is_zero():
         "vault-empty": {"BackupVaultName": "vault-empty", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
     }
 
-    backup = _FakeBackupClient(
+    backup = FakeBackupClient(
         region="eu-west-1",
         vaults=vaults,
         describe_by_name=describe,
         policy_by_name={"vault-empty": {}},
         recovery_points_by_vault={"vault-empty": []},
     )
-    ctx = _FakeCtx(services=_FakeServices(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01)))
+    ctx = make_run_ctx(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01))
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
@@ -257,18 +134,18 @@ def test_vault_lock_disabled_zero_zero_emits_missing():
     describe = {
         "vault-a2": {"BackupVaultName": "vault-a2", "Locked": False, "MinRetentionDays": 0, "MaxRetentionDays": 0},
     }
-    backup = _FakeBackupClient(
+    backup = FakeBackupClient(
         region="eu-west-1",
         vaults=vaults,
         describe_by_name=describe,
         policy_by_name={"vault-a2": {"Version": "2012-10-17", "Statement": []}},
     )
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_missing"
     assert f.scope.resource_id == "vault-a2"
 
@@ -283,13 +160,13 @@ def test_vault_lock_no_max_emits_indefinite_retention():
     describe = {
         "vault-b": {"BackupVaultName": "vault-b", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-b": {}})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-b": {}})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_no_max"
     assert f.severity.level in ("medium", "high")
 
@@ -314,19 +191,19 @@ def test_vault_lock_no_max_attaches_cost_estimate_with_pricing_service():
     }
 
     pricing = _FakePricing(warm=0.05, cold=0.01)  # $/GB-month
-    backup = _FakeBackupClient(
+    backup = FakeBackupClient(
         region="eu-west-1",
         vaults=vaults,
         describe_by_name=describe,
         policy_by_name={"vault-cost": {}},
         recovery_points_by_vault=recovery_points_by_vault,
     )
-    ctx = _FakeCtx(services=_FakeServices(backup=backup, pricing=pricing))
+    ctx = make_run_ctx(backup=backup, pricing=pricing)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_no_max"
 
     # Expected: 10 * 0.05 + 5 * 0.01 = 0.50 + 0.05 = 0.55
@@ -336,6 +213,40 @@ def test_vault_lock_no_max_attaches_cost_estimate_with_pricing_service():
     assert isinstance(f.estimate_confidence, int)
     assert f.estimate_confidence >= 1
     assert "PricingService" in (f.estimate_notes or "")
+
+
+def test_vault_lock_no_max_ignores_malformed_recovery_point_size():
+    """Malformed BackupSizeInBytes should be ignored (not crash), valid points still counted."""
+    checker = _mk_checker()
+
+    vaults = [
+        {"BackupVaultName": "vault-bad-size", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-bad-size"}
+    ]
+    describe = {
+        "vault-bad-size": {"BackupVaultName": "vault-bad-size", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 0},
+    }
+    gib = 1024 ** 3
+    recovery_points_by_vault = {
+        "vault-bad-size": [
+            {"StorageClass": "WARM", "BackupSizeInBytes": "invalid-size"},
+            {"StorageClass": "WARM", "BackupSizeInBytes": 2 * gib},
+        ]
+    }
+
+    backup = FakeBackupClient(
+        region="eu-west-1",
+        vaults=vaults,
+        describe_by_name=describe,
+        policy_by_name={"vault-bad-size": {}},
+        recovery_points_by_vault=recovery_points_by_vault,
+    )
+    ctx = make_run_ctx(backup=backup, pricing=_FakePricing(warm=0.05, cold=0.01))
+
+    findings = list(checker.run(ctx))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.issue_key["rule"] == "vault_lock_no_max"
+    assert float(f.estimated_monthly_cost or 0.0) == 0.10
 
 
 def test_vault_lock_out_of_standard_emits_low():
@@ -348,13 +259,13 @@ def test_vault_lock_out_of_standard_emits_low():
     describe = {
         "vault-c": {"BackupVaultName": "vault-c", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 90},
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-c": {}})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-c": {}})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.no_lifecycle"
+    assert f.check_id == "aws.backup.vaults.no.lifecycle"
     assert f.issue_key["rule"] == "vault_lock_out_of_standard"
     assert f.severity.level == "low"
 
@@ -376,13 +287,13 @@ def test_access_policy_notprincipal_emits_info():
         ],
     }
 
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-np": policy})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-np": policy})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.status == "info"
     assert f.issue_key["rule"] == "uses_notprincipal"
 
@@ -397,13 +308,13 @@ def test_access_policy_missing_emits_low_misconfig():
     describe = {
         "vault-d": {"BackupVaultName": "vault-d", "Locked": True, "MinRetentionDays": 7, "MaxRetentionDays": 30},
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "no_access_policy"
     assert f.severity.level == "low"
 
@@ -424,13 +335,13 @@ def test_access_policy_wildcard_principal_emits_high():
             {"Sid": "S1", "Effect": "Allow", "Principal": "*", "Action": "backup:*", "Resource": "*"},
         ],
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-e": policy})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-e": policy})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "wildcard_principal"
     assert f.severity.level == "high"
     assert (f.dimensions.get("has_org_condition") or "false") == "false"
@@ -459,13 +370,13 @@ def test_access_policy_wildcard_principal_with_org_condition_downgrades():
             },
         ],
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-org": policy})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-org": policy})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "wildcard_principal"
     assert f.severity.level in ("medium", "high")  # your checker downgrades to medium
     assert (f.dimensions.get("has_org_condition") or "false") == "true"
@@ -494,13 +405,13 @@ def test_access_policy_cross_account_not_allowlisted_emits_fail():
             }
         ],
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-f": policy})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-f": policy})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.backup.vaults.access_policy_misconfig"
+    assert f.check_id == "aws.backup.vaults.access.policy.misconfig"
     assert f.issue_key["rule"] == "cross_account_access"
     assert "333333333333" in (f.dimensions.get("cross_account_ids") or "")
 
@@ -528,8 +439,8 @@ def test_access_policy_emits_only_worst_per_vault():
             {"Sid": "Wild", "Effect": "Allow", "Principal": "*", "Action": "backup:*", "Resource": "*"},
         ],
     }
-    backup = _FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-g": policy})
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", vaults=vaults, describe_by_name=describe, policy_by_name={"vault-g": policy})
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
@@ -544,12 +455,12 @@ def test_list_vaults_access_error_emits_single_info_and_stops():
     """Access denied listing vaults -> emit single info access_error and stop."""
     checker = _mk_checker()
 
-    backup = _FakeBackupClient(region="eu-west-1", raise_on="list_backup_vaults")
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    backup = FakeBackupClient(region="eu-west-1", raise_on="list_backup_vaults")
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.backup.access_error"
+    assert findings[0].check_id == "aws.backup.access.error"
     assert findings[0].status == "info"
 
 
@@ -560,16 +471,17 @@ def test_describe_vault_access_error_emits_single_info_and_stops():
     vaults = [
         {"BackupVaultName": "vault-h", "BackupVaultArn": "arn:aws:backup:eu-west-1:111111111111:backup-vault:vault-h"}
     ]
-    backup = _FakeBackupClient(
+    backup = FakeBackupClient(
         region="eu-west-1",
         vaults=vaults,
         describe_by_name={},
         policy_by_name={},
         raise_on="describe_backup_vault",
     )
-    ctx = _FakeCtx(services=_FakeServices(backup=backup))
+    ctx = make_run_ctx(backup=backup)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.backup.access_error"
+    assert findings[0].check_id == "aws.backup.access.error"
     assert findings[0].status == "info"
+

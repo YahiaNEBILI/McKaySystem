@@ -17,24 +17,6 @@ It explains:
 ## 2. High-Level Flow
 
 ```
-        +------------------+
-        |  Cloud APIs      |
-        |  (AWS/Azure/GCP) |
-        +--------+---------+
-# FinOps SaaS – Pipeline Overview
-
-## 1. Purpose
-
-This document describes the **end-to-end FinOps SaaS pipeline**, with a focus on:
-- data contracts
-- responsibility boundaries
-- format transitions
-
----
-
-## 2. High-Level Flow
-
-```
 Checkers (wire dicts)
         |
         v

@@ -1,32 +1,65 @@
 # AWS EC2 checker
 
-Status: Derived  
-Last reviewed: 2026-02-01
+Status: Canonical  
+Last reviewed: 2026-02-15
 
 **Source code:** `checks/aws/ec2_instances.py`
 
 ## Purpose
 
-checks/aws/ec2_instances.py
+Detect EC2 utilization, lifecycle, security, and tagging inefficiencies.
 
-## Signals
+## Checker identity
 
-This page is generated from module docstrings and static analysis of `check_id` constants.
-Use it as an index; detailed semantics are in code and in the checker contract.
+- `checker_id`: `aws.ec2.instances`
+- `spec`: `checks.aws.ec2_instances:EC2InstancesChecker`
 
 ## Check IDs emitted
 
-- `aws.ec2.instances`
-- `aws.ec2.instances.old_generation`
-- `aws.ec2.instances.security.admin_ports_open_world`
-- `aws.ec2.instances.security.imdsv1_allowed`
-- `aws.ec2.instances.stopped_long`
-- `aws.ec2.instances.t_credit_issues`
-- `aws.ec2.instances.tags.missing`
 - `aws.ec2.instances.underutilized`
-- `aws.ec2.security_groups.unused`
+- `aws.ec2.instances.stopped.long`
+- `aws.ec2.instances.old.generation`
+- `aws.ec2.instances.security.imdsv1.allowed`
+- `aws.ec2.instances.security.admin.ports.open.world`
+- `aws.ec2.instances.t.credit.issues`
+- `aws.ec2.instances.tags.missing`
+- `aws.ec2.security.groups.unused`
 
-## Notes / limitations
+## Key signals
 
-- API access can be partial; AccessDenied should downgrade to informational findings where applicable.
-- Cost estimates are best-effort unless explicitly enriched from CUR.
+- Low-utilization running instances.
+- Long-stopped instances with ongoing storage cost.
+- Legacy instance families and burst-credit pressure.
+- IMDSv1 allowed and publicly exposed SSH/RDP.
+- Missing required tags and unused security groups.
+
+## Configuration and defaults
+
+Configured via `EC2InstancesConfig`.
+Defaults are sourced from `checks/aws/defaults.py`, including:
+- lookback windows and utilization thresholds
+- stopped-age threshold
+- burst-credit thresholds
+- required tag keys
+
+## IAM permissions
+
+Typical read-only permissions:
+- `ec2:DescribeInstances`
+- `ec2:DescribeVolumes`
+- `ec2:DescribeSecurityGroups`
+- `ec2:DescribeNetworkInterfaces`
+- `cloudwatch:GetMetricData`
+
+Optional for improved cost-confidence:
+- `pricing:GetProducts` (via pricing service)
+
+## Determinism and limitations
+
+- Metric-dependent findings require CloudWatch coverage.
+- Estimates are directional and intended for optimization triage.
+- Empty or malformed inputs are handled without terminating the run.
+
+## Related tests
+
+- `tests/test_ec2_instances.py`

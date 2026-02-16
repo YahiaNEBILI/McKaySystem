@@ -1,28 +1,60 @@
-# AWS BACKUP_PLANS checker
+# AWS Backup Plans checker
 
-Status: Derived  
-Last reviewed: 2026-02-01
+Status: Canonical  
+Last reviewed: 2026-02-15
 
 **Source code:** `checks/aws/backup_plans_audit.py`
 
 ## Purpose
 
-AWS Backup Plans & Recovery Points Checker
+Detect AWS Backup plan governance gaps and stale recovery-point retention risk.
 
-## Signals
+## Checker identity
 
-This page is generated from module docstrings and static analysis of `check_id` constants.
-Use it as an index; detailed semantics are in code and in the checker contract.
+- `checker_id`: `aws.backup.governance.plans.audit`
+- `spec`: `checks.aws.backup_plans_audit:AwsBackupPlansAuditChecker`
 
 ## Check IDs emitted
 
-- `aws.backup.access_error`
-- `aws.backup.governance.plans_audit`
-- `aws.backup.plans.no_selections`
-- `aws.backup.recovery_points.stale`
-- `aws.backup.rules.no_lifecycle`
+- `aws.backup.plans.no.selections`
+- `aws.backup.rules.no.lifecycle`
+- `aws.backup.recovery.points.stale`
+- `aws.backup.access.error`
 
-## Notes / limitations
+## Key signals
 
-- API access can be partial; AccessDenied should downgrade to informational findings where applicable.
-- Cost estimates are best-effort unless explicitly enriched from CUR.
+- Backup plans with no selections (effective no-op plans).
+- Backup rules without lifecycle controls (no transition/delete policy).
+- Recovery points older than policy threshold and not near planned deletion.
+- Informational access error when required Backup inventory APIs are denied.
+
+## Configuration and defaults
+
+- Configured via checker constructor arguments.
+- Defaults are sourced from `checks/aws/defaults.py`:
+  - `BACKUP_PLANS_STALE_DAYS`
+  - `BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD`
+  - `BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD`
+  - `BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS`
+
+## IAM permissions
+
+Minimum read-only permissions:
+- `backup:ListBackupPlans`
+- `backup:ListBackupSelections`
+- `backup:GetBackupPlan`
+- `backup:ListBackupVaults`
+- `backup:ListRecoveryPointsByBackupVault`
+
+Optional for improved cost-confidence:
+- `pricing:GetProducts` (via pricing service)
+
+## Determinism and limitations
+
+- Findings are emitted with stable issue discriminators and deterministic scope.
+- Cost figures are best-effort directional estimates for storage only.
+- Access-denied scenarios degrade to informational findings instead of crashing.
+
+## Related tests
+
+- `tests/test_backup_plans_audit.py`

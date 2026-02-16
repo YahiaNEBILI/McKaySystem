@@ -25,7 +25,7 @@ def _draft_unattached_volume(
     monthly_cost: float = 9.5,
 ) -> FindingDraft:
     return FindingDraft(
-        check_id="aws.ec2.ebs.unattached_volume",
+        check_id="aws.ec2.ebs.unattached.volume",
         check_name="Unattached EBS volume",
         category="cost",
         sub_category="storage",
@@ -52,7 +52,7 @@ def _draft_unattached_volume(
             "age_days": str(age_days),
         },
         issue_key={
-            "check_id": "aws.ec2.ebs.unattached_volume",
+            "check_id": "aws.ec2.ebs.unattached.volume",
             "account_id": account_id,
             "region": region,
             "volume_id": volume_id,
@@ -69,7 +69,7 @@ def _draft_volume_unencrypted(
     size_gb: int = 100,
 ) -> FindingDraft:
     return FindingDraft(
-        check_id="aws.ec2.ebs.volume_unencrypted",
+        check_id="aws.ec2.ebs.volume.unencrypted",
         check_name="Unencrypted EBS volume",
         category="governance",
         sub_category="security",
@@ -94,7 +94,7 @@ def _draft_volume_unencrypted(
             "encrypted": "false",
         },
         issue_key={
-            "check_id": "aws.ec2.ebs.volume_unencrypted",
+            "check_id": "aws.ec2.ebs.volume.unencrypted",
             "account_id": account_id,
             "region": region,
             "volume_id": volume_id,
@@ -129,7 +129,7 @@ def test_rule_emits_when_both_signals_present(tmp_path: Path) -> None:
     assert stats["enabled"] is True
     assert stats["errors"] == 0
 
-    corr_rows = [r for r in rows if r.get("check_id") == "aws.ec2.correlation.ebs_unattached_unencrypted"]
+    corr_rows = [r for r in rows if r.get("check_id") == "aws.ec2.correlation.ebs.unattached.unencrypted"]
     assert len(corr_rows) == 1
     assert corr_rows[0]["scope"]["resource_id"] == volume_id
 
@@ -157,7 +157,7 @@ def test_rule_does_not_emit_if_one_signal_missing(tmp_path: Path) -> None:
 
     assert stats["enabled"] is True
     assert stats["errors"] == 0
-    assert len([r for r in rows if r.get("check_id") == "aws.ec2.correlation.ebs_unattached_unencrypted"]) == 0
+    assert len([r for r in rows if r.get("check_id") == "aws.ec2.correlation.ebs.unattached.unencrypted"]) == 0
 
 
 def test_rule_is_deterministic_for_same_input(tmp_path: Path) -> None:

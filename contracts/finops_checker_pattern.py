@@ -20,16 +20,16 @@ How to use:
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, Union
+from datetime import UTC, datetime
+from typing import Any, Protocol
 
 from .finops_contracts import (
     ValidationError,
     build_ids_and_validate,
     normalize_str,
 )
-
 from .services import Services
 
 # -----------------------------
@@ -54,9 +54,9 @@ class RunContext:
 
     default_currency: str = "USD"
     cloud: str = "aws"  # "aws"|"azure"|"gcp"
-    services: Optional[Services] = None
+    services: Services | None = None
 
-    def to_source_struct(self, *, source_ref: str, source_type: str = "scanner") -> Dict[str, Any]:
+    def to_source_struct(self, *, source_ref: str, source_type: str = "scanner") -> dict[str, Any]:
         return {
             "source_type": source_type,
             "source_ref": source_ref,
@@ -81,7 +81,7 @@ class Scope:
     provider_partition: str = ""
     resource_arn: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "cloud": self.cloud,
             "provider_partition": self.provider_partition,
@@ -122,27 +122,27 @@ class FindingDraft:
     recommendation: str = ""
     remediation: str = ""
     sub_category: str = ""
-    frameworks: Tuple[str, ...] = ()
+    frameworks: tuple[str, ...] = ()
 
     # Estimation fields: keep them optional
     # NOTE: money values must be numeric (float) or None. Formatting is a presentation concern.
-    estimated_monthly_savings: Optional[float] = None
-    estimated_monthly_cost: Optional[float] = None
-    estimate_confidence: Optional[Union[int, str]] = None  # allow "low"/"medium"/"high" too
+    estimated_monthly_savings: float | None = None
+    estimated_monthly_cost: float | None = None
+    estimate_confidence: int | str | None = None  # allow "low"/"medium"/"high" too
     estimate_notes: str = ""
 
     # Extra dimensions
-    tags: Dict[str, str] = field(default_factory=dict)
-    labels: Dict[str, str] = field(default_factory=dict)
-    dimensions: Dict[str, str] = field(default_factory=dict)
+    tags: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+    dimensions: dict[str, str] = field(default_factory=dict)
 
     # Issue discriminator for fingerprint stability
-    issue_key: Dict[str, Any] = field(default_factory=dict)
+    issue_key: dict[str, Any] = field(default_factory=dict)
 
     # Links (optional)
-    links: List[Dict[str, str]] = field(default_factory=list)
+    links: list[dict[str, str]] = field(default_factory=list)
 
-    def with_issue(self, **kwargs: Any) -> "FindingDraft":
+    def with_issue(self, **kwargs: Any) -> FindingDraft:
         """
         Convenience: create a new draft with issue_key extended.
         """
@@ -172,14 +172,37 @@ class Checker(Protocol):
 
 @dataclass
 class CheckerResult:
-    valid_findings: List[Dict[str, Any]] = field(default_factory=list)
+    valid_findings: list[dict[str, Any]] = field(default_factory=list)
     invalid_findings: int = 0
-    invalid_errors: List[str] = field(default_factory=list)
+    invalid_errors: list[str] = field(default_factory=list)
 
 
 class CheckerRunner:
-    """
-    Runs one or many checkers and outputs validated finops_findings records (dicts).
+    """Runs one or many checkers and outputs validated finops_findings records (dicts).
+
+    This class orchestrates the execution of checkers, handling:
+    - Running individual or multiple checkers
+    - Validation mode (lenient vs strict)
+    - Salt mode for finding_id stability (stable/per_run/per_day)
+    - Error collection and reporting
+
+    The runner follows this pipeline:
+        1. For each checker, call checker.run(ctx) to get FindingDrafts
+        2. Convert each draft to canonical record via build_finding_record()
+        3. Validate and compute IDs via build_ids_and_validate()
+        4. Collect valid findings and errors
+
+    Attributes:
+        _salt_mode: Controls finding_id stability across runs
+        _validation_mode: Controls how validation failures are handled
+
+    Example:
+        >>> runner = CheckerRunner(finding_id_salt_mode="stable", validation_mode="lenient")
+        >>> result = runner.run_one(my_checker, ctx)
+        >>> len(result.valid_findings)
+        42
+        >>> result.invalid_findings
+        3
     """
     def __init__(
         self,
@@ -202,15 +225,43 @@ class CheckerRunner:
             raise ValueError(f"validation_mode must be one of {sorted(allowed_modes)}")
         self._validation_mode = validation_mode
 
-    def _compute_salt(self, ctx: RunContext) -> Optional[str]:
+    def _compute_salt(self, ctx: RunContext) -> str | None:
         if self._salt_mode == "stable":
             return None
         if self._salt_mode == "per_run":
             return ctx.run_id
         # per_day
-        return ctx.run_ts.astimezone(timezone.utc).date().isoformat()
+        return ctx.run_ts.astimezone(UTC).date().isoformat()
 
     def run_one(self, checker: Checker, ctx: RunContext) -> CheckerResult:
+        """Run a single checker and return validated findings.
+
+        Executes the checker, validates all produced findings, and returns
+        a result containing valid findings and any validation errors.
+
+        Args:
+            checker: A Checker instance to run
+            ctx: RunContext with tenant/workspace/run information
+
+        Returns:
+            CheckerResult containing:
+                - valid_findings: List of validated finding dicts
+                - invalid_findings: Count of invalid findings
+                - invalid_errors: List of error messages (up to 50)
+
+        Raises:
+            NotImplementedError: If checker.run() is not implemented
+
+        Note:
+            In lenient mode (default), validation errors are captured but
+            don't stop processing. In strict mode, first error raises.
+
+        Example:
+            >>> runner = CheckerRunner(validation_mode="lenient")
+            >>> result = runner.run_one(EC2Checker(), ctx)
+            >>> for finding in result.valid_findings:
+            ...     print(finding["fingerprint"])
+        """
         result = CheckerResult()
         salt = self._compute_salt(ctx)
 
@@ -240,7 +291,7 @@ class CheckerRunner:
                 if len(result.invalid_errors) < 50:
                     check_id = ""
                     try:
-                        check_id = getattr(checker, "check_id", "") or getattr(checker, "__class__").__name__
+                        check_id = getattr(checker, "check_id", "") or checker.__class__.__name__
                     except Exception:  # pragma: no cover
                         check_id = "unknown-checker"
 
@@ -263,6 +314,33 @@ class CheckerRunner:
         return result
 
     def run_many(self, checkers: Sequence[Checker], ctx: RunContext) -> CheckerResult:
+        """Run multiple checkers and merge results.
+
+        Executes all checkers sequentially, merging their results into a single
+        CheckerResult. This is useful for running all checkers for a service
+        or running all checkers in a single run.
+
+        Args:
+            checkers: Sequence of Checker instances to run
+            ctx: RunContext with tenant/workspace/run information
+
+        Returns:
+            CheckerResult containing merged results from all checkers:
+                - valid_findings: Combined list of all valid findings
+                - invalid_findings: Total count of invalid findings
+                - invalid_errors: Combined error messages (max 50)
+
+        Note:
+            Errors are collected up to a maximum of 50 to prevent
+            memory issues with very large datasets.
+
+        Example:
+            >>> checkers = [EC2Checker(), RDSChecker(), S3Checker()]
+            >>> runner = CheckerRunner()
+            >>> result = runner.run_many(checkers, ctx)
+            >>> print(f"Total findings: {len(result.valid_findings)}")
+            Total findings: 156
+        """
         merged = CheckerResult()
         for checker in checkers:
             r = self.run_one(checker, ctx)
@@ -280,8 +358,25 @@ class CheckerRunner:
 def _money_or_zero(value: Any) -> float:
     """Normalize money to a numeric type.
 
-    Strict policy (Option B): money values must be numeric (float/int) or None.
+    Strict policy: money values must be numeric (float/int) or None.
     We keep downstream invariants stable by returning 0.0 when missing.
+
+    Args:
+        value: Any value to normalize (can be None, int, float, or invalid type)
+
+    Returns:
+        float: Normalized monetary value, 0.0 for None/invalid
+
+    Raises:
+        ValueError: If value is a boolean (common bug)
+
+    Example:
+        >>> _money_or_zero(None)
+        0.0
+        >>> _money_or_zero(100.50)
+        100.5
+        >>> _money_or_zero("100")  # Raises - strings not allowed
+        ValueError: money value must be numeric or None, got str: '100'
     """
     if value is None:
         return 0.0
@@ -296,10 +391,31 @@ def _money_or_zero(value: Any) -> float:
 def _normalize_estimate_confidence(value: Any) -> int:
     """Normalize confidence to an int 0..100.
 
-    Accepts:
-      - None -> 0
-      - int/float -> clamped 0..100
-      - str: "low"|"medium"|"high"|"unknown" plus numeric strings
+    Converts various confidence representations to a standardized 0-100 integer.
+    This ensures consistent confidence scoring across all checkers.
+
+    Args:
+        value: Confidence value in various formats
+
+    Returns:
+        int: Normalized confidence score 0-100
+
+    Conversion rules:
+        - None/empty -> 0
+        - int/float -> clamped to 0-100
+        - "low"/"l" -> 30
+        - "medium"/"med"/"m" -> 60
+        - "high"/"h" -> 85
+        - numeric string -> parsed and clamped
+        - invalid string -> 0
+
+    Example:
+        >>> _normalize_estimate_confidence(None)
+        0
+        >>> _normalize_estimate_confidence("high")
+        85
+        >>> _normalize_estimate_confidence(75)
+        75
     """
     if value is None or isinstance(value, bool):
         return 0
@@ -327,16 +443,45 @@ def _normalize_estimate_confidence(value: Any) -> int:
     return 0
 
 
-def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: str) -> Dict[str, Any]:
-    """
-    Convert a FindingDraft into a finops_findings dict.
-    IDs are not added here (done by build_ids_and_validate()).
+def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: str) -> dict[str, Any]:
+    """Convert a FindingDraft into a finops_findings dict.
+
+    This function transforms a checker-specific FindingDraft into the canonical
+    finops_findings record format. It handles:
+    - String normalization (trimming, lowercasing where appropriate)
+    - Default value injection for optional fields
+    - Scope and severity structure creation
+    - Cost estimation normalization
+
+    Note:
+        IDs (fingerprint, finding_id) are NOT added here - those are computed
+        by build_ids_and_validate() in finops_contracts.py.
+
+    Args:
+        ctx: Run context with tenant/workspace/run information
+        draft: FindingDraft from checker
+        source_ref: Reference to the source checker (for audit trail)
+
+    Returns:
+        Dict[str, Any]: Canonical finops_findings record with all fields
+                       except fingerprint and finding_id
+
+    Raises:
+        ValueError: If required fields are missing from draft
+
+    Example:
+        >>> ctx = RunContext(tenant_id="acme", workspace_id="prod",
+        ...                   run_id="run-001", run_ts=datetime.now())
+        >>> draft = FindingDraft(check_id="ec2_unused", ...)
+        >>> record = build_finding_record(ctx, draft, source_ref="ec2_instances")
+        >>> "fingerprint" in record
+        False  # Added later by build_ids_and_validate
     """
     tenant_id = normalize_str(ctx.tenant_id)
     workspace_id = normalize_str(ctx.workspace_id, lower=False)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    record: Dict[str, Any] = {
+    record: dict[str, Any] = {
         "tenant_id": tenant_id,
         "workspace_id": workspace_id,
 
@@ -441,12 +586,12 @@ class FindingEmitter:
     Helper for checkers that prefer push-style (emit) instead of yielding.
     It still produces FindingDrafts; the runner will handle IDs/validation.
     """
-    _items: List[FindingDraft] = field(default_factory=list)
+    _items: list[FindingDraft] = field(default_factory=list)
 
     def emit(self, draft: FindingDraft) -> None:
         self._items.append(draft)
 
-    def items(self) -> List[FindingDraft]:
+    def items(self) -> list[FindingDraft]:
         return list(self._items)
 
 
@@ -514,7 +659,7 @@ def example_run() -> None:
         tenant_id="acme",
         workspace_id="prod",
         run_id="run-2026-01-22T10:00:00Z",
-        run_ts=datetime.now(timezone.utc),
+        run_ts=datetime.now(UTC),
         engine_name="finopsanalyzer",
         engine_version="0.1.0",
         rulepack_version="0.1.0",

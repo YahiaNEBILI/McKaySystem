@@ -9,10 +9,9 @@ This module glues the correlation engine into the main runner:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
-
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from pipeline.correlation.engine import CorrelationConfig, CorrelationEngine
 from pipeline.correlation.ruleset import load_rules_from_dir
@@ -24,8 +23,8 @@ def _compute_finding_id_salt(
     *,
     finding_id_mode: str,
     run_id: str,
-    run_ts: Optional[datetime] = None,
-) -> Optional[str]:
+    run_ts: datetime | None = None,
+) -> str | None:
     """
     Convert runner finding-id mode to an optional salt string.
     - stable  -> None (fully stable fingerprints/ids, based on issue_key + scope)
@@ -38,7 +37,7 @@ def _compute_finding_id_salt(
     if mode == "per_run":
         return str(run_id or "")
     if mode == "per_day":
-        ts = run_ts or datetime.now(timezone.utc)
+        ts = run_ts or datetime.now(UTC)
         return ts.date().isoformat()
     # Unknown mode -> behave like stable (do not destabilize IDs silently)
     return None
@@ -53,8 +52,8 @@ def run_correlation(
     out_dir: str,
     threads: int = 4,
     finding_id_mode: str = "stable",
-    run_ts: Optional[datetime] = None,
-) -> Dict[str, Any]:
+    run_ts: datetime | None = None,
+) -> dict[str, Any]:
     """
     Pipeline step: correlate raw findings and emit meta-findings.
 
@@ -114,7 +113,7 @@ def run_correlation(
     }
 
 
-def run_correlation_from_bootstrap(bootstrap: Dict[str, Any]) -> Dict[str, Any]:
+def run_correlation_from_bootstrap(bootstrap: dict[str, Any]) -> dict[str, Any]:
     """
     Backward-compatible wrapper for older callers.
 

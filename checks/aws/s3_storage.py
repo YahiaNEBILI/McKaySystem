@@ -7,31 +7,39 @@ extends it into a real S3 storage checker with additional governance and cost
 signals.
 
 Emitted check_ids:
-  - aws.s3.governance.lifecycle_missing
-  - aws.s3.governance.encryption_missing
-  - aws.s3.governance.public_access_block_missing
-  - aws.s3.cost.bucket_storage_estimate
+  - aws.s3.governance.lifecycle.missing
+  - aws.s3.governance.encryption.missing
+  - aws.s3.governance.public.access.block.missing
+  - aws.s3.cost.bucket.storage.estimate
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
-    build_scope,
     AwsAccountContext,
+    PricingResolver,
+    build_scope,
+    get_logger,
     now_utc,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD, S3_METRIC_LOOKBACK_DAYS
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("s3_storage")
 
 
-def _normalize_s3_location_constraint(value: Optional[str]) -> str:
+def _normalize_s3_location_constraint(value: str | None) -> str:
     """Normalize S3 GetBucketLocation LocationConstraint values."""
     if not value:
         return "us-east-1"
@@ -74,33 +82,37 @@ class S3StorageChecker:
     is_regional = False
 
     # check ids
-    _CID_LIFECYCLE = "aws.s3.governance.lifecycle_missing"
-    _CID_ENCRYPTION = "aws.s3.governance.encryption_missing"
-    _CID_PAB = "aws.s3.governance.public_access_block_missing"
-    _CID_COST = "aws.s3.cost.bucket_storage_estimate"
+    _CID_LIFECYCLE = "aws.s3.governance.lifecycle.missing"
+    _CID_ENCRYPTION = "aws.s3.governance.encryption.missing"
+    _CID_PAB = "aws.s3.governance.public.access.block.missing"
+    _CID_COST = "aws.s3.cost.bucket.storage.estimate"
 
     def __init__(
         self,
         *,
         account: AwsAccountContext,
-        default_storage_price_gb_month_usd: float = 0.023,
-        metric_lookback_days: int = 3,
+        default_storage_price_gb_month_usd: float = S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD,
+        metric_lookback_days: int = S3_METRIC_LOOKBACK_DAYS,
     ) -> None:
         self._account = account
         self._default_price = float(default_storage_price_gb_month_usd)
         self._lookback_days = int(metric_lookback_days)
 
-    def run(self, ctx: Any) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting S3 storage check")
         if ctx.services is None:
             raise RuntimeError("S3StorageChecker requires ctx.services (AWS clients)")
 
         s3: BaseClient = ctx.services.s3
-        cloudwatch: Optional[BaseClient] = getattr(ctx.services, "cloudwatch", None)
+        cloudwatch: BaseClient | None = getattr(ctx.services, "cloudwatch", None)
         pricing = getattr(ctx.services, "pricing", None)
 
         billing_account_id = self._account.billing_account_id or self._account.account_id
 
         resp = s3.list_buckets()
+        _LOGGER.debug("Listed S3 buckets")
+        bucket_count = len(resp.get("Buckets", []) or [])
+        _LOGGER.info("S3 buckets found", extra={"bucket_count": bucket_count})
         for bucket in resp.get("Buckets", []) or []:
             name = str(bucket.get("Name") or "")
             if not name:
@@ -316,7 +328,7 @@ class S3StorageChecker:
                 return "unknown"
             raise
 
-    def _has_lifecycle_best_effort(self, s3: BaseClient, bucket: str) -> Tuple[str, str]:
+    def _has_lifecycle_best_effort(self, s3: BaseClient, bucket: str) -> tuple[str, str]:
         """Return (state, note) where state is one of: present/missing/unknown."""
         try:
             s3.get_bucket_lifecycle_configuration(Bucket=bucket)
@@ -329,7 +341,7 @@ class S3StorageChecker:
                 return "unknown", "Access denied while reading lifecycle configuration."
             raise
 
-    def _has_default_encryption_best_effort(self, s3: BaseClient, bucket: str) -> Tuple[str, str]:
+    def _has_default_encryption_best_effort(self, s3: BaseClient, bucket: str) -> tuple[str, str]:
         try:
             s3.get_bucket_encryption(Bucket=bucket)
             return "present", ""
@@ -341,7 +353,7 @@ class S3StorageChecker:
                 return "unknown", "Access denied while reading encryption configuration."
             raise
 
-    def _public_access_block_state_best_effort(self, s3: BaseClient, bucket: str) -> Tuple[str, str]:
+    def _public_access_block_state_best_effort(self, s3: BaseClient, bucket: str) -> tuple[str, str]:
         try:
             resp = s3.get_public_access_block(Bucket=bucket)
             cfg = (resp or {}).get("PublicAccessBlockConfiguration") or {}
@@ -371,7 +383,7 @@ class S3StorageChecker:
         *,
         bucket: str,
         storage_type: str,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Best-effort bucket size in GiB for a given CloudWatch StorageType.
 
         Uses AWS/S3 BucketSizeBytes (updated daily). We query a small lookback
@@ -404,11 +416,21 @@ class S3StorageChecker:
         if not datapoints:
             return None
 
+        # Filter out None values and ensure we have valid timestamps
+        valid_datapoints = [
+            d for d in datapoints
+            if isinstance(d, dict) and d.get("Timestamp") is not None
+        ]
+        if not valid_datapoints:
+            return None
+
         latest = max(
-            datapoints,
-            key=lambda d: d.get("Timestamp") or datetime.min.replace(tzinfo=timezone.utc),
+            valid_datapoints,
+            key=lambda d: d.get("Timestamp") or datetime.min.replace(tzinfo=UTC),
         )
         avg = latest.get("Average")
+        if avg is None:
+            return None
         try:
             avg_f = float(avg)
         except (TypeError, ValueError):
@@ -428,54 +450,15 @@ class S3StorageChecker:
         region: str,
         pricing_storage_class: str,
         fallback_usd_per_gb_month: float,
-    ) -> Tuple[float, str, int, str]:
+    ) -> tuple[float, str, int, str]:
         """Return (usd_per_gb_month, notes, confidence, price_source)."""
-        fallback = (
-            float(fallback_usd_per_gb_month),
-            f"Fallback pricing used (no PricingService quote) for {pricing_storage_class}.",
-            55,
-            "fallback",
+        pricing_ctx = SimpleNamespace(services=SimpleNamespace(pricing=pricing))
+        return PricingResolver(pricing_ctx).resolve_s3_storage_price(
+            region=region,
+            pricing_storage_class=pricing_storage_class,
+            fallback_usd_per_gb_month=fallback_usd_per_gb_month,
+            call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
         )
-        if pricing is None:
-            return fallback
-
-        location = getattr(pricing, "location_for_region", lambda _r: None)(region)
-        if not location:
-            return fallback
-
-        # Pricing API can be finicky; try a small set of common attributes deterministically.
-        attempts: List[List[Dict[str, str]]] = [
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "productFamily", "Value": "Storage"},
-                {"Field": "storageClass", "Value": pricing_storage_class},
-            ],
-            [
-                {"Field": "location", "Value": location},
-                {"Field": "productFamily", "Value": "Storage"},
-                {"Field": "volumeType", "Value": pricing_storage_class},
-            ],
-        ]
-
-        for flt in attempts:
-            quote = pricing.get_on_demand_unit_price(
-                service_code="AmazonS3",
-                filters=flt,
-                unit="GB-Mo",
-            )
-            if quote is None:
-                continue
-            unit_price = float(getattr(quote, "unit_price_usd", fallback_usd_per_gb_month))
-            if unit_price <= 0:
-                continue
-            return (
-                unit_price,
-                f"PricingService quote for S3 {pricing_storage_class} in {location} ({quote.source}).",
-                80,
-                str(getattr(quote, "source", "pricing_service") or "pricing_service"),
-            )
-
-        return fallback
 
     def _bucket_storage_breakdown_best_effort(
         self,
@@ -484,7 +467,7 @@ class S3StorageChecker:
         pricing: Any,
         region: str,
         bucket: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Compute a deterministic multi-class storage breakdown for a bucket.
 
         Uses CloudWatch storage metrics for multiple storage classes and estimates cost
@@ -492,7 +475,7 @@ class S3StorageChecker:
         """
         # Fixed order for determinism.
         # CloudWatch StorageType -> Pricing storageClass -> fallback $/GB-Mo
-        storage_matrix: List[Tuple[str, str, float]] = [
+        storage_matrix: list[tuple[str, str, float]] = [
             ("StandardStorage", "Standard", self._default_price),
             ("StandardIAStorage", "Standard - Infrequent Access", 0.0125),
             ("OneZoneIAStorage", "One Zone - Infrequent Access", 0.0100),
@@ -504,11 +487,11 @@ class S3StorageChecker:
             ("DeepArchiveStorage", "Glacier Deep Archive", 0.00099),
         ]
 
-        items: List[Dict[str, str]] = []
+        items: list[dict[str, str]] = []
         total_size = 0.0
         total_cost = 0.0
-        confidences: List[int] = []
-        notes_parts: List[str] = []
+        confidences: list[int] = []
+        notes_parts: list[str] = []
 
         for cw_storage_type, pricing_storage_class, fallback_price in storage_matrix:
             size_gib = self._bucket_size_gib_best_effort(
@@ -546,7 +529,7 @@ class S3StorageChecker:
             return None
 
         est_conf = min(confidences) if confidences else 50
-        uniq_notes: List[str] = []
+        uniq_notes: list[str] = []
         for n in notes_parts:
             if n and n not in uniq_notes:
                 uniq_notes.append(n)
@@ -562,7 +545,7 @@ class S3StorageChecker:
 
 
 @register_checker("checks.aws.s3_storage:S3StorageChecker")
-def _factory(ctx: Any, bootstrap: Dict[str, Any]) -> S3StorageChecker:
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> S3StorageChecker:
     """Instantiate this checker from runtime bootstrap data."""
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:

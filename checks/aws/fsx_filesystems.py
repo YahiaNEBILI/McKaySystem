@@ -27,24 +27,38 @@ Signals (Windows cost/perf):
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
-    build_scope,
     AwsAccountContext,
+    PricingResolver,
+    build_scope,
+    get_logger,
+    money,
     normalize_tags,
     now_utc,
+    percentile,
     safe_region_from_client,
-    money,
 )
-
+from checks.aws.defaults import (
+    FSX_LARGE_STORAGE_GIB_THRESHOLD,
+    FSX_MAX_FINDINGS_PER_TYPE,
+    FSX_REQUIRED_TAG_KEYS,
+    FSX_THROUGHPUT_LOOKBACK_DAYS,
+    FSX_UNDERUTILIZED_P95_UTIL_THRESHOLD_PCT,
+    FSX_UNUSED_LOOKBACK_DAYS,
+    FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS,
+)
 from checks.registry import Bootstrap, register_checker
-from contracts.finops_checker_pattern import FindingDraft, RunContext, Severity
-from contracts.finops_checker_pattern import Checker
+from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
+
+# Logger for this module
+_LOGGER = get_logger("fsx_filesystems")
 
 
 # -----------------------------
@@ -57,23 +71,23 @@ class FSxFileSystemsConfig:
     """Configuration knobs for FSxFileSystemsChecker."""
 
     # "Unused" heuristics
-    unused_lookback_days: int = 14
+    unused_lookback_days: int = FSX_UNUSED_LOOKBACK_DAYS
 
     # Throughput utilization lookback
-    throughput_lookback_days: int = 14
-    underutilized_p95_util_threshold_pct: float = 20.0
+    throughput_lookback_days: int = FSX_THROUGHPUT_LOOKBACK_DAYS
+    underutilized_p95_util_threshold_pct: float = FSX_UNDERUTILIZED_P95_UTIL_THRESHOLD_PCT
 
     # Storage heuristic (GiB)
-    large_storage_gib_threshold: int = 4096
+    large_storage_gib_threshold: int = FSX_LARGE_STORAGE_GIB_THRESHOLD
 
     # Windows backup governance
-    windows_backup_low_retention_days: int = 7
+    windows_backup_low_retention_days: int = FSX_WINDOWS_BACKUP_LOW_RETENTION_DAYS
 
     # Governance tags (tags are lowercased by normalize_tags)
-    required_tag_keys: Tuple[str, ...] = ("application", "applicationId", "environment")
+    required_tag_keys: tuple[str, ...] = FSX_REQUIRED_TAG_KEYS
 
     # Safety valve
-    max_findings_per_type: int = 50_000
+    max_findings_per_type: int = FSX_MAX_FINDINGS_PER_TYPE
 
 
 # -----------------------------
@@ -88,7 +102,7 @@ class FSxFileSystemsConfig:
 # Conservative fallback USD prices.
 # These are only used when PricingService is not available or the catalog query fails.
 # Tune later with real resolved quotes once you observe stable filter patterns.
-_FALLBACK_FSX_STORAGE_USD_PER_GB_MONTH: Dict[str, Dict[str, float]] = {
+_FALLBACK_FSX_STORAGE_USD_PER_GB_MONTH: dict[str, dict[str, float]] = {
     # FSx for Windows
     "WINDOWS": {"SSD": 0.13, "HDD": 0.04},
     # FSx for ONTAP (storage is generally SSD-backed; keep one fallback)
@@ -99,18 +113,13 @@ _FALLBACK_FSX_STORAGE_USD_PER_GB_MONTH: Dict[str, Dict[str, float]] = {
 
 # Throughput capacity often priced per MB/s-month (catalog unit commonly "MBps-Mo").
 # Fallbacks are deliberately conservative; treat as "ballpark".
-_FALLBACK_FSX_THROUGHPUT_USD_PER_MBPS_MONTH: Dict[str, float] = {
+_FALLBACK_FSX_THROUGHPUT_USD_PER_MBPS_MONTH: dict[str, float] = {
     "WINDOWS": 2.0,
     "ONTAP": 0.3,
     "LUSTRE": 0.0,  # often bundled/varies; keep 0 by default unless you confirm a stable quote
 }
 
 _NONPROD_HINTS = ("dev", "test", "staging", "sbx", "nprod", "qa", "nonprod")
-
-
-def _pricing_service(ctx: RunContext) -> Any:
-    """Return PricingService if injected in ctx.services, else None."""
-    return getattr(getattr(ctx, "services", None), "pricing", None)
 
 
 def _fallback_storage_usd_per_gb_month(*, fs_type: str, storage_type: str) -> float:
@@ -142,55 +151,13 @@ def _resolve_fsx_storage_price_usd_per_gb_month(
     Returns: (usd_per_gb_month, notes, confidence_int)
     """
     default_price = _fallback_storage_usd_per_gb_month(fs_type=fs_type, storage_type=storage_type)
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using fallback pricing.", 30)
-
-    location = pricing.location_for_region(region)
-    if not location:
-        return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
-
-    # Pricing catalog evolves. We try several attempts and take first match.
-    # NOTE: Filter fields are best-effort; fallback will kick in if the catalog doesn't match.
-    attempts: List[List[Dict[str, str]]] = [
-        # Attempt 1: broad storage family
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Storage"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-        # Attempt 2: explicit storageType (common attribute name)
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Storage"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-            {"Field": "storageType", "Value": str(storage_type).upper()},
-        ],
-        # Attempt 3: some catalogs use "File System Storage" as productFamily
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "File System Storage"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-    ]
-
-    try:
-        for filters in attempts:
-            quote = pricing.get_on_demand_unit_price(
-                service_code="AmazonFSx",
-                filters=filters,
-                unit="GB-Mo",
-            )
-            if quote is not None:
-                return (
-                    float(quote.unit_price_usd),
-                    f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                    60 if quote.source == "cache" else 70,
-                )
-    except Exception:
-        pass
-
-    return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
+    return PricingResolver(ctx).resolve_fsx_storage_price(
+        region=region,
+        fs_type=fs_type,
+        storage_type=storage_type,
+        default_price=default_price,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
 
 
 def _resolve_fsx_throughput_price_usd_per_mbps_month(
@@ -205,57 +172,13 @@ def _resolve_fsx_throughput_price_usd_per_mbps_month(
     Returns: (usd_per_mbps_month, notes, confidence_int)
     """
     default_price = _fallback_throughput_usd_per_mbps_month(fs_type=fs_type)
-    if default_price <= 0.0:
-        return (0.0, "No throughput fallback for this FSx type; leaving throughput estimate as 0.", 20)
-
-    pricing = _pricing_service(ctx)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using fallback pricing.", 30)
-
-    location = pricing.location_for_region(region)
-    if not location:
-        return (default_price, "Pricing region mapping missing; using fallback pricing.", 30)
-
-    # Throughput unit name is catalog-dependent; "MBps-Mo" is commonly used.
-    # We'll try a couple of likely unit spellings.
-    units = ["MBps-Mo", "MBps-month", "MB/s-Mo"]
-
-    # Try multiple plausible filter sets.
-    attempts: List[List[Dict[str, str]]] = [
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "Provisioned Throughput"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "productFamily", "Value": "System Operation"},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-        [
-            {"Field": "location", "Value": location},
-            {"Field": "fileSystemType", "Value": str(fs_type).upper()},
-        ],
-    ]
-
-    try:
-        for unit in units:
-            for filters in attempts:
-                quote = pricing.get_on_demand_unit_price(
-                    service_code="AmazonFSx",
-                    filters=filters,
-                    unit=unit,
-                )
-                if quote is not None:
-                    return (
-                        float(quote.unit_price_usd),
-                        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-                        60 if quote.source == "cache" else 70,
-                    )
-    except Exception:
-        pass
-
-    return (default_price, "Pricing lookup failed/unknown; using fallback pricing.", 30)
+    return PricingResolver(ctx).resolve_fsx_throughput_price(
+        region=region,
+        fs_type=fs_type,
+        default_price=default_price,
+        units=("MBps-Mo", "MBps-month", "MB/s-Mo"),
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
+    )
 
 
 def _to_str(v: Any) -> str:
@@ -267,7 +190,7 @@ def _to_str(v: Any) -> str:
         return ""
 
 
-def _to_int(v: Any) -> Optional[int]:
+def _to_int(v: Any) -> int | None:
     if v is None:
         return None
     try:
@@ -276,7 +199,7 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
-def _to_float(v: Any) -> Optional[float]:
+def _to_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
@@ -285,18 +208,18 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def _age_days(created: Any, *, now_ts: datetime) -> Optional[int]:
+def _age_days(created: Any, *, now_ts: datetime) -> int | None:
     if not isinstance(created, datetime):
         return None
     dt = created
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return int((now_ts - dt).total_seconds() // 86400)
 
 
-def _is_nonprod(tags: Dict[str, str]) -> bool:
+def _is_nonprod(tags: dict[str, str]) -> bool:
     for k in ("env", "environment", "stage", "tier"):
         v = (tags.get(k) or "").strip().lower()
         if v and any(h in v for h in _NONPROD_HINTS):
@@ -307,7 +230,7 @@ def _is_nonprod(tags: Dict[str, str]) -> bool:
     return False
 
 
-def _extract_deployment_type(fs: Dict[str, Any]) -> str:
+def _extract_deployment_type(fs: dict[str, Any]) -> str:
     # Many FSx types embed DeploymentType under their specific config blocks
     for key in ("WindowsConfiguration", "OntapConfiguration", "LustreConfiguration"):
         cfg = fs.get(key)
@@ -318,7 +241,7 @@ def _extract_deployment_type(fs: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_throughput_capacity(fs: Dict[str, Any]) -> Optional[int]:
+def _extract_throughput_capacity(fs: dict[str, Any]) -> int | None:
     top = _to_int(fs.get("ThroughputCapacity"))
     if top is not None:
         return top
@@ -332,7 +255,7 @@ def _extract_throughput_capacity(fs: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _extract_windows_cfg(fs: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_windows_cfg(fs: dict[str, Any]) -> dict[str, Any]:
     cfg = fs.get("WindowsConfiguration")
     if isinstance(cfg, dict):
         return cfg
@@ -353,7 +276,7 @@ def _cw_get(
     end: datetime,
     period: int,
     statistics: Sequence[str],
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     cw = getattr(ctx.services, "cloudwatch", None) if ctx.services is not None else None
     if cw is None:
         return []
@@ -374,19 +297,15 @@ def _cw_get(
         return []
     except ClientError:
         return []
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return []
 
 
-def _p95(values: List[float]) -> Optional[float]:
-    if not values:
-        return None
-    values.sort()
-    idx = int(0.95 * (len(values) - 1))
-    return values[idx]
+def _p95(values: list[float]) -> float | None:
+    return percentile(values, 95.0, method="floor")
 
 
-def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, Dict[str, Any]]:
+def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> tuple[bool, dict[str, Any]]:
     """
     Returns (active, evidence).
     active=True if any known metric shows >0 activity.
@@ -394,7 +313,7 @@ def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, D
     end = now_utc()
     start = end - timedelta(days=days)
 
-    candidates: List[Tuple[str, str]] = [
+    candidates: list[tuple[str, str]] = [
         ("DataReadBytes", "Sum"),
         ("DataWriteBytes", "Sum"),
         ("ThroughputUtilization", "Average"),
@@ -403,7 +322,7 @@ def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, D
     ]
 
     any_metric_seen = False
-    evidence: Dict[str, Any] = {
+    evidence: dict[str, Any] = {
         "window_days": days,
         "seen_metrics": [],
         "any_metric_seen": False,
@@ -441,7 +360,7 @@ def _activity_signal(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[bool, D
     return False, evidence
 
 
-def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Optional[float], Dict[str, Any]]:
+def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> tuple[float | None, dict[str, Any]]:
     """
     Best-effort: returns p95 utilization percentage from known utilization metrics.
     """
@@ -460,7 +379,7 @@ def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Opt
         )
         if not dps:
             continue
-        vals: List[float] = []
+        vals: list[float] = []
         for dp in dps:
             v = _to_float(dp.get("Average"))
             if v is not None:
@@ -472,7 +391,7 @@ def _p95_utilization_pct(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Opt
     return None, {"window_days": days, "reason": "no_util_metrics"}
 
 
-def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Optional[float], Dict[str, Any]]:
+def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> tuple[float | None, dict[str, Any]]:
     """
     Fallback: approximate p95 throughput via DataReadBytes+DataWriteBytes (Sum per hour).
     Returns MiB/s.
@@ -486,8 +405,8 @@ def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Option
     if not read and not write:
         return None, {"window_days": days, "reason": "no_rw_metrics"}
 
-    read_vals: List[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in read]
-    write_vals: List[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in write]
+    read_vals: list[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in read]
+    write_vals: list[float] = [(_to_float(dp.get("Sum")) or 0.0) for dp in write]
 
     p95_read = _p95(read_vals) or 0.0
     p95_write = _p95(write_vals) or 0.0
@@ -503,25 +422,15 @@ def _p95_rw_mib_per_s(ctx: RunContext, *, fs_id: str, days: int) -> Tuple[Option
 
 
 class FSxFileSystemsChecker(Checker):
-    checker_id = "checks.aws.fsx_filesystems"
+    checker_id = "aws.fsx.filesystems"
 
-    def __init__(self, *, account_id: str, cfg: Optional[FSxFileSystemsConfig] = None) -> None:
+    def __init__(self, *, account_id: str, cfg: FSxFileSystemsConfig | None = None) -> None:
         self._account_id = str(account_id)
         self._cfg = cfg or FSxFileSystemsConfig()
 
-    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
-        if ctx.services is None or getattr(ctx.services, "fsx", None) is None:
-            return
-
-        fsx = ctx.services.fsx
-        region = safe_region_from_client(fsx) or "unknown"
-        cfg = self._cfg
-        now_ts = now_utc()
-
-        account = AwsAccountContext(account_id=self._account_id)
-
-        file_systems: List[Dict[str, Any]] = []
-
+    @staticmethod
+    def _list_file_systems_best_effort(fsx: Any) -> list[dict[str, Any]]:
+        file_systems: list[dict[str, Any]] = []
         # Prefer paginator for correctness (API is paginated).
         try:
             paginator = fsx.get_paginator("describe_file_systems")
@@ -531,25 +440,79 @@ class FSxFileSystemsChecker(Checker):
                     for fs_any in page_fs:
                         if isinstance(fs_any, dict):
                             file_systems.append(fs_any)
-        except Exception:
-            # Fallback: single call (older mocks / unusual clients / edge cases).
-            try:
-                resp = fsx.describe_file_systems()
-                page_fs = resp.get("FileSystems", []) or []
-                if isinstance(page_fs, list):
-                    for fs_any in page_fs:
-                        if isinstance(fs_any, dict):
-                            file_systems.append(fs_any)
-            except ClientError:
-                return
-            except Exception:
-                return
+            return file_systems
+        except (AttributeError, TypeError, ValueError, ClientError):
+            pass
+
+        # Fallback: single call (older mocks / unusual clients / edge cases).
+        try:
+            resp = fsx.describe_file_systems()
+            page_fs = resp.get("FileSystems", []) or []
+            if isinstance(page_fs, list):
+                for fs_any in page_fs:
+                    if isinstance(fs_any, dict):
+                        file_systems.append(fs_any)
+        except (AttributeError, TypeError, ValueError, ClientError):
+            return []
+        return file_systems
+
+    def _pricing_baseline_for_file_system(
+        self,
+        *,
+        ctx: RunContext,
+        region: str,
+        fs_type: str,
+        storage_type: str,
+        storage_gib: int | None,
+        throughput_cfg: int | None,
+    ) -> tuple[float, float, str, int]:
+        storage_price, storage_notes, storage_conf = _resolve_fsx_storage_price_usd_per_gb_month(
+            ctx,
+            region=region,
+            fs_type=fs_type,
+            storage_type=storage_type or "SSD",
+        )
+        throughput_price, throughput_notes, throughput_conf = _resolve_fsx_throughput_price_usd_per_mbps_month(
+            ctx,
+            region=region,
+            fs_type=fs_type,
+        )
+
+        storage_cost = 0.0
+        if storage_gib is not None and storage_gib > 0:
+            storage_cost = float(storage_gib) * float(storage_price)
+
+        throughput_cost = 0.0
+        if throughput_cfg is not None and throughput_cfg > 0:
+            throughput_cost = float(throughput_cfg) * float(throughput_price)
+
+        baseline_monthly_cost = money(storage_cost + throughput_cost)
+        pricing_notes = "; ".join([n for n in (storage_notes, throughput_notes) if n]).strip()
+        pricing_conf = int(min(storage_conf, throughput_conf))
+        return baseline_monthly_cost, throughput_cost, pricing_notes, pricing_conf
+
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting FSx filesystems check")
+        if ctx.services is None or getattr(ctx.services, "fsx", None) is None:
+            _LOGGER.warning("FSx client not available in services")
+            return
+
+        fsx = ctx.services.fsx
+        region = safe_region_from_client(fsx) or "unknown"
+        _LOGGER.debug("FSx check running", extra={"region": region})
+        cfg = self._cfg
+
+        account = AwsAccountContext(account_id=self._account_id)
+
+        file_systems = self._list_file_systems_best_effort(fsx)
 
         if not file_systems:
             return
 
+        _LOGGER.info("Listed FSx filesystems", extra={"count": len(file_systems), "region": region})
+
         # Counters per check_id to enforce max_findings_per_type
-        emitted: Dict[str, int] = {}
+        emitted: dict[str, int] = {}
 
         for fs_any in file_systems:
             if not isinstance(fs_any, dict):
@@ -566,7 +529,6 @@ class FSxFileSystemsChecker(Checker):
             dep = _extract_deployment_type(fs)
             throughput_cfg = _extract_throughput_capacity(fs)
             storage_gib = _to_int(fs.get("StorageCapacity"))
-            created_days = _age_days(fs.get("CreationTime"), now_ts=now_ts)
 
             # Determine storage_type for pricing
             storage_type = ""
@@ -577,33 +539,14 @@ class FSxFileSystemsChecker(Checker):
                 # FSx APIs differ; keep default as SSD for safety
                 storage_type = "SSD"
 
-            storage_price, storage_notes, storage_conf = _resolve_fsx_storage_price_usd_per_gb_month(
-                ctx,
+            baseline_monthly_cost, throughput_cost, pricing_notes, pricing_conf = self._pricing_baseline_for_file_system(
+                ctx=ctx,
                 region=region,
                 fs_type=fs_type,
-                storage_type=storage_type or "SSD",
+                storage_type=storage_type,
+                storage_gib=storage_gib,
+                throughput_cfg=throughput_cfg,
             )
-
-            throughput_price, throughput_notes, throughput_conf = _resolve_fsx_throughput_price_usd_per_mbps_month(
-                ctx,
-                region=region,
-                fs_type=fs_type,
-            )
-
-            storage_cost = 0.0
-            if storage_gib is not None and storage_gib > 0:
-                storage_cost = float(storage_gib) * float(storage_price)
-
-            throughput_cost = 0.0
-            if throughput_cfg is not None and throughput_cfg > 0:
-                throughput_cost = float(throughput_cfg) * float(throughput_price)
-
-            baseline_monthly_cost = money(storage_cost + throughput_cost)
-
-            pricing_notes = "; ".join(
-                [n for n in (storage_notes, throughput_notes) if n]
-            ).strip()
-            pricing_conf = int(min(storage_conf, throughput_conf))
 
 
             base_scope = build_scope(
@@ -616,22 +559,12 @@ class FSxFileSystemsChecker(Checker):
                 resource_arn=fs_arn,
             )
 
-            base_details: Dict[str, Any] = {
-                "fs_id": fs_id,
-                "fs_arn": fs_arn,
-                "fs_type": fs_type,
-                "deployment_type": dep,
-                "throughput_capacity": throughput_cfg,
-                "storage_capacity_gib": storage_gib,
-                "created_age_days": created_days,
-            }
-
             # -----------------------------
             # Governance: missing required tags
             # -----------------------------
             missing = [k for k in cfg.required_tag_keys if not (tags.get(k, "") or "").strip()]
             if missing:
-                check_id = "aws.fsx.filesystems.missing_required_tags"
+                check_id = "aws.fsx.filesystems.missing.required.tags"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -655,7 +588,7 @@ class FSxFileSystemsChecker(Checker):
             # -----------------------------
             active, evidence = _activity_signal(ctx, fs_id=fs_id, days=cfg.unused_lookback_days)
             if not active:
-                check_id = "aws.fsx.filesystems.possible_unused"
+                check_id = "aws.fsx.filesystems.possible.unused"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     conf = 60 if bool(evidence.get("any_metric_seen")) else 35
@@ -686,7 +619,7 @@ class FSxFileSystemsChecker(Checker):
                 p95_util, util_dbg = _p95_utilization_pct(ctx, fs_id=fs_id, days=cfg.throughput_lookback_days)
 
                 if p95_util is not None and p95_util < cfg.underutilized_p95_util_threshold_pct:
-                    check_id = "aws.fsx.filesystems.underutilized_throughput"
+                    check_id = "aws.fsx.filesystems.underutilized.throughput"
                     if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                         emitted[check_id] = emitted.get(check_id, 0) + 1
                         yield FindingDraft(
@@ -719,7 +652,7 @@ class FSxFileSystemsChecker(Checker):
             # 2b) large and inactive storage (heuristic)
             # -----------------------------
             if storage_gib is not None and storage_gib >= cfg.large_storage_gib_threshold and not active:
-                check_id = "aws.fsx.filesystems.large_and_inactive"
+                check_id = "aws.fsx.filesystems.large.and.inactive"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -746,7 +679,7 @@ class FSxFileSystemsChecker(Checker):
             # 3) Multi-AZ in nonprod (Windows/ONTAP)
             # -----------------------------
             if dep and "MULTI_AZ" in dep.upper() and _is_nonprod(tags) and fs_type in ("WINDOWS", "ONTAP"):
-                check_id = "aws.fsx.filesystems.multi_az_in_nonprod"
+                check_id = "aws.fsx.filesystems.multi.az.in.nonprod"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -792,20 +725,19 @@ class FSxFileSystemsChecker(Checker):
         self,
         ctx: RunContext,
         *,
-        fs: Dict[str, Any],
+        fs: dict[str, Any],
         base_scope: Any,
-        tags: Dict[str, str],
+        tags: dict[str, str],
         region: str,
-        storage_gib: Optional[int],
+        storage_gib: int | None,
         storage_type: str,
         baseline_monthly_cost: float,
         pricing_conf: int,
         pricing_notes: str,
-        emitted: Dict[str, int],
+        emitted: dict[str, int],
     ) -> Iterable[FindingDraft]:
         cfg = self._cfg
         fs_id = _to_str(fs.get("FileSystemId"))
-        fs_arn = _to_str(fs.get("ResourceARN"))
 
         win = _extract_windows_cfg(fs)
         backup_days = _to_int(win.get("AutomaticBackupRetentionDays"))
@@ -818,7 +750,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Backups disabled
         if backup_days == 0:
-            check_id = "aws.fsx.windows.backups_disabled"
+            check_id = "aws.fsx.windows.backups.disabled"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -840,7 +772,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Backup retention low
         if backup_days is not None and backup_days > 0 and backup_days < cfg.windows_backup_low_retention_days:
-            check_id = "aws.fsx.windows.backup_retention_low"
+            check_id = "aws.fsx.windows.backup.retention.low"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -862,7 +794,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Copy tags to backups disabled
         if copy_tags is False:
-            check_id = "aws.fsx.windows.copy_tags_to_backups_disabled"
+            check_id = "aws.fsx.windows.copy.tags.to.backups.disabled"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -884,7 +816,7 @@ class FSxFileSystemsChecker(Checker):
 
         # Maintenance window missing / business hours (best-effort)
         if not maint:
-            check_id = "aws.fsx.windows.maintenance_window_missing"
+            check_id = "aws.fsx.windows.maintenance.window.missing"
             if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                 emitted[check_id] = emitted.get(check_id, 0) + 1
                 yield FindingDraft(
@@ -905,16 +837,16 @@ class FSxFileSystemsChecker(Checker):
                 )
         else:
             # Format usually "d:HH:MM" or "d:HH:MM:SS"; parse HH best-effort
-            hour: Optional[int] = None
+            hour: int | None = None
             try:
                 parts = maint.split(":")
                 if len(parts) >= 2:
                     hour = int(parts[1])
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 hour = None
 
             if hour is not None and 8 <= hour <= 18 and not _is_nonprod(tags):
-                check_id = "aws.fsx.windows.maintenance_window_business_hours"
+                check_id = "aws.fsx.windows.maintenance.window.business.hours"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(
@@ -949,7 +881,7 @@ class FSxFileSystemsChecker(Checker):
                 # storage_gib is Optional[int]; we must guard it for type-checkers and runtime safety.
                 if storage_gib is None or storage_gib <= 0:
                     # Cannot compute a meaningful SSD→HDD delta without storage capacity
-                    check_id = "aws.fsx.windows.storage_type_mismatch"
+                    check_id = "aws.fsx.windows.storage.type.mismatch"
                     if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                         emitted[check_id] = emitted.get(check_id, 0) + 1
                         yield FindingDraft(
@@ -995,7 +927,7 @@ class FSxFileSystemsChecker(Checker):
 
                 savings = max(0.0, ssd_cost - hdd_cost)
 
-                check_id = "aws.fsx.windows.storage_type_mismatch"
+                check_id = "aws.fsx.windows.storage.type.mismatch"
                 if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                     emitted[check_id] = emitted.get(check_id, 0) + 1
                     yield FindingDraft(

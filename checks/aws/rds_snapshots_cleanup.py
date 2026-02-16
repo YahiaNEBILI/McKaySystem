@@ -55,31 +55,38 @@ registered via ``@register_checker`` for automatic discovery.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Optional, Set, Tuple
+from typing import Any
 
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
-    build_scope,
     AwsAccountContext,
+    PricingResolver,
     arn_region,
+    build_scope,
+    get_logger,
     is_suppressed,
     money,
+    normalize_tags,
     now_utc,
     safe_float,
     safe_region_from_client,
     utc,
-    normalize_tags,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import RDS_SNAPSHOTS_GB_MONTH_PRICE_USD, RDS_SNAPSHOTS_STALE_DAYS
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("rds_snapshots_cleanup")
 
 
 SUPPRESS_TAG_KEYS = {"retain", "legal-hold", "backup-policy"}
 
 
- 
+
 
 
 def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
@@ -88,22 +95,10 @@ def _resolve_rds_snapshot_storage_price_usd_per_gb_month(
     """
     Returns: (usd_per_gb_month, notes, confidence)
     """
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
-    if pricing is None:
-        return (default_price, "PricingService unavailable; using default price.", 30)
-
-    try:
-        quote = pricing.rds_backup_storage_gb_month(region=region)
-    except Exception:
-        quote = None
-
-    if quote is None:
-        return (default_price, "Pricing lookup failed/unknown; using default price.", 30)
-
-    return (
-        float(quote.unit_price_usd),
-        f"PricingService {quote.source} as_of={quote.as_of.isoformat()} unit={quote.unit}",
-        60 if quote.source == "cache" else 70,
+    return PricingResolver(ctx).resolve_rds_snapshot_storage_price(
+        region=region,
+        default_price=default_price,
+        call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
     )
 
 
@@ -122,19 +117,21 @@ class RDSSnapshotsCleanupChecker:
         self,
         *,
         account: AwsAccountContext,
-        stale_days: int = 30,
-        snapshot_gb_month_price_usd: float = 0.095,
+        stale_days: int = RDS_SNAPSHOTS_STALE_DAYS,
+        snapshot_gb_month_price_usd: float = RDS_SNAPSHOTS_GB_MONTH_PRICE_USD,
     ) -> None:
         self._account = account
         self._stale_days = stale_days
         self._snapshot_gb_month_price_usd = snapshot_gb_month_price_usd
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting RDS snapshots cleanup check")
         if not getattr(ctx, "services", None) or not getattr(ctx.services, "rds", None):
             raise RuntimeError("RDSSnapshotsCleanupChecker requires ctx.services.rds")
 
         rds = ctx.services.rds
         region = safe_region_from_client(rds)
+        _LOGGER.debug("RDS snapshots check running", extra={"region": region})
         cutoff = now_utc() - timedelta(days=self._stale_days)
 
         # Resolve pricing once per run/region (fast + cached).
@@ -192,7 +189,7 @@ class RDSSnapshotsCleanupChecker:
         self,
         ctx,
         snap: dict,
-        instances: Set[str],
+        instances: set[str],
         cutoff: datetime,
         region: str,
         usd_per_gb_month: float,
@@ -245,7 +242,7 @@ class RDSSnapshotsCleanupChecker:
         self,
         ctx,
         snap: dict,
-        clusters: Set[str],
+        clusters: set[str],
         cutoff: datetime,
         region: str,
         usd_per_gb_month: float,
@@ -304,7 +301,7 @@ class RDSSnapshotsCleanupChecker:
         usd_per_gb_month: float,
         pricing_notes: str,
         pricing_conf: int,
-    ) -> Tuple[Optional[float], Optional[float], Optional[int], str]:
+    ) -> tuple[float | None, float | None, int | None, str]:
         """Return (estimated_monthly_cost, estimated_monthly_savings, confidence, notes).
 
         We estimate storage cost for snapshots as:
@@ -336,7 +333,7 @@ class RDSSnapshotsCleanupChecker:
     def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
         code = exc.response.get("Error", {}).get("Code", "ClientError")
         return FindingDraft(
-            check_id="aws.rds.snapshots.access_error",
+            check_id="aws.rds.snapshots.access.error",
             check_name="RDS snapshots access error",
             category="inventory",
             status="info",
@@ -356,11 +353,11 @@ class RDSSnapshotsCleanupChecker:
         self,
         ctx,
         snapshot_id: str,
-        created: Optional[datetime],
+        created: datetime | None,
         region: str,
         resource_type: str,
         resource_arn: str,
-        est: Tuple[Optional[float], Optional[float], Optional[int], str],
+        est: tuple[float | None, float | None, int | None, str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
@@ -391,12 +388,12 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
-        est: Tuple[Optional[float], Optional[float], Optional[int], str],
+        est: tuple[float | None, float | None, int | None, str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         return FindingDraft(
-            check_id="aws.rds.snapshots.manual_old",
+            check_id="aws.rds.snapshots.manual.old",
             check_name="Old manual RDS snapshot",
             category="waste",
             status="fail",
@@ -447,8 +444,8 @@ class RDSSnapshotsCleanupChecker:
 
     # ---------- AWS listing helpers ----------
 
-    def _list_db_instances(self, rds) -> Set[str]:
-        ids: Set[str] = set()
+    def _list_db_instances(self, rds) -> set[str]:
+        ids: set[str] = set()
         paginator = rds.get_paginator("describe_db_instances")
         for page in paginator.paginate():
             for db in page.get("DBInstances", []):
@@ -457,8 +454,8 @@ class RDSSnapshotsCleanupChecker:
                     ids.add(str(ident))
         return ids
 
-    def _list_db_clusters(self, rds) -> Set[str]:
-        ids: Set[str] = set()
+    def _list_db_clusters(self, rds) -> set[str]:
+        ids: set[str] = set()
         paginator = rds.get_paginator("describe_db_clusters")
         for page in paginator.paginate():
             for c in page.get("DBClusters", []):
@@ -470,25 +467,26 @@ class RDSSnapshotsCleanupChecker:
     def _list_db_snapshots(self, rds):
         paginator = rds.get_paginator("describe_db_snapshots")
         for page in paginator.paginate():
-            for snap in page.get("DBSnapshots", []):
-                yield snap
+            yield from page.get("DBSnapshots", [])
 
     def _list_cluster_snapshots(self, rds):
         paginator = rds.get_paginator("describe_db_cluster_snapshots")
         for page in paginator.paginate():
-            for snap in page.get("DBClusterSnapshots", []):
-                yield snap
+            yield from page.get("DBClusterSnapshots", [])
 
 
 @register_checker("checks.aws.rds_snapshots_cleanup:RDSSnapshotsCleanupChecker")
-def _factory(ctx, bootstrap):
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> Checker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:
         raise RuntimeError("aws_account_id missing from bootstrap (required for RDSSnapshotsCleanupChecker)")
 
     billing_account_id = str(bootstrap.get("aws_billing_account_id") or account_id)
-    stale_days = int(bootstrap.get("rds_snapshot_stale_days", 30))
-    price = safe_float(bootstrap.get("rds_snapshot_gb_month_price_usd", 0.095), default=0.095)
+    stale_days = int(bootstrap.get("rds_snapshot_stale_days", RDS_SNAPSHOTS_STALE_DAYS))
+    price = safe_float(
+        bootstrap.get("rds_snapshot_gb_month_price_usd", RDS_SNAPSHOTS_GB_MONTH_PRICE_USD),
+        default=RDS_SNAPSHOTS_GB_MONTH_PRICE_USD,
+    )
     partition = str(bootstrap.get("aws_partition") or "aws")
 
     account = AwsAccountContext(account_id=account_id, billing_account_id=billing_account_id, partition=partition)

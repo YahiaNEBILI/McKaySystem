@@ -16,6 +16,6 @@ This engine is designed to run with **read-only** permissions for AWS resources.
 
 - Create a dedicated IAM role for scanning.
 - Allow `sts:AssumeRole` from your runner environment.
-- Grant permissions per service (EC2, RDS, S3, Backup, FSx, CloudWatch, Pricing).
+- Grant permissions per service (EC2, ECS, EKS, RDS, S3, Backup, FSx, EFS, ELBv2, Lambda, CloudWatch, Pricing).
 
 Service-specific details should live in `03_checkers/aws/*.md`.

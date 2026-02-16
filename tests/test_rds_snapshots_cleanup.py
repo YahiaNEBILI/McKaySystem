@@ -3,83 +3,23 @@
 # tests/test_rds_snapshots_cleanup.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
-import pytest
-from botocore.exceptions import ClientError
-
-from checks.aws.rds_snapshots_cleanup import AwsAccountContext, RDSSnapshotsCleanupChecker
-
-
-# -------------------------
-# Minimal fakes (no boto3)
-# -------------------------
-
-class _FakePaginator:
-    def __init__(self, pages: List[Dict[str, Any]]):
-        self._pages = pages
-
-    def paginate(self) -> Iterable[Dict[str, Any]]:
-        yield from self._pages
-
-
-class _FakeRdsClient:
-    def __init__(
-        self,
-        *,
-        region: str,
-        instances: Optional[List[Dict[str, Any]]] = None,
-        clusters: Optional[List[Dict[str, Any]]] = None,
-        db_snapshots: Optional[List[Dict[str, Any]]] = None,
-        cluster_snapshots: Optional[List[Dict[str, Any]]] = None,
-        raise_on: Optional[str] = None,
-        raise_code: str = "AccessDeniedException",
-    ):
-        self.meta = type("Meta", (), {"region_name": region})()
-        self._instances = instances or []
-        self._clusters = clusters or []
-        self._db_snaps = db_snapshots or []
-        self._cluster_snaps = cluster_snapshots or []
-        self._raise_on = raise_on
-        self._raise_code = raise_code
-
-    def get_paginator(self, op: str) -> _FakePaginator:
-        if self._raise_on == op:
-            raise ClientError(
-                {"Error": {"Code": self._raise_code, "Message": "Denied"}}, op
-            )
-
-        if op == "describe_db_instances":
-            return _FakePaginator([{"DBInstances": self._instances}])
-        if op == "describe_db_clusters":
-            return _FakePaginator([{"DBClusters": self._clusters}])
-        if op == "describe_db_snapshots":
-            return _FakePaginator([{"DBSnapshots": self._db_snaps}])
-        if op == "describe_db_cluster_snapshots":
-            return _FakePaginator([{"DBClusterSnapshots": self._cluster_snaps}])
-
-        raise AssertionError(f"Unexpected paginator op: {op}")
-
-
-@dataclass
-class _FakeServices:
-    rds: Any
-
-
-@dataclass
-class _FakeCtx:
-    cloud: str = "aws"
-    services: Any = None
-
+from checks.aws.rds_snapshots_cleanup import (
+    AwsAccountContext,
+    RDSSnapshotsCleanupChecker,
+    _resolve_rds_snapshot_storage_price_usd_per_gb_month,
+)
+from tests.aws_mocks import FakeRdsClient, make_run_ctx
 
 # -------------------------
 # Helpers
 # -------------------------
 
 def _utc(days_ago: int) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return datetime.now(UTC) - timedelta(days=days_ago)
 
 
 def _mk_checker(stale_days: int = 30) -> RDSSnapshotsCleanupChecker:
@@ -107,8 +47,8 @@ def test_suppressed_snapshot_emits_no_finding():
         "TagList": [{"Key": "retain", "Value": "true"}],
     }
 
-    rds = _FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-1"}], db_snapshots=[snap])
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    rds = FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-1"}], db_snapshots=[snap])
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert findings == []
@@ -127,8 +67,8 @@ def test_orphaned_db_snapshot_emits_orphan_only():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-present"}], db_snapshots=[snap])
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    rds = FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-present"}], db_snapshots=[snap])
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
@@ -152,12 +92,12 @@ def test_old_manual_db_snapshot_emits_manual_old():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-1"}], db_snapshots=[snap])
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    rds = FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-1"}], db_snapshots=[snap])
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.rds.snapshots.manual_old"
+    assert findings[0].check_id == "aws.rds.snapshots.manual.old"
 
 
 def test_automated_snapshot_never_emits_manual_old():
@@ -173,8 +113,8 @@ def test_automated_snapshot_never_emits_manual_old():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-1"}], db_snapshots=[snap])
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    rds = FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-1"}], db_snapshots=[snap])
+    ctx = make_run_ctx(rds=rds)
 
     assert list(checker.run(ctx)) == []
 
@@ -193,8 +133,8 @@ def test_cross_region_guard_prevents_orphan_false_positive():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-present"}], db_snapshots=[snap])
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    rds = FakeRdsClient(region="eu-west-1", instances=[{"DBInstanceIdentifier": "db-present"}], db_snapshots=[snap])
+    ctx = make_run_ctx(rds=rds)
 
     # Not orphaned due to cross-region guard; and it’s not "old" because created 10d ago.
     assert list(checker.run(ctx)) == []
@@ -204,12 +144,12 @@ def test_access_error_emits_single_info_and_stops():
     checker = _mk_checker()
 
     # Raise on describe_db_instances => the checker should emit one access_error finding and stop.
-    rds = _FakeRdsClient(region="eu-west-1", raise_on="describe_db_instances")
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    rds = FakeRdsClient(region="eu-west-1", raise_on="describe_db_instances")
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.rds.snapshots.access_error"
+    assert findings[0].check_id == "aws.rds.snapshots.access.error"
     assert findings[0].status == "info"
 
 
@@ -226,17 +166,17 @@ def test_cluster_snapshot_cost_unknown_when_no_allocated_storage():
         # no AllocatedStorage
     }
 
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-1",
         clusters=[{"DBClusterIdentifier": "cluster-1"}],
         cluster_snapshots=[snap],
     )
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
     f = findings[0]
-    assert f.check_id == "aws.rds.snapshots.manual_old"
+    assert f.check_id == "aws.rds.snapshots.manual.old"
     assert f.estimated_monthly_cost is None
     assert f.estimate_confidence == 10
 
@@ -254,12 +194,12 @@ def test_orphaned_cluster_snapshot():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-1",
         clusters=[{"DBClusterIdentifier": "cluster-present"}],
         cluster_snapshots=[snap],
     )
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
@@ -279,12 +219,12 @@ def test_old_manual_cluster_snapshot_suppressed():
         "TagList": [{"Key": "purpose", "Value": "retain"}],
     }
 
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-1",
         clusters=[{"DBClusterIdentifier": "cluster-1"}],
         cluster_snapshots=[snap],
     )
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    ctx = make_run_ctx(rds=rds)
 
     assert list(checker.run(ctx)) == []
 
@@ -303,16 +243,16 @@ def test_manual_old_but_cross_region():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-1",
         instances=[{"DBInstanceIdentifier": "db-present"}],
         db_snapshots=[snap],
     )
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    ctx = make_run_ctx(rds=rds)
 
     findings = list(checker.run(ctx))
     assert len(findings) == 1
-    assert findings[0].check_id == "aws.rds.snapshots.manual_old"
+    assert findings[0].check_id == "aws.rds.snapshots.manual.old"
 
 
 def test_snapshot_missing_create_time():
@@ -328,11 +268,46 @@ def test_snapshot_missing_create_time():
         "TagList": [],
     }
 
-    rds = _FakeRdsClient(
+    rds = FakeRdsClient(
         region="eu-west-1",
         instances=[{"DBInstanceIdentifier": "db-1"}],
         db_snapshots=[snap],
     )
-    ctx = _FakeCtx(services=_FakeServices(rds=rds))
+    ctx = make_run_ctx(rds=rds)
 
     assert list(checker.run(ctx)) == []
+
+
+def test_pricing_helper_falls_back_when_service_raises_type_error() -> None:
+    class _BadPricing:
+        def rds_backup_storage_gb_month(self, *, region: str) -> Any:
+            _ = region
+            raise TypeError("bad pricing payload")
+
+    ctx = make_run_ctx(rds=None, pricing=_BadPricing())
+    price, notes, confidence = _resolve_rds_snapshot_storage_price_usd_per_gb_month(
+        ctx,
+        "eu-west-1",
+        default_price=0.095,
+    )
+    assert price == 0.095
+    assert confidence == 30
+    assert "using default price" in notes
+
+
+def test_pricing_helper_falls_back_when_quote_is_malformed() -> None:
+    class _MalformedPricing:
+        def rds_backup_storage_gb_month(self, *, region: str) -> Any:
+            _ = region
+            return SimpleNamespace(unit_price_usd="not-a-number", source="catalog", as_of=object(), unit="GB-Mo")
+
+    ctx = make_run_ctx(rds=None, pricing=_MalformedPricing())
+    price, notes, confidence = _resolve_rds_snapshot_storage_price_usd_per_gb_month(
+        ctx,
+        "eu-west-1",
+        default_price=0.095,
+    )
+    assert price == 0.095
+    assert confidence == 30
+    assert "using default price" in notes
+

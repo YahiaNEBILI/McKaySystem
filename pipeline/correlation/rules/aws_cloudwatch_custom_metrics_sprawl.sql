@@ -1,12 +1,12 @@
--- rule_id: aws.cloudwatch.correlation.custom_metrics_sprawl
+-- rule_id: aws.cloudwatch.correlation.custom.metrics.sprawl
 -- name: CloudWatch custom metrics sprawl (correlated)
 -- enabled: true
--- required_check_ids: aws.cloudwatch.custom_metrics.from_log_filters
+-- required_check_ids: aws.cloudwatch.custom.metrics.from.log.filters
 
 -- Correlates per-metric "custom metric from log filters" signals into an account/region meta finding.
 --
 -- Source signal:
---   - aws.cloudwatch.custom_metrics.from_log_filters
+--   - aws.cloudwatch.custom.metrics.from.log.filters
 --
 -- Emission model:
 --   - one meta finding per tenant/workspace/run/account/region
@@ -33,7 +33,7 @@ sig AS (
     MAX(COALESCE(severity.score, 0)) AS max_sev_score
   FROM rule_input
   WHERE status = 'info'
-    AND check_id = 'aws.cloudwatch.custom_metrics.from_log_filters'
+    AND check_id = 'aws.cloudwatch.custom.metrics.from.log.filters'
     AND scope.resource_type = 'custom_metric'
   GROUP BY ALL
 )
@@ -59,7 +59,7 @@ SELECT
     resource_arn := ''
   ) AS scope,
 
-  'aws.cloudwatch.correlation.custom_metrics_sprawl' AS check_id,
+  'aws.cloudwatch.correlation.custom.metrics.sprawl' AS check_id,
   'CloudWatch custom metrics sprawl (correlated)' AS check_name,
   'waste' AS category,
   'observability' AS sub_category,

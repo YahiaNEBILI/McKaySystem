@@ -6,16 +6,16 @@ Infra-native FinOps checker for AWS Backup configuration hygiene and retention r
 
 It emits findings for three issue types (distinct check_id values):
 
-1) aws.backup.plans.no_selections
+1) aws.backup.plans.no.selections
    Backup plans that have zero selections (i.e., no resources are included),
    so the plan effectively backs up nothing.
 
-2) aws.backup.rules.no_lifecycle
+2) aws.backup.rules.no.lifecycle
    Backup plan rules with no lifecycle configuration (neither cold-storage
    transition nor delete-after retention). These rules can retain recovery
    points indefinitely by default, often unintentionally.
 
-3) aws.backup.recovery_points.stale
+3) aws.backup.recovery.points.stale
    Recovery points older than a configurable threshold (default: 90 days)
    that are not near an automatic delete date and are likely ready to prune.
 
@@ -39,25 +39,38 @@ Minimum permissions (read-only):
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import timedelta
-from typing import Any, Dict, Iterable, Iterator, Optional
+from typing import Any
 
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
 from checks.aws._common import (
-    build_scope,
     AwsAccountContext,
+    PricingResolver,
+    build_scope,
     gb_from_bytes,
+    get_logger,
     is_suppressed,
     money,
     now_utc,
+    paginate_items,
     safe_float,
     safe_region_from_client,
     utc,
 )
-from checks.registry import register_checker
-from contracts.finops_checker_pattern import FindingDraft, Scope, Severity
+from checks.aws.defaults import (
+    BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD,
+    BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS,
+    BACKUP_PLANS_STALE_DAYS,
+    BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD,
+)
+from checks.registry import Bootstrap, register_checker
+from contracts.finops_checker_pattern import FindingDraft, RunContext, Scope, Severity
+
+# Logger for this module
+_LOGGER = get_logger("backup_plans_audit")
 
 # Best-effort suppression keys/values (recovery point list responses may not always include tags).
 _SUPPRESS_KEYS = {
@@ -87,87 +100,28 @@ def _pricing_backup_gb_month_price(
 
     Returns: (unit_price_usd_per_gb_month, notes, confidence)
     """
-    pricing = getattr(getattr(ctx, "services", None), "pricing", None)
-    if pricing is None:
-        return float(fallback_usd), "PricingService unavailable; using configured fallback $/GB-month.", 10
-
-    # Normalize storage class signals from AWS Backup list responses
-    normalized = str(storage_class or "").strip().lower()
-    if normalized in {"cold", "cold_storage", "coldstorage"}:
-        tier = "cold"
-    else:
-        tier = "warm"
-
-    candidates = (
-        "backup_storage_gb_month_price",
-        "backup_gb_month_price",
-        "aws_backup_storage_gb_month_price",
-        "aws_backup_gb_month_price",
+    return PricingResolver(ctx).resolve_backup_storage_price(
+        region=region,
+        storage_class=storage_class,
+        fallback_usd=fallback_usd,
+        method_names=(
+            "backup_storage_gb_month_price",
+            "backup_gb_month_price",
+            "aws_backup_storage_gb_month_price",
+            "aws_backup_gb_month_price",
+        ),
+        kwargs_variants=(
+            {"region": "{region}", "tier": "{tier}"},
+            {"region": "{region}", "storage_class": "{tier}"},
+        ),
+        args_variants=(("{region}", "{tier}"),),
+        resolved_confidence=60,
+        fallback_confidence_when_no_service=10,
+        fallback_confidence_when_lookup_fails=15,
+        no_service_note="PricingService unavailable; using configured fallback $/GB-month.",
+        lookup_failed_note="PricingService did not provide a unit price; using configured fallback $/GB-month.",
+        resolved_note_template="Unit price from PricingService ({method_name}, tier={tier}).",
     )
-
-    for method_name in candidates:
-        fn = getattr(pricing, method_name, None)
-        if fn is None:
-            continue
-        try:
-            # Try a couple call signatures (keyword-only preferred)
-            try:
-                price = fn(region=region, tier=tier)
-            except TypeError:
-                try:
-                    price = fn(region=region, storage_class=tier)
-                except TypeError:
-                    price = fn(region, tier)
-            price_f = float(price)
-            if price_f > 0.0:
-                return price_f, f"Unit price from PricingService ({method_name}, tier={tier}).", 60
-        except Exception:
-            # Best-effort only, fall through to fallback
-            continue
-
-    return float(fallback_usd), "PricingService did not provide a unit price; using configured fallback $/GB-month.", 15
-
-
-def _paginate_items(
-    client: BaseClient,
-    operation: str,
-    result_key: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-) -> Iterator[Dict[str, Any]]:
-    """
-    Yield dict items from either a paginator (preferred) or a NextToken loop fallback.
-
-    This keeps the checker robust against local stubs/mocks that may not implement paginator behavior.
-    """
-    params = dict(params or {})
-
-    # Prefer paginator if present and works
-    if hasattr(client, "get_paginator"):
-        try:
-            paginator = client.get_paginator(operation)
-            for page in paginator.paginate(**params):
-                for item in page.get(result_key, []) or []:
-                    if isinstance(item, dict):
-                        yield item
-            return
-        except Exception:
-            # Fall back to token loop below
-            pass
-
-    next_token: Optional[str] = None
-    while True:
-        call = getattr(client, operation)
-        req = dict(params)
-        if next_token:
-            req["NextToken"] = next_token
-        resp = call(**req) if req else call()
-        for item in resp.get(result_key, []) or []:
-            if isinstance(item, dict):
-                yield item
-        next_token = resp.get("NextToken")
-        if not next_token:
-            break
 
 
 class AwsBackupPlansAuditChecker:
@@ -175,16 +129,16 @@ class AwsBackupPlansAuditChecker:
     One checker, three issue types (distinct check_id values).
     """
 
-    checker_id = "aws.backup.governance.plans_audit"
+    checker_id = "aws.backup.governance.plans.audit"
 
     def __init__(
         self,
         *,
         account: AwsAccountContext,
-        stale_days: int = 90,
-        warm_gb_month_price_usd: float = 0.05,
-        cold_gb_month_price_usd: float = 0.01,
-        skip_if_deleting_within_days: int = 14,
+        stale_days: int = BACKUP_PLANS_STALE_DAYS,
+        warm_gb_month_price_usd: float = BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD,
+        cold_gb_month_price_usd: float = BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD,
+        skip_if_deleting_within_days: int = BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS,
     ) -> None:
         self._account = account
         self._stale_days = int(stale_days)
@@ -192,12 +146,14 @@ class AwsBackupPlansAuditChecker:
         self._cold_price = float(cold_gb_month_price_usd)
         self._skip_if_deleting_within_days = int(skip_if_deleting_within_days)
 
-    def run(self, ctx) -> Iterable[FindingDraft]:
+    def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        _LOGGER.info("Starting AWS Backup plans audit check")
         if ctx.services is None or not getattr(ctx.services, "backup", None):
             raise RuntimeError("AwsBackupPlansAuditChecker requires ctx.services.backup")
 
         backup: BaseClient = ctx.services.backup
         region = safe_region_from_client(backup)
+        _LOGGER.debug("Backup plans check running", extra={"region": region})
 
         # Run sections independently so we can produce a single clear access error per missing permission set.
         try:
@@ -221,7 +177,7 @@ class AwsBackupPlansAuditChecker:
     # ------------------------- 1) plans without selections ------------------------- #
 
     def _plans_without_selections(self, ctx, backup: BaseClient, region: str) -> Iterable[FindingDraft]:
-        for plan in _paginate_items(backup, "list_backup_plans", "BackupPlansList"):
+        for plan in paginate_items(backup, "list_backup_plans", "BackupPlansList"):
             plan_id = str(plan.get("BackupPlanId") or "")
             plan_name = str(plan.get("BackupPlanName") or plan_id or "")
             if not plan_id:
@@ -229,7 +185,7 @@ class AwsBackupPlansAuditChecker:
 
             # List selections (can be paginated)
             has_any_selection = False
-            for _sel in _paginate_items(
+            for _sel in paginate_items(
                 backup,
                 "list_backup_selections",
                 "BackupSelectionsList",
@@ -241,7 +197,7 @@ class AwsBackupPlansAuditChecker:
                 continue
 
             yield FindingDraft(
-                check_id="aws.backup.plans.no_selections",
+                check_id="aws.backup.plans.no.selections",
                 check_name="Backup plans without selections",
                 category="governance",
                 status="fail",
@@ -263,7 +219,7 @@ class AwsBackupPlansAuditChecker:
     # ------------------------- 2) rules missing lifecycle -------------------------- #
 
     def _rules_no_lifecycle(self, ctx, backup: BaseClient, region: str) -> Iterable[FindingDraft]:
-        for plan in _paginate_items(backup, "list_backup_plans", "BackupPlansList"):
+        for plan in paginate_items(backup, "list_backup_plans", "BackupPlansList"):
             plan_id = str(plan.get("BackupPlanId") or "")
             plan_name = str(plan.get("BackupPlanName") or plan_id or "")
             if not plan_id:
@@ -283,7 +239,7 @@ class AwsBackupPlansAuditChecker:
                 # Treat None/0 as "not set"
                 if (move_days in (None, 0)) and (delete_days in (None, 0)):
                     yield FindingDraft(
-                        check_id="aws.backup.rules.no_lifecycle",
+                        check_id="aws.backup.rules.no.lifecycle",
                         check_name="Backup rules missing lifecycle",
                         category="governance",
                         status="fail",
@@ -320,12 +276,12 @@ class AwsBackupPlansAuditChecker:
         cutoff = (now - timedelta(days=self._stale_days)).replace(microsecond=0)
         skip_cutoff = now + timedelta(days=self._skip_if_deleting_within_days)
 
-        for vault in _paginate_items(backup, "list_backup_vaults", "BackupVaultList"):
+        for vault in paginate_items(backup, "list_backup_vaults", "BackupVaultList"):
             vault_name = str(vault.get("BackupVaultName") or "")
             if not vault_name:
                 continue
 
-            for rp in _paginate_items(
+            for rp in paginate_items(
                 backup,
                 "list_recovery_points_by_backup_vault",
                 "RecoveryPoints",
@@ -371,7 +327,7 @@ class AwsBackupPlansAuditChecker:
                 resource_arn = str(rp.get("ResourceArn") or "")
 
                 yield FindingDraft(
-                    check_id="aws.backup.recovery_points.stale",
+                    check_id="aws.backup.recovery.points.stale",
                     check_name="Stale AWS Backup recovery points",
                     category="waste",
                     status="fail",
@@ -413,7 +369,7 @@ class AwsBackupPlansAuditChecker:
     def _access_error_finding(self, ctx, region: str, operation: str, exc: ClientError) -> FindingDraft:
         code = exc.response.get("Error", {}).get("Code", "ClientError")
         return FindingDraft(
-            check_id="aws.backup.access_error",
+            check_id="aws.backup.access.error",
             check_name="AWS Backup access error",
             category="inventory",
             status="info",
@@ -459,7 +415,7 @@ class AwsBackupPlansAuditChecker:
 
 
 @register_checker("checks.aws.backup_plans_audit:AwsBackupPlansAuditChecker")
-def _factory(ctx, bootstrap):
+def _factory(ctx: RunContext, bootstrap: Bootstrap) -> AwsBackupPlansAuditChecker:
     account_id = str(bootstrap.get("aws_account_id") or "")
     if not account_id:
         raise RuntimeError("aws_account_id missing from bootstrap (required for AwsBackupPlansAuditChecker)")
@@ -467,13 +423,21 @@ def _factory(ctx, bootstrap):
     billing_account_id = str(bootstrap.get("aws_billing_account_id") or account_id)
     partition = str(bootstrap.get("aws_partition") or "aws")
 
-    stale_days = int(bootstrap.get("backup_stale_recovery_point_days", 90))
+    stale_days = int(bootstrap.get("backup_stale_recovery_point_days", BACKUP_PLANS_STALE_DAYS))
 
     # Cost estimation knobs (approximate defaults)
-    warm_price = safe_float(bootstrap.get("backup_warm_gb_month_price_usd", 0.05), default=0.05)
-    cold_price = safe_float(bootstrap.get("backup_cold_gb_month_price_usd", 0.01), default=0.01)
+    warm_price = safe_float(
+        bootstrap.get("backup_warm_gb_month_price_usd", BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD),
+        default=BACKUP_PLANS_WARM_GB_MONTH_PRICE_USD,
+    )
+    cold_price = safe_float(
+        bootstrap.get("backup_cold_gb_month_price_usd", BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD),
+        default=BACKUP_PLANS_COLD_GB_MONTH_PRICE_USD,
+    )
 
-    skip_if_deleting_within_days = int(bootstrap.get("backup_skip_if_deleting_within_days", 14))
+    skip_if_deleting_within_days = int(
+        bootstrap.get("backup_skip_if_deleting_within_days", BACKUP_PLANS_SKIP_IF_DELETING_WITHIN_DAYS)
+    )
 
     account = AwsAccountContext(
         account_id=account_id,

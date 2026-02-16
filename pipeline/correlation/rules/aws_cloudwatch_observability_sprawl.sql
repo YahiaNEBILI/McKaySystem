@@ -1,13 +1,13 @@
--- rule_id: aws.cloudwatch.correlation.observability_sprawl
+-- rule_id: aws.cloudwatch.correlation.observability.sprawl
 -- name: CloudWatch observability sprawl (correlated)
 -- enabled: true
--- required_check_ids: aws.cloudwatch.alarms.high_count, aws.cloudwatch.custom_metrics.from_log_filters
+-- required_check_ids: aws.cloudwatch.alarms.high.count, aws.cloudwatch.custom.metrics.from.log.filters
 
 -- Combines "high alarm count" with "custom metrics from log filters" to surface observability sprawl.
 --
 -- Signals:
---   - aws.cloudwatch.alarms.high_count (already thresholded by checker)
---   - aws.cloudwatch.custom_metrics.from_log_filters (per custom metric)
+--   - aws.cloudwatch.alarms.high.count (already thresholded by checker)
+--   - aws.cloudwatch.custom.metrics.from.log.filters (per custom metric)
 --
 -- Emits a single meta finding per tenant/workspace/run/account/region when BOTH signals are present.
 
@@ -23,7 +23,7 @@ alarms AS (
     LIST(DISTINCT fingerprint) AS alarm_source_fps
   FROM rule_input
   WHERE status = 'info'
-    AND check_id = 'aws.cloudwatch.alarms.high_count'
+    AND check_id = 'aws.cloudwatch.alarms.high.count'
     AND scope.resource_type = 'account'
   GROUP BY ALL
 ),
@@ -41,7 +41,7 @@ metrics AS (
     LIST(DISTINCT fingerprint) AS metric_source_fps
   FROM rule_input
   WHERE status = 'info'
-    AND check_id = 'aws.cloudwatch.custom_metrics.from_log_filters'
+    AND check_id = 'aws.cloudwatch.custom.metrics.from.log.filters'
     AND scope.resource_type = 'custom_metric'
   GROUP BY ALL
 ),
@@ -88,7 +88,7 @@ SELECT
     resource_arn := ''
   ) AS scope,
 
-  'aws.cloudwatch.correlation.observability_sprawl' AS check_id,
+  'aws.cloudwatch.correlation.observability.sprawl' AS check_id,
   'CloudWatch observability sprawl (correlated)' AS check_name,
   'waste' AS category,
   'observability' AS sub_category,
