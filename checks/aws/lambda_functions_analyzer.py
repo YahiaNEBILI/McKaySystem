@@ -334,13 +334,16 @@ class LambdaFunctionsAnalyzerChecker(Checker):
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         """Run the checker and emit findings."""
 
+        _LOGGER.info("Starting Lambda functions analyzer check")
         services = getattr(ctx, "services", None)
         if services is None:
+            _LOGGER.warning("Lambda analyzer skipped: services are missing in context")
             return []
 
         lambda_client = getattr(services, "lambda_client", None)
         cloudwatch = getattr(services, "cloudwatch", None)
         if lambda_client is None:
+            _LOGGER.warning("Lambda analyzer skipped: lambda_client is unavailable")
             return []
 
         region = str(
@@ -367,11 +370,14 @@ class LambdaFunctionsAnalyzerChecker(Checker):
             )
         except ClientError as exc:
             if _is_access_denied(exc):
+                _LOGGER.warning("Access denied while listing Lambda functions", extra={"region": region})
                 return [self._access_error(ctx, region=region, operation="lambda:ListFunctions", exc=exc)]
             raise
 
+        _LOGGER.info("Listed Lambda functions", extra={"count": len(raw_functions), "region": region})
         functions = self._normalize_functions(raw_functions)
         if not functions:
+            _LOGGER.info("No Lambda functions eligible for analysis", extra={"region": region})
             return []
 
         findings: list[FindingDraft] = []
@@ -391,6 +397,10 @@ class LambdaFunctionsAnalyzerChecker(Checker):
                 )
             except ClientError as exc:
                 if _is_access_denied(exc):
+                    _LOGGER.warning(
+                        "Access denied while fetching Lambda CloudWatch metrics",
+                        extra={"region": region},
+                    )
                     findings.append(
                         self._missing_permission(
                             ctx,
@@ -403,8 +413,16 @@ class LambdaFunctionsAnalyzerChecker(Checker):
                         )
                     )
                 else:
+                    _LOGGER.warning(
+                        "CloudWatch ClientError while fetching Lambda metrics",
+                        extra={"region": region},
+                    )
                     findings.append(self._cloudwatch_error(ctx, region=region, operation="get_metric_data", exc=exc))
             except BotoCoreError as exc:
+                _LOGGER.warning(
+                    "CloudWatch BotoCoreError while fetching Lambda metrics",
+                    extra={"region": region},
+                )
                 findings.append(self._cloudwatch_error(ctx, region=region, operation="get_metric_data", exc=exc))
 
         usd_per_gb_second, price_notes, price_conf = _resolve_lambda_gb_second_price(ctx, region=region)
@@ -467,6 +485,16 @@ class LambdaFunctionsAnalyzerChecker(Checker):
                 )
             )
 
+        _LOGGER.info(
+            "Lambda analyzer completed",
+            extra={
+                "region": region,
+                "functions": len(functions),
+                "findings": len(findings),
+                "idle_findings": emitted["idle"],
+                "memory_overprovisioned_findings": emitted["memory_overprovisioned"],
+            },
+        )
         return findings
 
     def _normalize_functions(self, functions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

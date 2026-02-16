@@ -10,6 +10,7 @@ dependencies = [
   "duckdb>=0.9",
   "pyarrow>=14",
   "Flask>=3.0",
+  "pydantic>=2.7,<3",
 
   # DB ingestion
   "psycopg2-binary>=2.9",
