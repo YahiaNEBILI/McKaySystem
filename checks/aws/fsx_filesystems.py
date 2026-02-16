@@ -1,4 +1,4 @@
-"""
+﻿"""
 checks/aws/fsx_filesystems.py
 
 FSx optimization + governance checker.
@@ -870,7 +870,7 @@ class FSxFileSystemsChecker(Checker):
         # Windows SSD vs HDD mismatch (patched: ctx-aware metrics)
         # Heuristic: if SSD and observed activity is low, suggest HDD
         if storage_type == "SSD":
-            active, evidence = _activity_signal(ctx, fs_id=fs_id, days=cfg.unused_lookback_days)
+            active, _ = _activity_signal(ctx, fs_id=fs_id, days=cfg.unused_lookback_days)
             p95_util, _util_dbg = _p95_utilization_pct(ctx, fs_id=fs_id, days=cfg.throughput_lookback_days)
             p95_rw_mib_s, _rw_dbg = _p95_rw_mib_per_s(ctx, fs_id=fs_id, days=cfg.throughput_lookback_days)
 
@@ -880,7 +880,7 @@ class FSxFileSystemsChecker(Checker):
             if (not active) or low_util or low_rw:
                 # storage_gib is Optional[int]; we must guard it for type-checkers and runtime safety.
                 if storage_gib is None or storage_gib <= 0:
-                    # Cannot compute a meaningful SSD→HDD delta without storage capacity
+                    # Cannot compute a meaningful SSDâ†’HDD delta without storage capacity
                     check_id = "aws.fsx.windows.storage.type.mismatch"
                     if emitted.get(check_id, 0) < cfg.max_findings_per_type:
                         emitted[check_id] = emitted.get(check_id, 0) + 1
@@ -897,7 +897,7 @@ class FSxFileSystemsChecker(Checker):
                             tags=tags,
                             issue_key={"fs_id": fs_id, "signal": "ssd_low_activity"},
                             estimate_confidence=min(pricing_conf, 40),
-                            estimate_notes=f"{pricing_notes} | StorageCapacity missing; cannot compute SSD→HDD savings.",
+                            estimate_notes=f"{pricing_notes} | StorageCapacity missing; cannot compute SSDâ†’HDD savings.",
                             labels={"service": "fsx"},
                             dimensions={"fs_type": "WINDOWS"},
                         ).with_issue(
@@ -945,7 +945,7 @@ class FSxFileSystemsChecker(Checker):
                         estimated_monthly_cost=money(ssd_cost),
                         estimated_monthly_savings=money(savings) if savings > 0 else None,
                         estimate_confidence=min(pricing_conf, hdd_conf, ssd_conf),
-                        estimate_notes=f"{pricing_notes}; {ssd_notes}; {hdd_notes} | Validate IO before SSD→HDD switch.",
+                        estimate_notes=f"{pricing_notes}; {ssd_notes}; {hdd_notes} | Validate IO before SSDâ†’HDD switch.",
                         labels={"service": "fsx"},
                         dimensions={"fs_type": "WINDOWS"},
                         links=[],
