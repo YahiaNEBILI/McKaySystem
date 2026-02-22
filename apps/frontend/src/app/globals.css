@@ -31,6 +31,21 @@ body {
   font-family: var(--font-geist-sans), "Segoe UI", sans-serif;
 }
 
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+input[type="button"]:not(:disabled),
+input[type="submit"]:not(:disabled),
+input[type="reset"]:not(:disabled) {
+  cursor: pointer;
+}
+
+button:disabled,
+input[type="button"]:disabled,
+input[type="submit"]:disabled,
+input[type="reset"]:disabled {
+  cursor: not-allowed;
+}
+
 .login-shell {
   background:
     radial-gradient(1200px 420px at 20% -10%, rgba(45, 212, 191, 0.26), transparent 60%),

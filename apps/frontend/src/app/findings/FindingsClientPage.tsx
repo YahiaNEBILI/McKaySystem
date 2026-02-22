@@ -143,6 +143,7 @@ export function FindingsClientPage() {
     findings.data?.items.find((item) => item.fingerprint === selectedFingerprint) ?? null;
   const permissions = new Set(auth.user?.permissions ?? []);
   const canTriage = permissions.has("admin:full") || permissions.has("findings:update");
+  const canReadUsers = permissions.has("admin:full") || permissions.has("users:read");
   const total = findings.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / limitFilter));
   const canPrev = page > 1;
@@ -213,16 +214,29 @@ export function FindingsClientPage() {
             <span className="font-medium">{activeScope.workspace}</span>
           </p>
         </div>
-        <button
-          type="button"
-          className="rounded border border-zinc-300 px-3 py-2 text-sm"
-          onClick={async () => {
-            await auth.logout();
-            router.push("/login");
-          }}
-        >
-          Logout
-        </button>
+        <div className="flex items-center gap-2">
+          {canReadUsers ? (
+            <button
+              type="button"
+              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              onClick={() => {
+                router.push("/users");
+              }}
+            >
+              Users
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="rounded border border-zinc-300 px-3 py-2 text-sm"
+            onClick={async () => {
+              await auth.logout();
+              router.push("/login");
+            }}
+          >
+            Logout
+          </button>
+        </div>
       </header>
 
       <section className="mb-4 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm">

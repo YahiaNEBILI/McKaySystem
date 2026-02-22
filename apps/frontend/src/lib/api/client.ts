@@ -120,4 +120,19 @@ export const apiClient = {
       body,
     });
   },
+
+  put<T>(path: string, body?: unknown, options: Omit<RequestOptions, "method" | "body"> = {}) {
+    return this.request<T>(path, {
+      ...options,
+      method: "PUT",
+      body,
+    });
+  },
+
+  del<T>(path: string, options: Omit<RequestOptions, "method"> = {}) {
+    return this.request<T>(path, {
+      ...options,
+      method: "DELETE",
+    });
+  },
 };
