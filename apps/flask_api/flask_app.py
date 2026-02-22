@@ -46,6 +46,7 @@ from apps.backend.db import (
     fetch_all_dict_conn,
     fetch_one_dict_conn,
 )
+from apps.flask_api.blueprints import api_keys as api_keys_module
 from apps.flask_api.blueprints import auth as auth_module
 from apps.flask_api.blueprints import facets as facets_module
 from apps.flask_api.blueprints import findings as findings_module
@@ -57,6 +58,7 @@ from apps.flask_api.blueprints import remediations as remediations_module
 from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
 from apps.flask_api.blueprints import teams as teams_module
+from apps.flask_api.blueprints import users as users_module
 from infra.config import get_settings
 
 app = Flask(__name__)
@@ -410,15 +412,20 @@ def _enforce_api_auth() -> None:
 
     - /health remains public.
     - /api/health/db remains public (useful for platform health checks).
-    - /api/auth/login remains public (session bootstrap).
-    - /api/auth/logout and /api/auth/me enforce RBAC via auth middleware.
+    - /api/auth/*, /api/users/*, /api/api-keys/* enforce RBAC via auth middleware.
     - All other /api/* routes require Authorization: Bearer ... when
       API_BEARER_TOKEN is set.
     """
     path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
         return
-    if path in {"/api/health/db", "/api/auth/login", "/api/auth/logout", "/api/auth/me"}:
+    if path in {"/api/health/db", "/api/auth/login"}:
+        return
+    if path == "/api/users" or path.startswith("/api/users/"):
+        return
+    if path == "/api/api-keys" or path.startswith("/api/api-keys/"):
+        return
+    if path.startswith("/api/auth/"):
         return
     _check_bearer_token()
 
@@ -742,6 +749,9 @@ def _install_blueprint_backcompat_shims() -> None:
 
     for module in (
         health_module,
+        auth_module,
+        users_module,
+        api_keys_module,
         runs_module,
         findings_module,
         recommendations_module,
@@ -804,6 +814,8 @@ _install_blueprint_backcompat_shims()
 # Register blueprints - each handles its own route definitions.
 app.register_blueprint(health_module.health_bp)
 app.register_blueprint(auth_module.auth_bp)
+app.register_blueprint(users_module.users_bp)
+app.register_blueprint(api_keys_module.api_keys_bp)
 app.register_blueprint(runs_module.runs_bp)
 app.register_blueprint(findings_module.findings_bp)
 app.register_blueprint(recommendations_module.recommendations_bp)

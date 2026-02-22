@@ -103,6 +103,46 @@ def test_create_user_is_idempotent_and_scoped() -> None:
     assert "on conflict (tenant_id, workspace, user_id)" in sql
 
 
+def test_list_users_page_applies_scope_and_count(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["items_sql"] = sql
+        captured["items_params"] = params
+        return [{"user_id": "u-1"}]
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any]:
+        captured["count_sql"] = sql
+        captured["count_params"] = params
+        return {"n": 1}
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(db_rbac, "fetch_one_dict_conn", _fake_fetch_one)
+
+    rows, total = db_rbac.list_users_page(
+        object(),
+        query=db_rbac.UserListQuery(
+            tenant_id="acme",
+            workspace="prod",
+            limit=50,
+            offset=10,
+            query="alice",
+            include_inactive=False,
+        ),
+    )
+
+    assert rows == [{"user_id": "u-1"}]
+    assert total == 1
+    assert captured["items_params"] == ("acme", "prod", "%alice%", "%alice%", "%alice%", 50, 10)
+    assert captured["count_params"] == ("acme", "prod", "%alice%", "%alice%", "%alice%")
+    assert "from users" in str(captured["items_sql"]).lower()
+    assert "count(*)::bigint" in str(captured["count_sql"]).lower()
+
+
 def test_list_api_keys_applies_scope_and_active_filter(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
 
@@ -129,6 +169,26 @@ def test_list_api_keys_applies_scope_and_active_filter(monkeypatch: Any) -> None
     assert "tenant_id = %s" in sql
     assert "workspace = %s" in sql
     assert "is_active = true" in sql
+
+
+def test_set_user_active_updates_scoped_user() -> None:
+    cursor = _FakeCursor(rowcount=1)
+    conn = _FakeConn(cursor)
+
+    changed = db_rbac.set_user_active(
+        conn,
+        tenant_id="acme",
+        workspace="prod",
+        user_id="user-1",
+        is_active=False,
+    )
+
+    assert changed is True
+    assert cursor.executed_params == (False, "acme", "prod", "user-1")
+    sql = str(cursor.executed_sql).lower()
+    assert "update users" in sql
+    assert "tenant_id = %s" in sql
+    assert "workspace = %s" in sql
 
 
 def test_revoke_api_key_returns_false_when_no_rows_updated() -> None:

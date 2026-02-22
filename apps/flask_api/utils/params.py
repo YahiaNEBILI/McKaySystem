@@ -128,6 +128,32 @@ def _parse_int(
     return n
 
 
+def _parse_bool(value: Any, *, field_name: str, default: bool) -> bool:
+    """Parse optional boolean-like values from request data.
+
+    Args:
+        value: Source value from query/payload.
+        field_name: Field name for validation messages.
+        default: Value returned when input is missing.
+
+    Returns:
+        Parsed boolean.
+
+    Raises:
+        ValueError: If value cannot be interpreted as a boolean.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{field_name} must be a boolean")
+
+
 def _parse_csv_list(value: str | None) -> list[str] | None:
     """Parse a comma-separated list of values.
 

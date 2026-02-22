@@ -68,6 +68,18 @@ class SessionUpsert:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class UserListQuery:
+    """Input payload for scoped user list queries."""
+
+    tenant_id: str
+    workspace: str
+    limit: int = 100
+    offset: int = 0
+    query: str | None = None
+    include_inactive: bool = False
+
+
 # pylint: enable=too-many-instance-attributes
 
 
@@ -197,6 +209,69 @@ def create_user(conn: Any, *, user: UserUpsert) -> dict[str, Any] | None:
             ),
         )
         return _dict_from_cursor_row(cur, cur.fetchone())
+
+
+def list_users_page(conn: Any, *, query: UserListQuery) -> tuple[list[dict[str, Any]], int]:
+    """List users with deterministic paging and scoped total count."""
+    where = ["tenant_id = %s", "workspace = %s"]
+    params: list[Any] = [query.tenant_id, query.workspace]
+
+    if not query.include_inactive:
+        where.append("is_active = TRUE")
+    if query.query:
+        where.append("(user_id ILIKE %s OR email ILIKE %s OR COALESCE(full_name, '') ILIKE %s)")
+        pattern = f"%{query.query}%"
+        params.extend([pattern, pattern, pattern])
+
+    sql_items = f"""
+        SELECT
+          tenant_id,
+          workspace,
+          user_id,
+          email,
+          full_name,
+          external_id,
+          auth_provider,
+          is_active,
+          is_superadmin,
+          last_login_at,
+          created_at,
+          updated_at
+        FROM users
+        WHERE {" AND ".join(where)}
+        ORDER BY email ASC, user_id ASC
+        LIMIT %s OFFSET %s
+    """
+    sql_count = f"SELECT COUNT(*)::bigint AS n FROM users WHERE {' AND '.join(where)}"
+    rows = fetch_all_dict_conn(conn, sql_items, tuple(params + [query.limit, query.offset]))
+    count_row = fetch_one_dict_conn(conn, sql_count, tuple(params))
+    total = int((count_row or {}).get("n") or 0)
+    return rows, total
+
+
+def set_user_active(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+    is_active: bool,
+) -> bool:
+    """Set user active status and report whether a row was updated."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE users
+            SET
+              is_active = %s,
+              updated_at = now()
+            WHERE tenant_id = %s
+              AND workspace = %s
+              AND user_id = %s
+            """,
+            (is_active, tenant_id, workspace, user_id),
+        )
+        return bool(cur.rowcount)
 
 
 def list_api_keys(
