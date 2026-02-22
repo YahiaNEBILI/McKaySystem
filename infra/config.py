@@ -88,6 +88,8 @@ class APIConfig(BaseModel):
     log_level: str = Field(default="INFO")
     rate_limit_rps: float | None = Field(default=None, gt=0.0)
     rate_limit_burst: float | None = Field(default=None, gt=0.0)
+    login_failure_limit: int = Field(default=5, ge=1, le=100)
+    login_failure_window_seconds: int = Field(default=300, ge=30, le=86_400)
     enforce_schema_gate: bool = Field(default=True)
     bearer_token: str = Field(default="")
 
@@ -282,7 +284,17 @@ def _build_payload(env: Mapping[str, str]) -> dict[str, object]:
         "log_level": _first_non_empty(env, "API__LOG_LEVEL", "API_LOG_LEVEL"),
         "rate_limit_rps": _first_non_empty(env, "API__RATE_LIMIT_RPS", "API_RATE_LIMIT_RPS"),
         "rate_limit_burst": _first_non_empty(env, "API__RATE_LIMIT_BURST", "API_RATE_LIMIT_BURST"),
-        "enforce_schema_gate": _first_non_empty(env, "API__ENFORCE_SCHEMA_GATE", "API_ENFORCE_SCHEMA_GATE"),
+        "login_failure_limit": _first_non_empty(
+            env, "API__LOGIN_FAILURE_LIMIT", "API_LOGIN_FAILURE_LIMIT"
+        ),
+        "login_failure_window_seconds": _first_non_empty(
+            env,
+            "API__LOGIN_FAILURE_WINDOW_SECONDS",
+            "API_LOGIN_FAILURE_WINDOW_SECONDS",
+        ),
+        "enforce_schema_gate": _first_non_empty(
+            env, "API__ENFORCE_SCHEMA_GATE", "API_ENFORCE_SCHEMA_GATE"
+        ),
         "bearer_token": _first_non_empty(env, "API__BEARER_TOKEN", "API_BEARER_TOKEN"),
     }
     logging_settings = {
@@ -312,8 +324,12 @@ def _build_payload(env: Mapping[str, str]) -> dict[str, object]:
         "run_lock_ttl_seconds": _first_non_empty(
             env, "WORKER__RUN_LOCK_TTL_SECONDS", "RUN_LOCK_TTL_SECONDS"
         ),
-        "ingest_batch_size": _first_non_empty(env, "WORKER__INGEST_BATCH_SIZE", "INGEST_BATCH_SIZE"),
-        "parquet_batch_size": _first_non_empty(env, "WORKER__PARQUET_BATCH_SIZE", "PARQUET_BATCH_SIZE"),
+        "ingest_batch_size": _first_non_empty(
+            env, "WORKER__INGEST_BATCH_SIZE", "INGEST_BATCH_SIZE"
+        ),
+        "parquet_batch_size": _first_non_empty(
+            env, "WORKER__PARQUET_BATCH_SIZE", "PARQUET_BATCH_SIZE"
+        ),
         "allow_schema_mismatch": _first_non_empty(
             env, "WORKER__ALLOW_SCHEMA_MISMATCH", "ALLOW_SCHEMA_MISMATCH"
         ),

@@ -266,6 +266,32 @@ def test_get_role_by_id_includes_scope(monkeypatch: Any) -> None:
     assert "workspace = %s" in sql
 
 
+def test_list_tenant_workspaces_uses_anchor_scope(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"workspace": "dev"}, {"workspace": "prod"}]
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+    rows = db_rbac.list_tenant_workspaces(
+        object(),
+        tenant_id="acme",
+        anchor_workspace="prod",
+    )
+
+    assert rows == ["dev", "prod"]
+    assert captured["params"] == ("acme", "prod")
+    sql = str(captured["sql"]).lower()
+    assert "from roles r_anchor" in sql
+    assert "join roles r_all" in sql
+    assert "r_anchor.tenant_id = %s" in sql
+    assert "r_anchor.workspace = %s" in sql
+
+
 def test_upsert_user_workspace_role_is_idempotent_and_scoped() -> None:
     cursor = _FakeCursor(
         row=("acme", "prod", "u-1", "editor"),

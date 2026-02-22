@@ -17,8 +17,6 @@ Role assignment is workspace-scoped:
 - assigning `editor` to `alice` in `acme/prod` does not assign it in `acme/dev`
 - to grant the same role across multiple workspaces, repeat assignment per workspace
 
-There is currently no tenant-wide role assignment endpoint.
-
 ## Default roles
 
 System roles seeded from templates:
@@ -59,6 +57,7 @@ curl -sS -X POST "$BASE_URL/api/auth/login" \
 Notes:
 - Save cookies (`-c`) and reuse them (`-b`) for subsequent calls.
 - Use lowercase email to match login normalization behavior.
+- Repeated failed logins are rate-limited and may return `429` with `Retry-After`.
 
 ## 2) Create a user with password
 
@@ -143,6 +142,63 @@ curl -sS "$BASE_URL/api/auth/me?tenant_id=$TENANT_ID&workspace=$WORKSPACE" \
 
 The `permissions` array reflects the assigned role in that scope.
 
+## 7) Create an API key for a user
+
+Requires permission: `api_keys:create`.
+
+```bash
+curl -sS -X POST "$BASE_URL/api/api-keys" \
+  -H "Content-Type: application/json" \
+  -b /tmp/mck_cookies.txt \
+  -d "{
+    \"tenant_id\": \"$TENANT_ID\",
+    \"workspace\": \"$WORKSPACE\",
+    \"name\": \"ci-bot\",
+    \"user_id\": \"u_alice\"
+  }"
+```
+
+Important:
+- Save `api_key` immediately; plaintext is returned once.
+- For RBAC-authenticated API key usage today, set `user_id` to an existing active user.
+
+## 8) List and revoke API keys
+
+List keys (requires `api_keys:read`):
+
+```bash
+curl -sS "$BASE_URL/api/api-keys?tenant_id=$TENANT_ID&workspace=$WORKSPACE" \
+  -b /tmp/mck_cookies.txt
+```
+
+Revoke one key (requires `api_keys:revoke`):
+
+```bash
+curl -sS -X DELETE \
+  "$BASE_URL/api/api-keys/<key_id>?tenant_id=$TENANT_ID&workspace=$WORKSPACE" \
+  -b /tmp/mck_cookies.txt
+```
+
+## 9) Use API key auth for API calls
+
+API key auth uses bearer header:
+
+```bash
+export API_KEY="<plaintext-api-key>"
+
+curl -sS "$BASE_URL/api/findings?tenant_id=$TENANT_ID&workspace=$WORKSPACE&limit=10" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+You can also pass scope as headers:
+
+```bash
+curl -sS "$BASE_URL/api/findings?limit=10" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "X-Tenant-Id: $TENANT_ID" \
+  -H "X-Workspace: $WORKSPACE"
+```
+
 ## Applying roles across tenant/workspaces
 
 Role assignment is per `(tenant_id, workspace)`.  
@@ -150,6 +206,83 @@ To apply `editor` for the same user to three workspaces, call role assignment th
 - `acme/prod`
 - `acme/dev`
 - `acme/staging`
+
+## Tenant-wide assignment endpoint (existing workspaces)
+
+You can fan-out one role across existing workspaces in one call:
+
+```bash
+curl -sS -X PUT "$BASE_URL/api/users/u_alice/role/tenant" \
+  -H "Content-Type: application/json" \
+  -b /tmp/mck_cookies.txt \
+  -d "{
+    \"tenant_id\": \"$TENANT_ID\",
+    \"workspace\": \"$WORKSPACE\",
+    \"role_id\": \"editor\",
+    \"granted_by\": \"admin@acme.io\"
+  }"
+```
+
+Optional explicit targets:
+
+```json
+{
+  "workspaces": ["prod", "dev", "staging"]
+}
+```
+
+Important:
+- Requires `users:manage_roles` plus `admin:full` (or `is_superadmin=true`).
+- Applies to existing workspaces only (option 1 behavior).
+- Per-workspace result may be `skipped` when user or role is missing in that workspace.
+
+## Common RBAC/API auth failure modes
+
+- `401 unauthorized`:
+  - missing/invalid session or API key
+  - missing scope (`tenant_id`, `workspace`)
+  - session/API key belongs to different scope
+- `403 forbidden`:
+  - authenticated, but missing required permission
+  - tenant fan-out endpoint requires `admin:full` (or `is_superadmin=true`)
+- `429 too_many_requests`:
+  - too many failed login attempts for the same principal/scope/client key
+  - check `Retry-After` header before retrying login
+- `404 role not found` on assignment:
+  - role is missing in that workspace scope
+- `404 user not found` on assignment:
+  - user does not exist in that workspace scope
+
+## Auth hardening settings
+
+Login brute-force protection is configurable through:
+- `API_LOGIN_FAILURE_LIMIT`: max failed attempts before `429`
+- `API_LOGIN_FAILURE_WINDOW_SECONDS`: rolling window for failed attempts and `Retry-After`
+
+Defaults are loaded from `infra/config.py`.
+
+## Audit events
+
+Auth and role-assignment operations append best-effort records in `audit_log`, including:
+- login success/failure/rate-limited events
+- logout events
+- workspace role assignment events
+- tenant fan-out role assignment summary events
+
+Current event types:
+- `auth.login.succeeded`
+- `auth.login.failed`
+- `auth.login.rate_limited`
+- `auth.logout.succeeded`
+- `users.role.assigned`
+- `users.role.assigned_tenant`
+
+Query example:
+
+```bash
+curl -sS "$BASE_URL/api/audit?tenant_id=$TENANT_ID&workspace=$WORKSPACE&event_category=auth&limit=20" \
+  -b /tmp/mck_cookies.txt
+```
 
 ## New tenant/workspace bootstrap behavior
 

@@ -34,6 +34,8 @@ def _disable_runtime_guards(monkeypatch: Any) -> None:
     monkeypatch.setattr(flask_app, "_schema_gate_checked", True)
     monkeypatch.setattr(flask_app, "_API_BEARER_TOKEN", "")
     monkeypatch.setattr(flask_app, "db_conn", _dummy_db_conn)
+    monkeypatch.setattr(auth_blueprint, "db_conn", _dummy_db_conn)
+    auth_blueprint.clear_login_limiter_state_for_tests()
 
 
 def test_auth_login_success_sets_cookie(monkeypatch: Any) -> None:
@@ -51,11 +53,17 @@ def test_auth_login_success_sets_cookie(monkeypatch: Any) -> None:
         permissions=frozenset({"findings:read"}),
     )
     expires_at = datetime(2026, 2, 23, 12, 0, 0, tzinfo=UTC)
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         auth_blueprint.rbac_service,
         "authenticate_user",
         lambda **_kwargs: (context, "session-token-abc", expires_at),
+    )
+    monkeypatch.setattr(
+        auth_blueprint,
+        "append_audit_event",
+        lambda *_args, **kwargs: captured.update({"event_type": kwargs["event"].event_type}),
     )
 
     client = flask_app.app.test_client()
@@ -76,12 +84,19 @@ def test_auth_login_success_sets_cookie(monkeypatch: Any) -> None:
     assert (payload.get("user") or {}).get("user_id") == "u-1"
     cookie_header = str(resp.headers.get("Set-Cookie") or "")
     assert "session_token=session-token-abc" in cookie_header
+    assert captured.get("event_type") == "auth.login.succeeded"
 
 
 def test_auth_login_invalid_credentials(monkeypatch: Any) -> None:
     """Login should return 401 when credential verification fails."""
     _disable_runtime_guards(monkeypatch)
+    captured: dict[str, Any] = {}
     monkeypatch.setattr(auth_blueprint.rbac_service, "authenticate_user", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        auth_blueprint,
+        "append_audit_event",
+        lambda *_args, **kwargs: captured.update({"event_type": kwargs["event"].event_type}),
+    )
 
     client = flask_app.app.test_client()
     resp = client.post(
@@ -98,6 +113,103 @@ def test_auth_login_invalid_credentials(monkeypatch: Any) -> None:
     assert resp.status_code == 401
     assert payload.get("ok") is False
     assert payload.get("error") == "unauthorized"
+    assert captured.get("event_type") == "auth.login.failed"
+
+
+def test_auth_login_rate_limited_after_repeated_failures(monkeypatch: Any) -> None:
+    """`/api/auth/login` should return 429 after repeated failed attempts."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(auth_blueprint, "_LOGIN_FAILURE_LIMIT", 2)
+    monkeypatch.setattr(auth_blueprint, "_LOGIN_FAILURE_WINDOW_SECONDS", 300)
+    monkeypatch.setattr(auth_blueprint.rbac_service, "authenticate_user", lambda **_kwargs: None)
+
+    client = flask_app.app.test_client()
+    first = client.post(
+        "/api/auth/login",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "email": "user@acme.io",
+            "password": "wrong",
+        },
+    )
+    second = client.post(
+        "/api/auth/login",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "email": "user@acme.io",
+            "password": "wrong",
+        },
+    )
+    payload_second = second.get_json() or {}
+
+    assert first.status_code == 401
+    assert second.status_code == 429
+    assert payload_second.get("ok") is False
+    assert payload_second.get("error") == "too_many_requests"
+    assert str(second.headers.get("Retry-After") or "").strip() != ""
+
+
+def test_auth_login_success_clears_failure_counter(monkeypatch: Any) -> None:
+    """Successful login should clear prior failed-attempt limiter state."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(auth_blueprint, "_LOGIN_FAILURE_LIMIT", 2)
+    monkeypatch.setattr(auth_blueprint, "_LOGIN_FAILURE_WINDOW_SECONDS", 300)
+    context = AuthContext(
+        tenant_id="acme",
+        workspace="prod",
+        user_id="u-1",
+        email="user@acme.io",
+        full_name="Alice",
+        is_superadmin=False,
+        auth_method="session",
+        session_id="ses_123",
+        permissions=frozenset({"findings:read"}),
+    )
+    expires_at = datetime(2026, 2, 23, 12, 0, 0, tzinfo=UTC)
+    calls = {"n": 0}
+
+    def _authenticate(**_kwargs: Any) -> tuple[AuthContext, str, datetime] | None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return context, "session-token-abc", expires_at
+        return None
+
+    monkeypatch.setattr(auth_blueprint.rbac_service, "authenticate_user", _authenticate)
+
+    client = flask_app.app.test_client()
+    first_fail = client.post(
+        "/api/auth/login",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "email": "user@acme.io",
+            "password": "wrong",
+        },
+    )
+    success = client.post(
+        "/api/auth/login",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "email": "user@acme.io",
+            "password": "secret",
+        },
+    )
+    second_fail = client.post(
+        "/api/auth/login",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "email": "user@acme.io",
+            "password": "wrong-again",
+        },
+    )
+
+    assert first_fail.status_code == 401
+    assert success.status_code == 200
+    assert second_fail.status_code == 401
 
 
 def test_auth_me_requires_authenticated_context(monkeypatch: Any) -> None:

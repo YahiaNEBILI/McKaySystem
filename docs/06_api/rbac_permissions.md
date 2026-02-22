@@ -30,7 +30,7 @@ This document maps API routes to RBAC permissions enforced by `apps/flask_api/au
 | `users:create` | `POST /api/users` |
 | `users:update` | `PUT /api/users/{user_id}` |
 | `users:delete` | `DELETE /api/users/{user_id}` |
-| `users:manage_roles` | `GET /api/users/{user_id}/role`, `PUT /api/users/{user_id}/role` |
+| `users:manage_roles` | `GET /api/users/{user_id}/role`, `PUT /api/users/{user_id}/role`, `PUT /api/users/{user_id}/role/tenant` |
 | `api_keys:read` | `GET /api/api-keys` |
 | `api_keys:create` | `POST /api/api-keys` |
 | `api_keys:revoke` | `DELETE /api/api-keys/{key_id}` |
@@ -39,3 +39,18 @@ This document maps API routes to RBAC permissions enforced by `apps/flask_api/au
 
 - `is_superadmin = true` bypasses permission checks.
 - `admin:full` permission bypasses permission checks.
+
+## Authenticated-only routes (no explicit permission id)
+
+- `POST /api/auth/logout` requires a valid authenticated RBAC context.
+- `GET /api/auth/me` requires a valid authenticated RBAC context and matching scope.
+
+## Public routes (no authentication)
+
+- `GET /health`
+- `GET /api/health/db`
+- `GET /openapi.json`
+- `GET /api/openapi.json`
+- `GET /api/v1/openapi.json`
+- `GET /api/version`
+- `GET /api/v1/version`

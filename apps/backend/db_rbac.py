@@ -424,6 +424,38 @@ def get_user_workspace_role(
     )
 
 
+def list_tenant_workspaces(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+) -> list[str]:
+    """Return discovered workspaces for one tenant anchored to a known scope.
+
+    Args:
+        conn: Open database connection.
+        tenant_id: Tenant identifier.
+        anchor_workspace: One existing workspace used to keep query scope explicit.
+
+    Returns:
+        Sorted list of workspace identifiers for the tenant.
+    """
+    rows = fetch_all_dict_conn(
+        conn,
+        """
+        SELECT DISTINCT r_all.workspace
+        FROM roles r_anchor
+        JOIN roles r_all
+          ON r_all.tenant_id = r_anchor.tenant_id
+        WHERE r_anchor.tenant_id = %s
+          AND r_anchor.workspace = %s
+        ORDER BY r_all.workspace ASC
+        """,
+        (tenant_id, anchor_workspace),
+    )
+    return [str(row["workspace"]) for row in rows if row.get("workspace")]
+
+
 def bootstrap_rbac_scope(
     conn: Any,
     *,
