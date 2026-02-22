@@ -41,6 +41,7 @@ def test_authenticate_user_creates_session(monkeypatch: Any) -> None:
     """Valid credentials should produce context and persisted session hash."""
     conn = _DummyConn()
     calls: dict[str, Any] = {}
+    bootstrap: dict[str, Any] = {}
     stored_hash = hash_password("hunter2")
 
     monkeypatch.setattr(rbac_service, "db_conn", lambda: _DummyCtx(conn))
@@ -66,6 +67,11 @@ def test_authenticate_user_creates_session(monkeypatch: Any) -> None:
         return {"session_id": calls["session_id"]}
 
     monkeypatch.setattr(rbac_service.db_rbac, "upsert_user_session", _capture_upsert)
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "bootstrap_rbac_scope",
+        lambda _conn, **kwargs: bootstrap.update(kwargs),
+    )
     monkeypatch.setattr(
         rbac_service.db_rbac,
         "touch_user_last_login",
@@ -94,6 +100,7 @@ def test_authenticate_user_creates_session(monkeypatch: Any) -> None:
     assert "findings:read" in context.permissions
     assert str(calls["session_id"]).startswith("ses_")
     assert len(str(calls["session_token_hash"])) == 64
+    assert bootstrap == {"tenant_id": "acme", "workspace": "prod"}
     assert conn.commit_count == 1
 
 
@@ -101,6 +108,7 @@ def test_authenticate_user_rejects_bad_password(monkeypatch: Any) -> None:
     """Invalid password should return None and not commit session writes."""
     conn = _DummyConn()
     stored_hash = hash_password("hunter2")
+    bootstrap_called: dict[str, bool] = {"value": False}
 
     monkeypatch.setattr(rbac_service, "db_conn", lambda: _DummyCtx(conn))
     monkeypatch.setattr(
@@ -123,6 +131,11 @@ def test_authenticate_user_rejects_bad_password(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(
         rbac_service.db_rbac,
+        "bootstrap_rbac_scope",
+        lambda *_args, **_kwargs: bootstrap_called.__setitem__("value", True),
+    )
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
         "get_user_permissions",
         lambda *_args, **_kwargs: [],
     )
@@ -135,6 +148,7 @@ def test_authenticate_user_rejects_bad_password(monkeypatch: Any) -> None:
     )
 
     assert result is None
+    assert bootstrap_called["value"] is False
     assert conn.commit_count == 0
 
 
@@ -180,6 +194,7 @@ def test_authenticate_api_key_returns_context(monkeypatch: Any) -> None:
     """Valid API key should resolve to scoped auth context."""
     conn = _DummyConn()
     touched: dict[str, str] = {}
+    bootstrap: dict[str, Any] = {}
 
     monkeypatch.setattr(rbac_service, "db_conn", lambda: _DummyCtx(conn))
     monkeypatch.setattr(
@@ -200,6 +215,11 @@ def test_authenticate_api_key_returns_context(monkeypatch: Any) -> None:
     def _touch(*_args, **kwargs):  # type: ignore[no-untyped-def]
         touched["key_id"] = str(kwargs.get("key_id"))
 
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "bootstrap_rbac_scope",
+        lambda _conn, **kwargs: bootstrap.update(kwargs),
+    )
     monkeypatch.setattr(rbac_service.db_rbac, "touch_api_key_last_used", _touch)
     monkeypatch.setattr(
         rbac_service.db_rbac,
@@ -217,4 +237,5 @@ def test_authenticate_api_key_returns_context(monkeypatch: Any) -> None:
     assert context.auth_method == "api_key"
     assert context.key_id == "key_123"
     assert touched["key_id"] == "key_123"
+    assert bootstrap == {"tenant_id": "acme", "workspace": "prod"}
     assert conn.commit_count == 1

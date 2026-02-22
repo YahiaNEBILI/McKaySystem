@@ -23,6 +23,7 @@ class _FakeCursor:
         self.rowcount = rowcount
         self.executed_sql: str | None = None
         self.executed_params: Sequence[Any] | None = None
+        self.executed_statements: list[tuple[str, Sequence[Any] | None]] = []
 
     def __enter__(self) -> _FakeCursor:
         return self
@@ -33,6 +34,7 @@ class _FakeCursor:
     def execute(self, sql: str, params: Sequence[Any] | None = None) -> None:
         self.executed_sql = sql
         self.executed_params = params
+        self.executed_statements.append((sql, params))
 
     def fetchone(self) -> Sequence[Any] | None:
         return self._row
@@ -292,3 +294,41 @@ def test_upsert_user_workspace_role_is_idempotent_and_scoped() -> None:
     sql = str(cursor.executed_sql).lower()
     assert "insert into user_workspace_roles" in sql
     assert "on conflict (tenant_id, workspace, user_id)" in sql
+
+
+def test_bootstrap_rbac_scope_copies_template_scope_idempotently() -> None:
+    cursor = _FakeCursor()
+    conn = _FakeConn(cursor)
+
+    db_rbac.bootstrap_rbac_scope(
+        conn,
+        tenant_id="acme",
+        workspace="prod",
+    )
+
+    assert len(cursor.executed_statements) == 3
+    first_sql, first_params = cursor.executed_statements[0]
+    second_sql, second_params = cursor.executed_statements[1]
+    third_sql, third_params = cursor.executed_statements[2]
+
+    assert first_params == ("acme", "prod", "default", "default")
+    assert second_params == ("acme", "prod", "default", "default")
+    assert third_params == ("acme", "prod", "default", "default")
+
+    assert "insert into roles" in str(first_sql).lower()
+    assert "from roles src" in str(first_sql).lower()
+    assert "on conflict (tenant_id, workspace, role_id) do nothing" in str(first_sql).lower()
+
+    assert "insert into permissions" in str(second_sql).lower()
+    assert "from permissions src" in str(second_sql).lower()
+    assert (
+        "on conflict (tenant_id, workspace, permission_id) do nothing"
+        in str(second_sql).lower()
+    )
+
+    assert "insert into role_permissions" in str(third_sql).lower()
+    assert "from role_permissions src" in str(third_sql).lower()
+    assert (
+        "on conflict (tenant_id, workspace, role_id, permission_id) do nothing"
+        in str(third_sql).lower()
+    )

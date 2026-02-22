@@ -105,6 +105,11 @@ def authenticate_user(
         if not stored_hash or not verify_password(password, stored_hash):
             return None
 
+        db_rbac.bootstrap_rbac_scope(
+            conn,
+            tenant_id=tenant_id,
+            workspace=workspace,
+        )
         raw_session_token = generate_session_token()
         session_token_hash = hash_session_token(raw_session_token)
         session_id = _session_id_from_hash(session_token_hash)
@@ -159,6 +164,11 @@ def authenticate_api_key(
         )
         if user is None:
             return None
+        db_rbac.bootstrap_rbac_scope(
+            conn,
+            tenant_id=tenant_id,
+            workspace=workspace,
+        )
         key_id = str(user.get("key_id") or "")
         if key_id:
             db_rbac.touch_api_key_last_used(

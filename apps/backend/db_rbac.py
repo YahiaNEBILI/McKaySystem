@@ -424,6 +424,102 @@ def get_user_workspace_role(
     )
 
 
+def bootstrap_rbac_scope(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    template_tenant_id: str = "default",
+    template_workspace: str = "default",
+) -> None:
+    """Seed RBAC roles/permissions into one tenant/workspace scope.
+
+    This helper copies RBAC templates from a source scope into the target
+    scope using idempotent inserts.
+
+    Args:
+        conn: Open database connection.
+        tenant_id: Target tenant identifier.
+        workspace: Target workspace identifier.
+        template_tenant_id: Source tenant identifier.
+        template_workspace: Source workspace identifier.
+
+    Returns:
+        None.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO roles (
+              tenant_id,
+              workspace,
+              role_id,
+              name,
+              description,
+              is_system
+            )
+            SELECT
+              %s,
+              %s,
+              src.role_id,
+              src.name,
+              src.description,
+              src.is_system
+            FROM roles src
+            WHERE src.tenant_id = %s
+              AND src.workspace = %s
+            ON CONFLICT (tenant_id, workspace, role_id) DO NOTHING
+            """,
+            (tenant_id, workspace, template_tenant_id, template_workspace),
+        )
+        cur.execute(
+            """
+            INSERT INTO permissions (
+              tenant_id,
+              workspace,
+              permission_id,
+              name,
+              resource,
+              action,
+              description
+            )
+            SELECT
+              %s,
+              %s,
+              src.permission_id,
+              src.name,
+              src.resource,
+              src.action,
+              src.description
+            FROM permissions src
+            WHERE src.tenant_id = %s
+              AND src.workspace = %s
+            ON CONFLICT (tenant_id, workspace, permission_id) DO NOTHING
+            """,
+            (tenant_id, workspace, template_tenant_id, template_workspace),
+        )
+        cur.execute(
+            """
+            INSERT INTO role_permissions (
+              tenant_id,
+              workspace,
+              role_id,
+              permission_id
+            )
+            SELECT
+              %s,
+              %s,
+              src.role_id,
+              src.permission_id
+            FROM role_permissions src
+            WHERE src.tenant_id = %s
+              AND src.workspace = %s
+            ON CONFLICT (tenant_id, workspace, role_id, permission_id) DO NOTHING
+            """,
+            (tenant_id, workspace, template_tenant_id, template_workspace),
+        )
+
+
 def get_role_by_id(
     conn: Any,
     *,
