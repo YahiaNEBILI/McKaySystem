@@ -57,10 +57,10 @@ export default function LoginPage() {
       <div className="relative z-10 mx-auto grid min-h-screen w-full max-w-6xl items-center gap-8 px-6 py-10 lg:grid-cols-[1.08fr_0.92fr]">
         <section className="login-reveal text-white">
           <p className="mb-3 inline-flex items-center rounded-full border border-cyan-300/35 bg-cyan-300/10 px-3 py-1 text-xs uppercase tracking-[0.24em] text-cyan-100">
-            FinOps Intelligence
+            McKay System 1.0
           </p>
           <h1 className="max-w-xl text-4xl font-semibold leading-tight md:text-5xl">
-            SaaS-grade cloud cost governance, in real time.
+            SaaS FinOps Platform, in real time.
           </h1>
           <p className="mt-4 max-w-lg text-sm text-cyan-100/85 md:text-base">
             Detect waste, enforce policy, and execute remediations with deterministic,
@@ -69,19 +69,19 @@ export default function LoginPage() {
 
           <div className="mt-8 grid max-w-lg gap-3 sm:grid-cols-2">
             <article className="rounded-lg border border-white/20 bg-white/8 p-3 backdrop-blur-sm">
-              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Coverage</p>
-              <p className="mt-2 text-2xl font-semibold">100%</p>
-              <p className="mt-1 text-xs text-cyan-100/80">tenant/workspace scoped queries</p>
+              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Detect</p>
+              <p className="mt-2 text-2xl font-semibold">Scans AWS assets & cost signals</p>
+              <p className="mt-1 text-xs text-cyan-100/80">Produces consistent, explainable findings</p>
             </article>
             <article className="rounded-lg border border-white/20 bg-white/8 p-3 backdrop-blur-sm">
-              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Determinism</p>
-              <p className="mt-2 text-2xl font-semibold">Stable</p>
-              <p className="mt-1 text-xs text-cyan-100/80">idempotent ingestion and actions</p>
+              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Prioritize</p>
+              <p className="mt-2 text-2xl font-semibold">Correlates & ranks by impact & risk</p>
+              <p className="mt-1 text-xs text-cyan-100/80">Provide the tool you need for FinOps</p>
             </article>
             <article className="rounded-lg border border-white/20 bg-white/8 p-3 backdrop-blur-sm sm:col-span-2">
-              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Platform Signal</p>
+              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Governance & Audit</p>
               <p className="mt-2 text-sm text-cyan-50/95">
-                Findings, recommendations, and remediation controls in one operational surface.
+                Ownership routing, SLA aging, audit trail (immutable findings + state history) — built for real ops teams
               </p>
             </article>
           </div>
