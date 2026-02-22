@@ -46,6 +46,7 @@ from apps.backend.db import (
     fetch_all_dict_conn,
     fetch_one_dict_conn,
 )
+from apps.flask_api.blueprints import auth as auth_module
 from apps.flask_api.blueprints import facets as facets_module
 from apps.flask_api.blueprints import findings as findings_module
 from apps.flask_api.blueprints import groups as groups_module
@@ -409,13 +410,15 @@ def _enforce_api_auth() -> None:
 
     - /health remains public.
     - /api/health/db remains public (useful for platform health checks).
+    - /api/auth/login remains public (session bootstrap).
+    - /api/auth/logout and /api/auth/me enforce RBAC via auth middleware.
     - All other /api/* routes require Authorization: Bearer ... when
       API_BEARER_TOKEN is set.
     """
     path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
         return
-    if path in {"/api/health/db"}:
+    if path in {"/api/health/db", "/api/auth/login", "/api/auth/logout", "/api/auth/me"}:
         return
     _check_bearer_token()
 
@@ -437,7 +440,7 @@ def _operation_summary_from_view(view_func: Any, method: str, path: str) -> str:
 
 def _openapi_security_for_path(path: str) -> list[dict[str, list[str]]]:
     # Keep health + OpenAPI discovery unauthenticated in docs.
-    if path in {"/api/health/db", "/api/openapi.json"}:
+    if path in {"/api/health/db", "/api/openapi.json", "/api/auth/login"}:
         return []
     return [{"bearerAuth": []}]
 
@@ -800,6 +803,7 @@ _install_blueprint_backcompat_shims()
 
 # Register blueprints - each handles its own route definitions.
 app.register_blueprint(health_module.health_bp)
+app.register_blueprint(auth_module.auth_bp)
 app.register_blueprint(runs_module.runs_bp)
 app.register_blueprint(findings_module.findings_bp)
 app.register_blueprint(recommendations_module.recommendations_bp)

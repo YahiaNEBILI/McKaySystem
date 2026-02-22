@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from apps.backend.db import fetch_all_dict_conn, fetch_one_dict_conn
@@ -53,6 +54,18 @@ class ApiKeyUpsert:
     user_id: str | None = None
     key_type: str = "secret"
     expires_at: Any | None = None
+
+
+@dataclass(frozen=True)
+class SessionUpsert:
+    """Input payload for idempotent session upsert operations."""
+
+    tenant_id: str
+    workspace: str
+    session_id: str
+    session_token_hash: str
+    user_id: str
+    expires_at: datetime
 
 
 # pylint: enable=too-many-instance-attributes
@@ -374,3 +387,214 @@ def check_permission(
         (tenant_id, workspace, user_id, permission_id),
     )
     return bool(row and row.get("allowed") == 1)
+
+
+def touch_user_last_login(conn: Any, *, tenant_id: str, workspace: str, user_id: str) -> None:
+    """Update the last login timestamp for one scoped user."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE users
+            SET
+              last_login_at = now(),
+              updated_at = now()
+            WHERE tenant_id = %s
+              AND workspace = %s
+              AND user_id = %s
+            """,
+            (tenant_id, workspace, user_id),
+        )
+
+
+def upsert_user_session(
+    conn: Any,
+    *,
+    session: SessionUpsert,
+) -> dict[str, Any] | None:
+    """Create or update a scoped user session by deterministic session_id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_sessions (
+              tenant_id,
+              workspace,
+              session_id,
+              session_token_hash,
+              user_id,
+              expires_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, workspace, session_id)
+            DO UPDATE SET
+              session_token_hash = EXCLUDED.session_token_hash,
+              user_id = EXCLUDED.user_id,
+              expires_at = EXCLUDED.expires_at
+            RETURNING
+              tenant_id,
+              workspace,
+              session_id,
+              session_token_hash,
+              user_id,
+              expires_at,
+              created_at
+            """,
+            (
+                session.tenant_id,
+                session.workspace,
+                session.session_id,
+                session.session_token_hash,
+                session.user_id,
+                session.expires_at,
+            ),
+        )
+        return _dict_from_cursor_row(cur, cur.fetchone())
+
+
+def delete_session_by_hash(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    session_token_hash: str,
+) -> bool:
+    """Delete one session by token hash and return whether a row was removed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM user_sessions
+            WHERE tenant_id = %s
+              AND workspace = %s
+              AND session_token_hash = %s
+            """,
+            (tenant_id, workspace, session_token_hash),
+        )
+        return bool(cur.rowcount)
+
+
+def touch_api_key_last_used(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    key_id: str,
+) -> None:
+    """Set API key last_used_at timestamp for one scoped key identifier."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE api_keys
+            SET last_used_at = now()
+            WHERE tenant_id = %s
+              AND workspace = %s
+              AND key_id = %s
+            """,
+            (tenant_id, workspace, key_id),
+        )
+
+
+def get_user_by_api_key_hash(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    key_hash: str,
+) -> dict[str, Any] | None:
+    """Resolve active user context from scoped API key hash."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          u.tenant_id,
+          u.workspace,
+          u.user_id,
+          u.email,
+          u.full_name,
+          u.auth_provider,
+          u.is_active,
+          u.is_superadmin,
+          ak.key_id
+        FROM api_keys ak
+        JOIN users u
+          ON u.tenant_id = ak.tenant_id
+         AND u.workspace = ak.workspace
+         AND u.user_id = ak.user_id
+        WHERE ak.tenant_id = %s
+          AND ak.workspace = %s
+          AND ak.key_hash = %s
+          AND ak.is_active = TRUE
+          AND (ak.expires_at IS NULL OR ak.expires_at > now())
+          AND u.is_active = TRUE
+        LIMIT 1
+        """,
+        (tenant_id, workspace, key_hash),
+    )
+
+
+def get_user_by_session_hash(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    session_token_hash: str,
+) -> dict[str, Any] | None:
+    """Resolve active user context from scoped session token hash."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          u.tenant_id,
+          u.workspace,
+          u.user_id,
+          u.email,
+          u.full_name,
+          u.auth_provider,
+          u.is_active,
+          u.is_superadmin,
+          s.session_id,
+          s.expires_at
+        FROM user_sessions s
+        JOIN users u
+          ON u.tenant_id = s.tenant_id
+         AND u.workspace = s.workspace
+         AND u.user_id = s.user_id
+        WHERE s.tenant_id = %s
+          AND s.workspace = %s
+          AND s.session_token_hash = %s
+          AND s.expires_at > now()
+          AND u.is_active = TRUE
+        LIMIT 1
+        """,
+        (tenant_id, workspace, session_token_hash),
+    )
+
+
+def get_user_permissions(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+) -> list[str]:
+    """Return all effective scoped permissions for a user."""
+    rows = fetch_all_dict_conn(
+        conn,
+        """
+        SELECT DISTINCT rp.permission_id
+        FROM user_workspace_roles uwr
+        JOIN role_permissions rp
+          ON rp.tenant_id = uwr.tenant_id
+         AND rp.workspace = uwr.workspace
+         AND rp.role_id = uwr.role_id
+        JOIN users u
+          ON u.tenant_id = uwr.tenant_id
+         AND u.workspace = uwr.workspace
+         AND u.user_id = uwr.user_id
+        WHERE uwr.tenant_id = %s
+          AND uwr.workspace = %s
+          AND uwr.user_id = %s
+          AND u.is_active = TRUE
+        ORDER BY rp.permission_id ASC
+        """,
+        (tenant_id, workspace, user_id),
+    )
+    return [str(row["permission_id"]) for row in rows if row.get("permission_id")]
