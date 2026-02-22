@@ -31,6 +31,10 @@ interface FindingsResponse {
 interface UseFindingsOptions {
   limit?: number;
   offset?: number;
+  state?: string;
+  severity?: string;
+  q?: string;
+  order?: "savings_desc" | "detected_desc";
 }
 
 /**
@@ -40,15 +44,33 @@ export function useFindings(options: UseFindingsOptions = {}) {
   const scope = getStoredScope();
   const limit = options.limit ?? 50;
   const offset = options.offset ?? 0;
+  const state = options.state ?? "";
+  const severity = options.severity ?? "";
+  const q = options.q ?? "";
+  const order = options.order ?? "savings_desc";
 
   return useQuery({
-    queryKey: ["findings", scope?.tenantId, scope?.workspace, limit, offset],
+    queryKey: [
+      "findings",
+      scope?.tenantId,
+      scope?.workspace,
+      limit,
+      offset,
+      state,
+      severity,
+      q,
+      order,
+    ],
     enabled: Boolean(scope?.tenantId && scope?.workspace),
     queryFn: async () => {
       return apiClient.get<FindingsResponse>("/findings", {
         query: {
           limit,
           offset,
+          state,
+          severity,
+          q,
+          order,
         },
       });
     },
