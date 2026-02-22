@@ -293,7 +293,21 @@ curl -sS "$BASE_URL/api/audit?tenant_id=$TENANT_ID&workspace=$WORKSPACE&event_ca
 
 If a brand new scope has no user with `users:manage_roles`, role assignment cannot be done via API yet.
 
-Use one-time SQL to assign an initial admin role:
+Preferred path: use the operator CLI bootstrap command:
+
+```bash
+export MCKAY_BOOTSTRAP_PASSWORD="<strong-password>"
+mckay bootstrap-scope \
+  --tenant acme \
+  --workspace prod \
+  --user-id u_admin \
+  --email admin@acme.io
+```
+
+Runbook:
+- `docs/05_operations/rbac_bootstrap.md`
+
+SQL should be used only as emergency fallback when CLI cannot run:
 
 ```sql
 INSERT INTO user_workspace_roles (

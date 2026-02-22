@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+from apps.backend.scope_bootstrap import (
+    ScopeBootstrapOptions,
+    ScopeBootstrapRequest,
+    bootstrap_scope_admin,
+)
 from infra.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -108,7 +114,20 @@ def cmd_run(args: argparse.Namespace) -> None:
     if not (root / "apps/worker/runner.py").exists():
         raise SystemExit(f"{runner_module} module not found. Run from the project directory.")
 
-    cmd = [_python(), "-m", runner_module, "--tenant", tenant, "--workspace", workspace, "--out", out_dir]
+    tenant_s = str(tenant)
+    workspace_s = str(workspace)
+    out_dir_s = str(out_dir or "data/finops_findings")
+    cmd = [
+        _python(),
+        "-m",
+        runner_module,
+        "--tenant",
+        tenant_s,
+        "--workspace",
+        workspace_s,
+        "--out",
+        out_dir_s,
+    ]
     env = dict(os.environ)
     env.update(_pricing_env_from_args(args))
     _run_cmd(cmd, cwd=root, env=env)
@@ -133,8 +152,9 @@ def cmd_export(args: argparse.Namespace) -> None:
     env["TENANT_ID"] = tenant
     env["WORKSPACE"] = workspace
 
-    manifest_path = str((Path(out_dir) / "run_manifest.json").resolve())
-    cmd = [_python(), "-m", export_module, "--tenant-id", tenant, "--manifest", manifest_path]
+    out_dir_s = str(out_dir or "data/finops_findings")
+    manifest_path = str((Path(out_dir_s) / "run_manifest.json").resolve())
+    cmd = [_python(), "-m", export_module, "--tenant-id", str(tenant), "--manifest", manifest_path]
     _run_cmd(cmd, cwd=root, env=env)
 
 
@@ -225,16 +245,21 @@ def cmd_recover(args: argparse.Namespace) -> None:
     env["TENANT_ID"] = tenant
     env["WORKSPACE"] = workspace
 
+    try:
+        limit_n = int(limit if limit is not None else 200)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Invalid --limit value; expected integer.") from exc
+
     cmd = [
         _python(),
         "-m",
         recover_module,
         "--tenant",
-        tenant,
+        str(tenant),
         "--workspace",
-        workspace,
+        str(workspace),
         "--limit",
-        str(max(1, int(limit))),
+        str(max(1, limit_n)),
     ]
     if actor:
         cmd.extend(["--actor", str(actor)])
@@ -263,6 +288,59 @@ def cmd_run_all(args: argparse.Namespace) -> None:
 
     if not args.skip_export:
         cmd_export(args)
+
+
+def _password_from_args(args: argparse.Namespace) -> str:
+    """Resolve bootstrap password from CLI args or an environment variable.
+
+    Args:
+        args: Parsed command args.
+
+    Returns:
+        Plaintext password.
+
+    Raises:
+        SystemExit: Password is missing from both configured sources.
+    """
+    explicit = str(getattr(args, "password", "") or "").strip()
+    if explicit:
+        return explicit
+    env_name = str(getattr(args, "password_env", "") or "").strip()
+    if env_name:
+        env_value = str(os.environ.get(env_name, "")).strip()
+        if env_value:
+            return env_value
+    raise SystemExit("Missing bootstrap password: pass --password or set the configured --password-env variable.")
+
+
+def cmd_bootstrap_scope(args: argparse.Namespace) -> None:
+    """Bootstrap user + RBAC role for one tenant/workspace scope."""
+    tenant = args.tenant or _env_default("TENANT_ID")
+    workspace = args.workspace or _env_default("WORKSPACE")
+    if not tenant:
+        raise SystemExit("Missing --tenant (or TENANT_ID env var).")
+    if not workspace:
+        raise SystemExit("Missing --workspace (or WORKSPACE env var).")
+
+    result = bootstrap_scope_admin(
+        ScopeBootstrapRequest(
+            tenant_id=str(tenant),
+            workspace=str(workspace),
+            user_id=str(args.user_id),
+            email=str(args.email),
+            password=_password_from_args(args),
+            options=ScopeBootstrapOptions(
+                full_name=args.full_name,
+                role_id=args.role_id,
+                granted_by=args.granted_by,
+                is_superadmin=bool(args.superadmin),
+                create_api_key=bool(args.create_api_key),
+                api_key_name=args.api_key_name,
+                api_key_description=args.api_key_description,
+            ),
+        )
+    )
+    sys.stdout.write(f"{json.dumps(result, separators=(',', ':'), sort_keys=True)}\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -328,6 +406,55 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--recover-limit", type=int, default=200, help="Recovery row limit before ingest.")
     sp.add_argument("--recover-actor", default=None, help="Recovery actor id before ingest.")
     sp.set_defaults(func=cmd_run_all)
+
+    sp = sub.add_parser(
+        "bootstrap-scope",
+        help=(
+            "Idempotently bootstrap scoped RBAC access: seed scope, upsert user, "
+            "assign role, and optionally issue one API key."
+        ),
+    )
+    add_tenant_workspace(sp)
+    sp.add_argument("--user-id", required=True, help="Scoped user identifier.")
+    sp.add_argument("--email", required=True, help="User email (normalized to lowercase).")
+    sp.add_argument(
+        "--password",
+        default=None,
+        help="Plaintext password. Prefer using --password-env to avoid shell history leakage.",
+    )
+    sp.add_argument(
+        "--password-env",
+        default="MCKAY_BOOTSTRAP_PASSWORD",
+        help="Environment variable name to read password from when --password is omitted.",
+    )
+    sp.add_argument("--full-name", default=None, help="Optional user display name.")
+    sp.add_argument("--role-id", default="admin", help="Role id to assign (default: admin).")
+    sp.add_argument(
+        "--granted-by",
+        default="bootstrap-cli",
+        help="Grant actor marker stored in user_workspace_roles.",
+    )
+    sp.add_argument(
+        "--superadmin",
+        action="store_true",
+        help="Set users.is_superadmin=true for this user.",
+    )
+    sp.add_argument(
+        "--create-api-key",
+        action="store_true",
+        help="Create and return one raw API key for the bootstrapped user.",
+    )
+    sp.add_argument(
+        "--api-key-name",
+        default="bootstrap-cli",
+        help="API key name when --create-api-key is used.",
+    )
+    sp.add_argument(
+        "--api-key-description",
+        default=None,
+        help="Optional API key description when --create-api-key is used.",
+    )
+    sp.set_defaults(func=cmd_bootstrap_scope)
 
     return p
 

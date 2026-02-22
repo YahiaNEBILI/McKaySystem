@@ -347,6 +347,10 @@ Behavior:
 Authorization:
 - Requires `users:manage_roles` and either `admin:full` or `is_superadmin=true`.
 
+Bootstrap note:
+- There is currently no dedicated public API endpoint for first-admin bootstrap.
+- Use operator command `mckay bootstrap-scope` for initial scoped admin setup.
+
 ## API keys
 
 | Method | Path | Description |
