@@ -1,0 +1,84 @@
+name: Production Readiness Gate
+
+on:
+  push:
+    paths:
+      - "apps/**"
+      - "checks/**"
+      - "services/**"
+      - "pipeline/**"
+      - "infra/**"
+      - "contracts/**"
+      - "migrations/**"
+      - "tests/**"
+      - "tools/ci/**"
+      - "pyproject.toml"
+      - "pytest.ini"
+      - "Makefile"
+      - ".github/workflows/production-readiness.yml"
+  pull_request:
+    paths:
+      - "apps/**"
+      - "checks/**"
+      - "services/**"
+      - "pipeline/**"
+      - "infra/**"
+      - "contracts/**"
+      - "migrations/**"
+      - "tests/**"
+      - "tools/ci/**"
+      - "pyproject.toml"
+      - "pytest.ini"
+      - "Makefile"
+      - ".github/workflows/production-readiness.yml"
+  workflow_dispatch:
+
+jobs:
+  readiness-gate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install (editable + dev extras)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Runtime import smoke
+        shell: bash
+        run: |
+          python - <<'PY'
+          import apps.worker.runner
+          import infra.config
+          import pipeline.correlation.engine
+          print("import-smoke: ok")
+          PY
+
+      - name: Ruff gate (runtime code)
+        shell: bash
+        run: |
+          python -m ruff check apps checks services pipeline infra contracts
+
+      - name: Determinism + schema/test guardrails
+        shell: bash
+        run: |
+          python -m pytest -q \
+            tests/test_repo_layout_policy.py \
+            tests/test_db_migrate.py \
+            tests/test_determinism_findings_output.py \
+            tests/test_determinism_correlation_output.py \
+            tests/api/test_flask_read_model_guardrails.py
+
+      - name: Pylint ratchet (no new debt)
+        shell: bash
+        run: |
+          python tools/ci/pylint_ratchet.py

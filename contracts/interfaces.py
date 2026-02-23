@@ -13,6 +13,8 @@ Usage:
     # In production, use real boto3 clients
     # In tests, use unittest.mock or moto
 """
+# pylint: disable=unnecessary-ellipsis
+# Ellipsis method bodies are intentional for Protocol contracts.
 
 from __future__ import annotations
 

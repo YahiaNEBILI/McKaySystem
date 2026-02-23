@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.blueprints import recommendations as recommendations_module
 from apps.flask_api.utils import (
     _err,
@@ -554,6 +555,7 @@ def _request_action_for_finding(
 
 
 @remediations_bp.route("/api/remediations/request", methods=["POST"])
+@require_permission("findings:update")
 def api_remediations_request() -> Any:
     """Create (idempotently) a remediation action from a finding fingerprint."""
     try:
@@ -736,6 +738,7 @@ def _impact_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
 
 
 @remediations_bp.route("/api/remediations", methods=["GET"])
+@require_permission("findings:read")
 def api_remediations_list() -> Any:
     """List remediation actions for a scoped tenant/workspace."""
     try:
@@ -765,6 +768,7 @@ def api_remediations_list() -> Any:
 
 
 @remediations_bp.route("/api/remediations/impact", methods=["GET"])
+@require_permission("findings:read")
 def api_remediations_impact() -> Any:
     """List closed-loop remediation impact with aggregate realized ROI metrics."""
     try:
@@ -816,6 +820,7 @@ def api_remediations_impact() -> Any:
 
 
 @remediations_bp.route("/api/remediations/approve", methods=["POST"])
+@require_permission("findings:update")
 def api_remediations_approve() -> Any:
     """Approve one remediation action currently pending approval."""
     try:
@@ -889,6 +894,7 @@ def api_remediations_approve() -> Any:
 
 
 @remediations_bp.route("/api/remediations/reject", methods=["POST"])
+@require_permission("findings:update")
 def api_remediations_reject() -> Any:
     """Reject one remediation action currently pending approval."""
     try:

@@ -1,4 +1,4 @@
-"""
+﻿"""
 db.py
 
 Tiny DB helper module for PostgreSQL (psycopg2) with connection pooling.
@@ -51,7 +51,6 @@ def _get_pool():
     if _POOL is not None and _POOL_DSN == dsn:
         return _POOL
 
-    import psycopg2  # type: ignore  # noqa: F401
     from psycopg2.pool import SimpleConnectionPool  # type: ignore
 
     db_cfg = get_settings(reload=True).db

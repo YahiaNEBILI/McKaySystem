@@ -88,6 +88,10 @@ class APIConfig(BaseModel):
     log_level: str = Field(default="INFO")
     rate_limit_rps: float | None = Field(default=None, gt=0.0)
     rate_limit_burst: float | None = Field(default=None, gt=0.0)
+    cors_allowed_origins: list[str] = Field(default_factory=list)
+    cors_allow_credentials: bool = Field(default=True)
+    login_failure_limit: int = Field(default=5, ge=1, le=100)
+    login_failure_window_seconds: int = Field(default=300, ge=30, le=86_400)
     enforce_schema_gate: bool = Field(default=True)
     bearer_token: str = Field(default="")
 
@@ -106,6 +110,31 @@ class APIConfig(BaseModel):
         if re.match(r"^v\d+$", text):
             return text
         return "v1"
+
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def _normalize_cors_allowed_origins(cls, value: object) -> list[str]:
+        """Accept list or comma-separated string and normalize to unique ordered list."""
+        if value is None:
+            return []
+
+        items: list[str]
+        if isinstance(value, str):
+            items = [part.strip() for part in value.split(",") if part.strip()]
+        elif isinstance(value, list):
+            items = [str(part).strip() for part in value if str(part).strip()]
+        else:
+            raise TypeError(
+                "api.cors_allowed_origins must be a list[str] or comma-separated string"
+            )
+
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ordered
 
 
 class LoggingSettings(BaseModel):
@@ -282,7 +311,23 @@ def _build_payload(env: Mapping[str, str]) -> dict[str, object]:
         "log_level": _first_non_empty(env, "API__LOG_LEVEL", "API_LOG_LEVEL"),
         "rate_limit_rps": _first_non_empty(env, "API__RATE_LIMIT_RPS", "API_RATE_LIMIT_RPS"),
         "rate_limit_burst": _first_non_empty(env, "API__RATE_LIMIT_BURST", "API_RATE_LIMIT_BURST"),
-        "enforce_schema_gate": _first_non_empty(env, "API__ENFORCE_SCHEMA_GATE", "API_ENFORCE_SCHEMA_GATE"),
+        "cors_allowed_origins": _first_non_empty(
+            env, "API__CORS_ALLOWED_ORIGINS", "API_CORS_ALLOWED_ORIGINS"
+        ),
+        "cors_allow_credentials": _first_non_empty(
+            env, "API__CORS_ALLOW_CREDENTIALS", "API_CORS_ALLOW_CREDENTIALS"
+        ),
+        "login_failure_limit": _first_non_empty(
+            env, "API__LOGIN_FAILURE_LIMIT", "API_LOGIN_FAILURE_LIMIT"
+        ),
+        "login_failure_window_seconds": _first_non_empty(
+            env,
+            "API__LOGIN_FAILURE_WINDOW_SECONDS",
+            "API_LOGIN_FAILURE_WINDOW_SECONDS",
+        ),
+        "enforce_schema_gate": _first_non_empty(
+            env, "API__ENFORCE_SCHEMA_GATE", "API_ENFORCE_SCHEMA_GATE"
+        ),
         "bearer_token": _first_non_empty(env, "API__BEARER_TOKEN", "API_BEARER_TOKEN"),
     }
     logging_settings = {
@@ -312,8 +357,12 @@ def _build_payload(env: Mapping[str, str]) -> dict[str, object]:
         "run_lock_ttl_seconds": _first_non_empty(
             env, "WORKER__RUN_LOCK_TTL_SECONDS", "RUN_LOCK_TTL_SECONDS"
         ),
-        "ingest_batch_size": _first_non_empty(env, "WORKER__INGEST_BATCH_SIZE", "INGEST_BATCH_SIZE"),
-        "parquet_batch_size": _first_non_empty(env, "WORKER__PARQUET_BATCH_SIZE", "PARQUET_BATCH_SIZE"),
+        "ingest_batch_size": _first_non_empty(
+            env, "WORKER__INGEST_BATCH_SIZE", "INGEST_BATCH_SIZE"
+        ),
+        "parquet_batch_size": _first_non_empty(
+            env, "WORKER__PARQUET_BATCH_SIZE", "PARQUET_BATCH_SIZE"
+        ),
         "allow_schema_mismatch": _first_non_empty(
             env, "WORKER__ALLOW_SCHEMA_MISMATCH", "ALLOW_SCHEMA_MISMATCH"
         ),

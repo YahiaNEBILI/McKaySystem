@@ -108,6 +108,8 @@ FINOPS_FINDINGS_SCHEMA = pa.schema([
     # Human-facing content
     pa.field("title", pa.string()),
     pa.field("message", pa.string()),
+    pa.field("advice", pa.string()),            # checker-authored guidance text
+    # Backward-compatible alias (deprecated; prefer "advice")
     pa.field("recommendation", pa.string()),
     pa.field("remediation", pa.string()),        # optional: how-to steps
     pa.field("links", LINKS_LIST),

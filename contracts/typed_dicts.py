@@ -121,6 +121,8 @@ class FindingWireFormat(TypedDict):
     scope: ScopeWireFormat
 
     # Remediation (optional)
+    advice: NotRequired[str]
+    # Backward-compatible alias (deprecated; prefer "advice")
     recommendation: NotRequired[str]
     remediation: NotRequired[str]
 

@@ -10,6 +10,7 @@ from typing import Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _err,
     _ok,
@@ -266,6 +267,7 @@ def _finding_exists(conn: Any, *, tenant_id: str, workspace: str, fingerprint: s
 
 # Group lifecycle endpoints
 @lifecycle_bp.route("/api/lifecycle/group/ignore", methods=["POST"])
+@require_permission("findings:update")
 def api_lifecycle_group_ignore() -> Any:
     """Ignore all findings in a group."""
     try:
@@ -306,6 +308,7 @@ def api_lifecycle_group_ignore() -> Any:
 
 
 @lifecycle_bp.route("/api/lifecycle/group/resolve", methods=["POST"])
+@require_permission("findings:update")
 def api_lifecycle_group_resolve() -> Any:
     """Resolve all findings in a group."""
     try:
@@ -346,6 +349,7 @@ def api_lifecycle_group_resolve() -> Any:
 
 
 @lifecycle_bp.route("/api/lifecycle/group/snooze", methods=["POST"])
+@require_permission("findings:update")
 def api_lifecycle_group_snooze() -> Any:
     """Snooze all findings in a group."""
     try:
@@ -391,6 +395,7 @@ def api_lifecycle_group_snooze() -> Any:
 
 # Individual finding lifecycle endpoints
 @lifecycle_bp.route("/api/lifecycle/ignore", methods=["POST"])
+@require_permission("findings:update")
 def api_lifecycle_ignore() -> Any:
     """Ignore a single finding."""
     try:
@@ -435,6 +440,7 @@ def api_lifecycle_ignore() -> Any:
 
 
 @lifecycle_bp.route("/api/lifecycle/resolve", methods=["POST"])
+@require_permission("findings:update")
 def api_lifecycle_resolve() -> Any:
     """Resolve a single finding."""
     try:
@@ -479,6 +485,7 @@ def api_lifecycle_resolve() -> Any:
 
 
 @lifecycle_bp.route("/api/lifecycle/snooze", methods=["POST"])
+@require_permission("findings:update")
 def api_lifecycle_snooze() -> Any:
     """Snooze a single finding."""
     try:

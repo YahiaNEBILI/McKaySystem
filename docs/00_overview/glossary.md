@@ -1,7 +1,7 @@
 # Glossary
 
 Status: Canonical  
-Last reviewed: 2026-02-01
+Last reviewed: 2026-02-22
 
 This document provides the **shared vocabulary and conceptual model** for the FinOps SaaS engine.
 It is intended for:
@@ -60,6 +60,14 @@ This guarantees:
 - Reproducibility
 - Clean separation between detection and workflow state
 
+#### Checker Advice (payload field)
+
+Each finding may include checker-authored guidance text in payload field:
+- `advice` (canonical)
+- `recommendation` (legacy alias, backward-compatibility only)
+
+This text explains context and suggested direction, but it is **free text** and
+must not be used as the workflow contract for approvals/execution logic.
 
 ---
 
@@ -89,9 +97,22 @@ It is prescriptive and may evolve as:
 - It includes confidence or risk indicators.
 - It may vary depending on optimization strategy (e.g., conservative vs aggressive).
 - It does not exist independently of findings.
+- It is represented as a normalized action-plan object in `/api/recommendations`.
 
 A finding represents the **diagnosis**.  
 A recommendation represents the **treatment plan**.
+
+#### Recommendation Action Plan (API object)
+
+The recommendations API is the normalized execution contract for product/workflow:
+- `recommendation_type`, `action_type`, `priority`
+- `target` and `current` structs
+- `requires_approval`
+- financial estimates and confidence
+
+Rule:
+- `advice`/`recommendation` text is explanatory.
+- recommendation action-plan fields drive queueing, approvals, and remediations.
 
 ---
 

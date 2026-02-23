@@ -8,6 +8,7 @@ from typing import Any
 from flask import Blueprint, jsonify
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import _json, _require_scope_from_query
 
 # Create the blueprint
@@ -15,6 +16,7 @@ runs_bp = Blueprint("runs", __name__)
 
 
 @runs_bp.route("/api/runs/latest", methods=["GET"])
+@require_permission("runs:read")
 def api_runs_latest() -> Any:
     """Get the latest run for a tenant/workspace.
 
@@ -47,6 +49,7 @@ def api_runs_latest() -> Any:
 
 
 @runs_bp.route("/api/runs/diff/latest", methods=["GET"])
+@require_permission("runs:read")
 def api_runs_diff_latest() -> Any:
     """Compute a best-effort diff between the latest two *ready* runs.
 

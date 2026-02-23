@@ -46,6 +46,8 @@ from apps.backend.db import (
     fetch_all_dict_conn,
     fetch_one_dict_conn,
 )
+from apps.flask_api.blueprints import api_keys as api_keys_module
+from apps.flask_api.blueprints import auth as auth_module
 from apps.flask_api.blueprints import facets as facets_module
 from apps.flask_api.blueprints import findings as findings_module
 from apps.flask_api.blueprints import groups as groups_module
@@ -56,6 +58,7 @@ from apps.flask_api.blueprints import remediations as remediations_module
 from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
 from apps.flask_api.blueprints import teams as teams_module
+from apps.flask_api.blueprints import users as users_module
 from infra.config import get_settings
 
 app = Flask(__name__)
@@ -103,6 +106,16 @@ def _rule_to_openapi_path(path: str) -> str:
 
 _API_DEBUG_ERRORS = bool(_SETTINGS.api.debug_errors)
 _API_LOG_LEVEL = str(_SETTINGS.api.log_level or "INFO").strip().upper()
+_API_CORS_ALLOWED_ORIGINS = tuple(
+    str(x).strip() for x in _SETTINGS.api.cors_allowed_origins if str(x).strip()
+)
+_API_CORS_ALLOW_CREDENTIALS = bool(_SETTINGS.api.cors_allow_credentials)
+_API_CORS_ALLOWED_HEADERS = (
+    "Content-Type, Authorization, X-Tenant-Id, X-Tenant, X-Workspace, X-WS, "
+    "X-Correlation-Id, X-Request-Id"
+)
+_API_CORS_ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+_API_CORS_MAX_AGE_SECONDS = "600"
 
 _RATE_LIMIT_RPS = _SETTINGS.api.rate_limit_rps
 _RATE_LIMIT_BURST = _SETTINGS.api.rate_limit_burst
@@ -138,9 +151,64 @@ def _merge_vary_header(current: str | None, token: str) -> str:
     return ", ".join(items)
 
 
+def _cors_request_origin() -> str | None:
+    """Return normalized Origin header value when present."""
+    origin = str(request.headers.get("Origin") or "").strip()
+    return origin or None
+
+
+def _cors_origin_allowed(origin: str | None) -> bool:
+    """Return True when CORS origin is explicitly allowed by config."""
+    if not origin or not _API_CORS_ALLOWED_ORIGINS:
+        return False
+    if "*" in _API_CORS_ALLOWED_ORIGINS:
+        return True
+    return origin in _API_CORS_ALLOWED_ORIGINS
+
+
+def _cors_allow_origin_value(origin: str) -> str:
+    """Resolve Access-Control-Allow-Origin response value."""
+    if "*" in _API_CORS_ALLOWED_ORIGINS and not _API_CORS_ALLOW_CREDENTIALS:
+        return "*"
+    return origin
+
+
+def _apply_cors_headers(resp: Response) -> Response:
+    """Attach CORS headers for allowed API origins."""
+    path = _canonical_api_path(request.path or "")
+    if not path.startswith("/api/"):
+        return resp
+
+    origin = _cors_request_origin()
+    if not _cors_origin_allowed(origin):
+        return resp
+
+    assert origin is not None
+    resp.headers["Access-Control-Allow-Origin"] = _cors_allow_origin_value(origin)
+    resp.headers["Access-Control-Allow-Methods"] = _API_CORS_ALLOWED_METHODS
+    resp.headers["Access-Control-Allow-Headers"] = _API_CORS_ALLOWED_HEADERS
+    resp.headers["Access-Control-Max-Age"] = _API_CORS_MAX_AGE_SECONDS
+    resp.headers["Vary"] = _merge_vary_header(resp.headers.get("Vary"), "Origin")
+    if _API_CORS_ALLOW_CREDENTIALS:
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+    return resp
+
+
 @app.before_request
 def _start_timer() -> None:
     request.environ["_mckay_t0"] = time.monotonic()
+
+
+@app.before_request
+def _handle_cors_preflight() -> Response | None:
+    """Short-circuit API preflight requests for allowed CORS origins."""
+    path = _canonical_api_path(request.path or "")
+    if request.method != "OPTIONS" or not path.startswith("/api/"):
+        return None
+    origin = _cors_request_origin()
+    if not _cors_origin_allowed(origin):
+        return None
+    return _apply_cors_headers(Response(status=204))
 
 
 def _safe_scope_from_request() -> tuple[str | None, str | None]:
@@ -190,7 +258,7 @@ def _log_request(resp: Response) -> Response:
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         resp.headers["Vary"] = _merge_vary_header(resp.headers.get("Vary"), "Authorization")
-    return resp
+    return _apply_cors_headers(resp)
 
 
 class _TokenBucket:
@@ -409,13 +477,22 @@ def _enforce_api_auth() -> None:
 
     - /health remains public.
     - /api/health/db remains public (useful for platform health checks).
+    - /api/auth/*, /api/users/*, /api/api-keys/* enforce RBAC via auth middleware.
     - All other /api/* routes require Authorization: Bearer ... when
       API_BEARER_TOKEN is set.
     """
     path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
         return
-    if path in {"/api/health/db"}:
+    if request.method == "OPTIONS":
+        return
+    if path in {"/api/health/db", "/api/auth/login"}:
+        return
+    if path == "/api/users" or path.startswith("/api/users/"):
+        return
+    if path == "/api/api-keys" or path.startswith("/api/api-keys/"):
+        return
+    if path.startswith("/api/auth/"):
         return
     _check_bearer_token()
 
@@ -437,7 +514,7 @@ def _operation_summary_from_view(view_func: Any, method: str, path: str) -> str:
 
 def _openapi_security_for_path(path: str) -> list[dict[str, list[str]]]:
     # Keep health + OpenAPI discovery unauthenticated in docs.
-    if path in {"/api/health/db", "/api/openapi.json"}:
+    if path in {"/api/health/db", "/api/openapi.json", "/api/auth/login"}:
         return []
     return [{"bearerAuth": []}]
 
@@ -739,6 +816,9 @@ def _install_blueprint_backcompat_shims() -> None:
 
     for module in (
         health_module,
+        auth_module,
+        users_module,
+        api_keys_module,
         runs_module,
         findings_module,
         recommendations_module,
@@ -800,6 +880,9 @@ _install_blueprint_backcompat_shims()
 
 # Register blueprints - each handles its own route definitions.
 app.register_blueprint(health_module.health_bp)
+app.register_blueprint(auth_module.auth_bp)
+app.register_blueprint(users_module.users_bp)
+app.register_blueprint(api_keys_module.api_keys_bp)
 app.register_blueprint(runs_module.runs_bp)
 app.register_blueprint(findings_module.findings_bp)
 app.register_blueprint(recommendations_module.recommendations_bp)

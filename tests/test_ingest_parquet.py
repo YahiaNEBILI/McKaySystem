@@ -1,20 +1,21 @@
-from __future__ import annotations
-
 """Integration-style tests for Parquet ingestion."""
+
+from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Literal
 
 import pytest
 
 from apps.backend import db_migrate
-from contracts.finops_contracts import build_ids_and_validate
 from apps.backend.db import db_conn
 from apps.worker import ingest_parquet
 from apps.worker.ingest_parquet import DbApi, ingest_from_manifest
+from contracts.finops_contracts import build_ids_and_validate
 from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import SCHEMA_VERSION
@@ -26,7 +27,7 @@ def _wire_record() -> dict:
         "tenant_id": "acme",
         "workspace_id": "prod",
         "run_id": "run-1",
-        "run_ts": datetime.now(timezone.utc),
+        "run_ts": datetime.now(UTC),
         "ingested_ts": "",
         "engine_name": "finopsanalyzer",
         "engine_version": "0.1.0",
@@ -84,16 +85,16 @@ def _wire_record() -> dict:
 class _FakeDb:
     """Capture DB calls for ingest tests."""
     def __init__(self) -> None:
-        self.executes: List[Tuple[str, Optional[Sequence[Any]]]] = []
-        self.execute_many_calls: List[Tuple[str, List[Sequence[Any]]]] = []
+        self.executes: list[tuple[str, Sequence[Any] | None]] = []
+        self.execute_many_calls: list[tuple[str, list[Sequence[Any]]]] = []
 
-    def execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> None:
+    def execute(self, sql: str, params: Sequence[Any] | None = None) -> None:
         self.executes.append((sql, params))
 
-    def execute_many(self, sql: str, seq_of_params: List[Sequence[Any]]) -> None:
+    def execute_many(self, sql: str, seq_of_params: list[Sequence[Any]]) -> None:
         self.execute_many_calls.append((sql, list(seq_of_params)))
 
-    def fetch_one(self, sql: str, params: Optional[Sequence[Any]] = None) -> Optional[Tuple[Any, ...]]:
+    def fetch_one(self, sql: str, params: Sequence[Any] | None = None) -> tuple[Any, ...] | None:
         return None
 
 
@@ -121,6 +122,55 @@ class _ImpactConn:
         self.commits += 1
 
 
+def test_post_ingest_invariants_pass() -> None:
+    """Invariant helper should pass for a consistent ingest snapshot."""
+
+    def _count_query(_sql: str, _params: Sequence[Any], label: str) -> int:
+        table = {
+            "runs row count": 1,
+            "presence count": 2,
+            "latest count": 2,
+            "presence distinct fingerprints": 2,
+            "latest distinct fingerprints": 2,
+            "presence rows missing in latest": 0,
+        }
+        return table[label]
+
+    ingest_parquet._assert_post_ingest_invariants(
+        count_query=_count_query,
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-1",
+        expected_presence=2,
+        expected_latest=2,
+    )
+
+
+def test_post_ingest_invariants_fail_on_count_mismatch() -> None:
+    """Invariant helper should raise when persisted counts diverge from ingest counts."""
+
+    def _count_query(_sql: str, _params: Sequence[Any], label: str) -> int:
+        table = {
+            "runs row count": 1,
+            "presence count": 2,
+            "latest count": 1,
+            "presence distinct fingerprints": 2,
+            "latest distinct fingerprints": 1,
+            "presence rows missing in latest": 1,
+        }
+        return table[label]
+
+    with pytest.raises(RuntimeError, match="Post-ingest invariant failed"):
+        ingest_parquet._assert_post_ingest_invariants(
+            count_query=_count_query,
+            tenant_id="acme",
+            workspace="prod",
+            run_id="run-1",
+            expected_presence=2,
+            expected_latest=2,
+        )
+
+
 def test_ingest_parquet_from_manifest(tmp_path: Path) -> None:
     base_dir = tmp_path / "finops_findings"
 
@@ -142,7 +192,7 @@ def test_ingest_parquet_from_manifest(tmp_path: Path) -> None:
         tenant_id="acme",
         workspace="prod",
         run_id="run-1",
-        run_ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        run_ts=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         engine_name="finopsanalyzer",
         engine_version="0.1.0",
         rulepack_version="0.1.0",
@@ -301,7 +351,7 @@ def test_ingest_parquet_merges_raw_and_correlated_from_manifest(tmp_path: Path) 
         tenant_id="acme",
         workspace="prod",
         run_id="run-1",
-        run_ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        run_ts=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         engine_name="finopsanalyzer",
         engine_version="0.1.0",
         rulepack_version="0.1.0",
@@ -351,7 +401,7 @@ def test_ingest_parquet_persists_manifest_pricing_metadata(tmp_path: Path) -> No
         tenant_id="acme",
         workspace="prod",
         run_id="run-1",
-        run_ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        run_ts=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         engine_name="finopsanalyzer",
         engine_version="0.1.0",
         rulepack_version="0.1.0",
@@ -436,7 +486,7 @@ def test_ingest_parquet_copy_integration(tmp_path: Path) -> None:
         rec["tenant_id"] = tenant_id
         rec["workspace_id"] = workspace
         rec["run_id"] = run_id
-        rec["run_ts"] = datetime.now(timezone.utc)
+        rec["run_ts"] = datetime.now(UTC)
         return build_ids_and_validate(rec, issue_key={"policy": issue_key})
 
     wire1 = _mk_record("missing")
@@ -459,7 +509,7 @@ def test_ingest_parquet_copy_integration(tmp_path: Path) -> None:
         tenant_id=tenant_id,
         workspace=workspace,
         run_id=run_id,
-        run_ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        run_ts=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         engine_name="finopsanalyzer",
         engine_version="0.1.0",
         rulepack_version="0.1.0",

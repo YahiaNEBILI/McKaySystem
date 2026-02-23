@@ -1,0 +1,50 @@
+{
+  "max_messages": 1329,
+  "fail_on_new_symbols": true,
+  "symbol_max_messages": {
+    "broad-exception-caught": 39,
+    "chained-comparison": 2,
+    "consider-using-in": 1,
+    "duplicate-code": 74,
+    "global-statement": 9,
+    "import-error": 204,
+    "import-outside-toplevel": 16,
+    "inconsistent-return-statements": 3,
+    "invalid-name": 5,
+    "line-too-long": 609,
+    "protected-access": 35,
+    "redefined-outer-name": 1,
+    "too-few-public-methods": 30,
+    "too-many-arguments": 71,
+    "too-many-branches": 34,
+    "too-many-instance-attributes": 18,
+    "too-many-lines": 4,
+    "too-many-locals": 78,
+    "too-many-nested-blocks": 3,
+    "too-many-positional-arguments": 6,
+    "too-many-return-statements": 14,
+    "too-many-statements": 24,
+    "trailing-newlines": 8,
+    "try-except-raise": 5,
+    "unnecessary-lambda": 20,
+    "unused-argument": 19,
+    "use-yield-from": 3,
+    "useless-return": 1
+  },
+  "path_max_messages": {
+    "apps": 346,
+    "checks": 755,
+    "contracts": 140,
+    "infra": 12,
+    "pipeline": 51,
+    "services": 32
+  },
+  "paths": [
+    "apps",
+    "checks",
+    "services",
+    "pipeline",
+    "infra",
+    "contracts"
+  ]
+}

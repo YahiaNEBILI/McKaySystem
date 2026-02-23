@@ -1,7 +1,7 @@
 # API Reference
 
 Status: Derived  
-Last reviewed: 2026-02-15
+Last reviewed: 2026-02-22
 
 This document describes the HTTP API implemented in the Flask application using a modular Blueprint architecture.
 
@@ -9,10 +9,13 @@ This document describes the HTTP API implemented in the Flask application using 
 
 The API is organized into Flask Blueprints, each handling a specific domain:
 - `health` - Health checks and liveness probes
+- `auth` - Login/logout/me session authentication endpoints
 - `runs` - Run management and diffs
 - `findings` - Finding queries and governance
 - `recommendations` - FinOps optimization recommendations
 - `remediations` - Remediation action approval and queue views
+- `users` - User CRUD and workspace/tenant role assignment
+- `api_keys` - API key CRUD for RBAC principals
 - `teams` - Team and member management
 - `sla_policies` - SLA policy management
 - `lifecycle` - Finding lifecycle actions
@@ -38,9 +41,14 @@ Source code:
 - Public endpoints:
   - `GET /health`
   - `GET /api/health/db`
-- All other `/api/*` endpoints require bearer auth when `API_BEARER_TOKEN` is set:
-  - Missing `Authorization: Bearer ...` -> `401`
-  - Invalid token -> `403`
+- RBAC-authenticated endpoints resolve identity from:
+  - Session token (`session_token` cookie or compatibility query/body)
+  - API key (`Authorization: Bearer <api-key>`)
+- Permission mapping is documented in `docs/06_api/rbac_permissions.md`.
+- User/role operational flow is documented in `docs/06_api/rbac_user_role_guide.md`.
+- `POST /api/auth/login` may return `429` (`too_many_requests`) after repeated failed attempts; honor `Retry-After`.
+- Auth and role-assignment operations write best-effort entries to `audit_log`.
+- A global bearer gate (`API_BEARER_TOKEN`) may still apply operationally to non-public routes, but RBAC checks are enforced per endpoint.
 
 ## Scope rules
 
@@ -49,6 +57,55 @@ Source code:
   - Query routes: `tenant_id` and `workspace` query params.
   - JSON routes: `tenant_id` and `workspace` in body.
 - Missing scope returns `400`.
+
+## Auth endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/auth/login` | Authenticate credentials and issue scoped session token |
+| POST | `/api/auth/logout` | Revoke current scoped session |
+| GET | `/api/auth/me` | Return authenticated principal context |
+
+### POST /api/auth/login
+
+Body:
+- `tenant_id`, `workspace`, `email`, `password` required
+
+Behavior:
+- Sets `session_token` as an HTTP-only cookie.
+- Returns `session_token` and `expires_at` in response body for compatibility.
+- Failed attempts are rate-limited per `(client_ip, tenant_id, workspace, email)`.
+
+Errors:
+- `401` invalid credentials
+- `429` too many failed attempts (includes `Retry-After`)
+- `400` invalid payload
+
+Operational settings:
+- `API_LOGIN_FAILURE_LIMIT`
+- `API_LOGIN_FAILURE_WINDOW_SECONDS`
+
+### POST /api/auth/logout
+
+Authentication:
+- Requires authenticated RBAC principal (`session` or `api_key`) with matching scope.
+
+Token source:
+- Uses `session_token` cookie when present.
+- Supports `session_token` in JSON body for compatibility.
+
+Errors:
+- `401` unauthenticated
+- `400` missing `session_token`
+
+### GET /api/auth/me
+
+Authentication:
+- Requires authenticated RBAC principal.
+
+Scope:
+- Requires `tenant_id` and `workspace` query params.
+- Returns `403` on scope mismatch with authenticated context.
 
 ## Response conventions
 
@@ -107,6 +164,11 @@ Common optional filters:
 | GET | `/api/recommendations/composite` | Aggregated recommendations by type |
 | POST | `/api/recommendations/estimate` | Estimate savings for selected recommendations |
 | POST | `/api/recommendations/preview` | Alias for /estimate |
+
+Notes:
+- Recommendations are derived from `finding_current` at read time (not a separate worker table yet).
+- Response items include normalized action-plan fields and `checker_advice` (from finding payload `advice`, with legacy fallback to payload `recommendation`).
+- Build flow reference: `docs/02_pipeline/recommendations_build.md`.
 
 Query/Body params for `/api/recommendations`:
 - Scope: `tenant_id`, `workspace` (required)
@@ -240,6 +302,95 @@ Errors:
 - `404` if finding missing
 - `409` if finding state is `resolved` or `ignored`
 - `400` if no SLA policy resolved or invalid payload
+
+## Users and workspace role assignment
+
+Users:
+- `GET /api/users`
+- `POST /api/users`
+- `GET /api/users/{user_id}`
+- `PUT /api/users/{user_id}`
+- `DELETE /api/users/{user_id}`
+
+Workspace role assignment:
+- `GET /api/users/{user_id}/role`
+- `PUT /api/users/{user_id}/role`
+- `PUT /api/users/{user_id}/role/tenant`
+
+### GET /api/users/{user_id}/role
+
+Scope query required: `tenant_id`, `workspace`
+
+Response:
+- `role = null` when no assignment exists
+- otherwise includes `role_id`, role metadata, `permissions`, `granted_by`, `granted_at`
+
+### PUT /api/users/{user_id}/role
+
+Body:
+- `tenant_id`, `workspace` required
+- `role_id` required
+- `granted_by` optional
+
+Errors:
+- `404` user not found
+- `404` role not found
+
+### PUT /api/users/{user_id}/role/tenant
+
+Body:
+- `tenant_id`, `workspace` required
+- `role_id` required
+- `granted_by` optional
+- `workspaces` optional list of explicit target workspaces (when omitted, existing tenant workspaces are discovered from RBAC roles)
+
+Behavior:
+- Assigns one role across existing tenant workspaces in one request.
+- Fan-out applies only where both user and role exist for each workspace.
+- Returns per-workspace status (`assigned` or `skipped` with reason).
+
+Authorization:
+- Requires `users:manage_roles` and either `admin:full` or `is_superadmin=true`.
+
+Bootstrap note:
+- There is currently no dedicated public API endpoint for first-admin bootstrap.
+- Use operator command `mckay bootstrap-scope` for initial scoped admin setup.
+
+## API keys
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/api-keys` | List scoped API keys |
+| POST | `/api/api-keys` | Create one API key (returns plaintext once) |
+| DELETE | `/api/api-keys/{key_id}` | Revoke one API key |
+
+### GET /api/api-keys
+
+Scope query required: `tenant_id`, `workspace`  
+Optional query:
+- `user_id`
+- `include_inactive` (default `false`)
+
+### POST /api/api-keys
+
+Body:
+- `tenant_id`, `workspace`, `name` required
+- `description`, `user_id`, `expires_at` optional
+
+Behavior:
+- Generates one plaintext key and returns it once in `api_key`.
+- Persists only key hash server-side.
+- Key is usable for RBAC only when it resolves to an active scoped user (`user_id`).
+
+Errors:
+- `400` invalid payload
+
+### DELETE /api/api-keys/{key_id}
+
+Scope query required: `tenant_id`, `workspace`
+
+Errors:
+- `404` key not found
 
 ## Groups
 

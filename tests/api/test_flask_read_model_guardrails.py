@@ -6,7 +6,8 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import apps.flask_api.flask_app as flask_app
+from apps.flask_api import auth_middleware, flask_app
+from services.rbac_service import AuthContext
 
 
 class _DummyConn:
@@ -28,6 +29,20 @@ def _disable_runtime_guards(monkeypatch) -> None:  # type: ignore[no-untyped-def
     monkeypatch.setattr(flask_app, "_schema_gate_checked", True)
     monkeypatch.setattr(flask_app, "_API_BEARER_TOKEN", "")
     monkeypatch.setattr(flask_app, "db_conn", lambda: _DummyConn())
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: AuthContext(
+            tenant_id="acme",
+            workspace="prod",
+            user_id="u-test",
+            email="tester@acme.io",
+            full_name="RBAC Test",
+            is_superadmin=False,
+            auth_method="session",
+            permissions=frozenset({"admin:full"}),
+        ),
+    )
 
 
 def test_findings_query_uses_finding_current_only(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -84,6 +99,41 @@ def test_findings_query_supports_governance_filters(monkeypatch) -> None:  # typ
     assert "team_id = any(%s)" in sql_blob
     assert "owner_email = any(%s)" in sql_blob
     assert "sla_status = any(%s)" in sql_blob
+
+
+def test_findings_grouped_category_query_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/findings/grouped/category` must query finding_current with category rollups."""
+    _disable_runtime_guards(monkeypatch)
+    captured_sql: list[str] = []
+
+    def _fake_fetch_all(_conn: object, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+        _ = params
+        captured_sql.append(sql)
+        return []
+
+    def _fake_fetch_one(_conn: object, sql: str, params: Optional[Sequence[Any]] = None) -> dict[str, Any]:
+        _ = params
+        captured_sql.append(sql)
+        return {"n": 0}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/findings/grouped/category?tenant_id=acme&workspace=prod&state=open")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("group_by") == "category"
+    assert isinstance(payload.get("category_totals"), list)
+
+    sql_blob = "\n".join(captured_sql).lower()
+    assert "from finding_current" in sql_blob
+    assert "coalesce(category, 'uncategorized')" in sql_blob
+    assert "group by coalesce(category, 'uncategorized')" in sql_blob
+    assert "tenant_id = %s" in sql_blob
+    assert "workspace = %s" in sql_blob
 
 
 def test_sla_breached_query_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]

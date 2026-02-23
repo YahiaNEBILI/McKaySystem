@@ -2,3 +2,19 @@
 *.vscode
 *.pytest
 *.hypothesis
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Env files
+.env
+.env.local
+.env.production

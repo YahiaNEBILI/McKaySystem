@@ -10,6 +10,7 @@ from typing import Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -333,6 +334,7 @@ def _apply_finding_sla_extension(
 
 
 @findings_bp.route("/api/findings", methods=["GET"])
+@require_permission("findings:read")
 def api_findings() -> Any:
     """Query findings with filters and pagination.
 
@@ -448,7 +450,149 @@ def api_findings() -> Any:
         return _err("bad_request", str(exc), status=400)
 
 
+@findings_bp.route("/api/findings/grouped/category", methods=["GET"])
+@require_permission("findings:read")
+def api_findings_grouped_category() -> Any:
+    """Query findings grouped by category with global category totals.
+
+    Query params:
+        tenant_id (required): Tenant identifier
+        workspace (required): Workspace identifier
+        limit: Results limit (default 100, max 1000)
+        offset: Results offset (default 0)
+        state: Filter by effective_state (comma-separated)
+        severity: Filter by severity (comma-separated)
+        service: Filter by service (comma-separated)
+        check_id: Filter by check_id (comma-separated)
+        category: Filter by category (comma-separated)
+        region: Filter by region (comma-separated)
+        account_id: Filter by account_id (comma-separated)
+        team_id: Filter by team_id (comma-separated)
+        owner_email: Filter by owner_email (comma-separated)
+        sla_status: Filter by sla_status (comma-separated)
+        q: Substring match on title
+        order: Sort order inside each category (savings_desc or detected_desc)
+
+    Returns:
+        Paginated findings list ordered by category + deterministic in-category sort,
+        plus global category rollups over the full filtered result set.
+    """
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+
+        limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+
+        effective_states = _parse_csv_list(_q("state"))
+        severities = _parse_csv_list(_q("severity"))
+        services = _parse_csv_list(_q("service"))
+        check_ids = _parse_csv_list(_q("check_id"))
+        categories = _parse_csv_list(_q("category"))
+        regions = _parse_csv_list(_q("region"))
+        account_ids = _parse_csv_list(_q("account_id"))
+        team_ids = _parse_csv_list(_q("team_id"))
+        owner_emails = _parse_csv_list(_q("owner_email"))
+        sla_statuses = _parse_csv_list(_q("sla_status"))
+        query_str = _q("q")
+
+        order = (_q("order", "savings_desc") or "savings_desc").lower()
+        if order not in {"savings_desc", "detected_desc"}:
+            raise ValueError("order must be 'savings_desc' or 'detected_desc'")
+
+        where = ["tenant_id = %s", "workspace = %s"]
+        params: list[Any] = [tenant_id, workspace]
+
+        _add_any_filter(where, params, "effective_state", effective_states)
+        _add_any_filter(where, params, "severity", severities)
+        _add_any_filter(where, params, "service", services)
+        _add_any_filter(where, params, "check_id", check_ids)
+        _add_any_filter(where, params, "category", categories)
+        _add_any_filter(where, params, "region", regions)
+        _add_any_filter(where, params, "account_id", account_ids)
+        _add_any_filter(where, params, "team_id", team_ids)
+        _add_any_filter(where, params, "owner_email", owner_emails)
+        _add_any_filter(where, params, "sla_status", sla_statuses)
+
+        if query_str:
+            where.append("title ILIKE %s")
+            params.append(f"%{query_str}%")
+
+        in_category_order_sql = (
+            "estimated_monthly_savings DESC NULLS LAST, detected_at DESC"
+            if order == "savings_desc"
+            else "detected_at DESC"
+        )
+
+        sql = f"""
+            SELECT
+              tenant_id, workspace, fingerprint, run_id,
+              check_id, service, severity, title,
+              estimated_monthly_savings, region, account_id,
+              category, group_key,
+              detected_at,
+              state, snooze_until, reason, effective_state,
+              first_detected_at, first_opened_at,
+              owner_id, owner_email, owner_name, team_id,
+              sla_deadline, sla_paused_at, sla_total_paused_seconds,
+              sla_breached_at, sla_extended_count,
+              age_days_open, age_days_detected,
+              sla_status, sla_days_remaining,
+              payload
+            FROM finding_current
+            WHERE {' AND '.join(where)}
+            ORDER BY COALESCE(category, 'uncategorized') ASC, {in_category_order_sql}
+            LIMIT %s OFFSET %s
+        """
+        params2 = params + [limit, offset]
+
+        category_totals_sql = f"""
+            SELECT
+              COALESCE(category, 'uncategorized') AS category,
+              COUNT(*)::bigint AS finding_count,
+              SUM(COALESCE(estimated_monthly_savings, 0))::double precision AS total_savings
+            FROM finding_current
+            WHERE {' AND '.join(where)}
+            GROUP BY COALESCE(category, 'uncategorized')
+            ORDER BY category ASC
+        """
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(conn, sql, params2)
+            count_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                params,
+            )
+            category_totals_rows = fetch_all_dict_conn(conn, category_totals_sql, params)
+
+        category_totals: list[dict[str, Any]] = []
+        for row in category_totals_rows:
+            category_totals.append(
+                {
+                    "category": str(row.get("category") or "uncategorized"),
+                    "finding_count": int(row.get("finding_count") or 0),
+                    "total_savings": float(row.get("total_savings") or 0.0),
+                }
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "group_by": "category",
+                "limit": limit,
+                "offset": offset,
+                "total": int((count_row or {}).get("n") or 0),
+                "category_totals": category_totals,
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
 @findings_bp.route("/api/findings/sla/breached", methods=["GET"])
+@require_permission("findings:read")
 def api_findings_sla_breached() -> Any:
     """List findings currently in breached SLA state.
 
@@ -538,6 +682,7 @@ def api_findings_sla_breached() -> Any:
 
 
 @findings_bp.route("/api/findings/aging", methods=["GET"])
+@require_permission("findings:read")
 def api_findings_aging() -> Any:
     """List findings filtered by aging clock (open or detected age).
 
@@ -653,6 +798,7 @@ def api_findings_aging() -> Any:
 
 
 @findings_bp.route("/api/findings/aggregates", methods=["GET"])
+@require_permission("findings:read")
 def api_findings_aggregates() -> Any:
     """Get aggregated statistics about findings.
 
@@ -770,6 +916,7 @@ def api_findings_aggregates() -> Any:
 
 
 @findings_bp.route("/api/findings/<fingerprint>/owner", methods=["PUT"])
+@require_permission("findings:update")
 def api_finding_set_owner(fingerprint: str) -> Any:
     """Assign or clear finding owner governance fields."""
     try:
@@ -840,6 +987,7 @@ def api_finding_set_owner(fingerprint: str) -> Any:
 
 
 @findings_bp.route("/api/findings/<fingerprint>/team", methods=["PUT"])
+@require_permission("findings:update")
 def api_finding_set_team(fingerprint: str) -> Any:
     """Assign or clear finding team governance field."""
     try:
@@ -906,6 +1054,7 @@ def api_finding_set_team(fingerprint: str) -> Any:
 
 
 @findings_bp.route("/api/findings/<fingerprint>/sla/extend", methods=["POST"])
+@require_permission("findings:update")
 def api_finding_extend_sla(fingerprint: str) -> Any:
     """Extend finding SLA by a positive day count."""
     try:

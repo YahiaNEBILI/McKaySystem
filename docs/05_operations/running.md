@@ -79,6 +79,20 @@ mckay recover --tenant <tenant> --workspace <workspace> --db-url <url>
 
 ---
 
+## RBAC scope bootstrap
+
+Initialize first admin access for a scope without manual SQL:
+
+```
+export MCKAY_BOOTSTRAP_PASSWORD="<strong-password>"
+mckay bootstrap-scope --tenant <tenant> --workspace <workspace> --user-id <user_id> --email <email>
+```
+
+See full runbook:
+- `05_operations/rbac_bootstrap.md`
+
+---
+
 ## Monorepo workflows
 
 - Backend/API code lives under `apps/flask_api/` and `apps/backend/` (deployment docs: `deploy/backend/`).

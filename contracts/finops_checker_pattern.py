@@ -515,6 +515,9 @@ def build_finding_record(ctx: RunContext, draft: FindingDraft, *, source_ref: st
         # content
         "title": normalize_str(draft.title, lower=False),
         "message": normalize_str(draft.message, lower=False),
+        # Canonical checker guidance field.
+        "advice": normalize_str(draft.recommendation, lower=False),
+        # Backward-compatible alias kept to avoid breaking old readers.
         "recommendation": normalize_str(draft.recommendation, lower=False),
         "remediation": normalize_str(draft.remediation, lower=False),
         "links": draft.links,

@@ -14,6 +14,7 @@ from apps.backend.db import (
     fetch_all_dict_conn,
     fetch_one_dict_conn,
 )
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -149,6 +150,7 @@ def _audit_log_event(
 
 
 @teams_bp.route("/api/teams", methods=["GET"])
+@require_permission("teams:read")
 def api_teams() -> Any:
     """List teams in tenant/workspace scope.
 
@@ -229,6 +231,7 @@ def api_teams() -> Any:
 
 
 @teams_bp.route("/api/teams", methods=["POST"])
+@require_permission("teams:create")
 def api_create_team() -> Any:
     """Create a team in tenant/workspace scope.
 
@@ -302,6 +305,7 @@ def api_create_team() -> Any:
 
 
 @teams_bp.route("/api/teams/<team_id>", methods=["PUT"])
+@require_permission("teams:update")
 def api_update_team(team_id: str) -> Any:
     """Update mutable team fields in tenant/workspace scope.
 
@@ -382,6 +386,7 @@ def api_update_team(team_id: str) -> Any:
 
 
 @teams_bp.route("/api/teams/<team_id>", methods=["DELETE"])
+@require_permission("teams:delete")
 def api_delete_team(team_id: str) -> Any:
     """Delete a team in tenant/workspace scope.
 
@@ -434,6 +439,7 @@ def api_delete_team(team_id: str) -> Any:
 
 
 @teams_bp.route("/api/teams/<team_id>/members", methods=["GET"])
+@require_permission("teams:read")
 def api_team_members(team_id: str) -> Any:
     """List members for one team in tenant/workspace scope.
 
@@ -510,6 +516,7 @@ def api_team_members(team_id: str) -> Any:
 
 
 @teams_bp.route("/api/teams/<team_id>/members", methods=["POST"])
+@require_permission("teams:manage_members")
 def api_team_member_add(team_id: str) -> Any:
     """Add one member to a team in tenant/workspace scope.
 
@@ -590,6 +597,7 @@ def api_team_member_add(team_id: str) -> Any:
 
 
 @teams_bp.route("/api/teams/<team_id>/members/<user_id>", methods=["DELETE"])
+@require_permission("teams:manage_members")
 def api_team_member_remove(team_id: str, user_id: str) -> Any:
     """Remove one member from a team in tenant/workspace scope.
 

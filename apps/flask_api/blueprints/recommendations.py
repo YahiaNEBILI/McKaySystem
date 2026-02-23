@@ -8,6 +8,7 @@ from typing import Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _coerce_non_negative_int,
     _coerce_optional_float,
@@ -184,6 +185,14 @@ _RECOMMENDATION_DEFAULT_RULE: dict[str, Any] = {
     "pricing_source": "finding_estimate",
     "requires_approval": False,
 }
+
+
+def _checker_advice(payload: dict[str, Any]) -> str:
+    """Return checker-authored guidance text from canonical/adaptive payload fields."""
+    advice = str(payload.get("advice") or "").strip()
+    if advice:
+        return advice
+    return str(payload.get("recommendation") or "").strip()
 
 
 def _build_recommendations_where_from_values(
@@ -442,6 +451,8 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
             "kind": target_kind,
             "value": target_value,
         },
+        # Free text from checker for context, separate from normalized action plan.
+        "checker_advice": _checker_advice(payload),
         "current": {
             "kind": current_kind,
             "value": current_value,
@@ -461,6 +472,7 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
 
 
 @recommendations_bp.route("/api/recommendations", methods=["GET"])
+@require_permission("findings:read")
 def api_recommendations() -> Any:
     """List actionable recommendations derived from current scoped findings.
 
@@ -534,6 +546,7 @@ def api_recommendations() -> Any:
 
 
 @recommendations_bp.route("/api/recommendations/composite", methods=["GET"])
+@require_permission("findings:read")
 def api_recommendations_composite() -> Any:
     """Aggregate recommendation opportunities for portfolio-level prioritization.
 
@@ -627,6 +640,7 @@ def api_recommendations_composite() -> Any:
 
 @recommendations_bp.route("/api/recommendations/estimate", methods=["POST"])
 @recommendations_bp.route("/api/recommendations/preview", methods=["POST"])
+@require_permission("findings:read")
 def api_recommendations_estimate() -> Any:
     """Estimate cost/savings for a set of recommendations.
 

@@ -209,10 +209,18 @@ def normalize_for_arrow(record: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError):
         src["schema_version"] = 1
 
+    # Canonicalize checker guidance field with backward-compatible aliasing.
+    advice_val = record.get("advice")
+    recommendation_val = record.get("recommendation")
+    if advice_val in (None, "") and recommendation_val not in (None, ""):
+        record["advice"] = recommendation_val
+    if recommendation_val in (None, "") and advice_val not in (None, ""):
+        record["recommendation"] = advice_val
+
     # Optional fields that should exist as strings
     for k in ("tenant_id", "workspace_id", "engine_name", "engine_version", "rulepack_version",
               "check_id", "check_name", "category", "sub_category", "status", "title",
-              "message", "recommendation", "remediation", "metadata_json", "run_id"):
+              "message", "advice", "recommendation", "remediation", "metadata_json", "run_id"):
         if k not in record or record[k] is None:
             record[k] = ""
         elif not isinstance(record[k], str):

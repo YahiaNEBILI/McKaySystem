@@ -8,6 +8,7 @@ from typing import Any
 from flask import Blueprint
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _json,
     _parse_csv_list,
@@ -29,6 +30,7 @@ def _add_any_filter(where: list[str], params: list[Any], field: str, values: lis
 
 
 @groups_bp.route("/api/groups", methods=["GET"])
+@require_permission("findings:read")
 def api_groups() -> Any:
     """List grouped finding types.
 
@@ -127,6 +129,7 @@ def api_groups() -> Any:
 
 
 @groups_bp.route("/api/groups/<group_key>", methods=["GET"])
+@require_permission("findings:read")
 def api_group_detail(group_key: str) -> Any:
     """Get one group summary + member findings (paginated).
 

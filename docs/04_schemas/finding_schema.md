@@ -1,7 +1,7 @@
 # Finding schema
 
 Status: Canonical  
-Last reviewed: 2026-02-01
+Last reviewed: 2026-02-22
 
 ## 1. Overview
 
@@ -19,7 +19,7 @@ The architecture follows a **lakehouse-inspired 3-layer model**:
 
 | Layer | Purpose |
 |------|--------|
-| `finops_findings` | Output of the FinOps engine (recommendations, issues) |
+| `finops_findings` | Output of the FinOps engine (detections + checker advice) |
 | `finops_cost_attribution` | Evidence and explainability of CUR cost attribution |
 | `finops_kpi_*` | Pre-aggregated “gold” KPI tables for fast serving |
 
@@ -30,7 +30,7 @@ The architecture follows a **lakehouse-inspired 3-layer model**:
 ### Description
 
 - **1 row = 1 FinOps finding**
-- A finding represents a **recommendation**, **waste**, **risk**, or **optimization**
+- A finding represents a **detected issue/opportunity** (`waste`, `risk`, `governance`, `optimization`)
 - Targets can be:
   - a single resource (EC2 instance, RDS DB, bucket…)
   - a logical scope (service, account, region)
@@ -115,7 +115,8 @@ The architecture follows a **lakehouse-inspired 3-layer model**:
 |-----|-----|------------|
 | `title` | string | Short title |
 | `message` | string | Detailed description |
-| `recommendation` | string | Recommended action |
+| `advice` | string | Checker-authored guidance text (canonical) |
+| `recommendation` | string | Legacy alias of `advice` (backward compatibility) |
 | `remediation` | string | Step-by-step guidance |
 | `links` | list<struct> | Console, docs, tickets |
 

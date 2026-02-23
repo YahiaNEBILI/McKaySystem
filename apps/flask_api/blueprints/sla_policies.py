@@ -9,6 +9,7 @@ from typing import Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -156,6 +157,7 @@ def _audit_log_event(
 
 
 @sla_policies_bp.route("/api/sla/policies", methods=["GET"])
+@require_permission("sla:read")
 def api_sla_policies() -> Any:
     """List category SLA policies in tenant/workspace scope.
 
@@ -217,6 +219,7 @@ def api_sla_policies() -> Any:
 
 
 @sla_policies_bp.route("/api/sla/policies", methods=["POST"])
+@require_permission("sla:create")
 def api_create_sla_policy() -> Any:
     """Create a category SLA policy in tenant/workspace scope.
 
@@ -281,6 +284,7 @@ def api_create_sla_policy() -> Any:
 
 
 @sla_policies_bp.route("/api/sla/policies/<category>", methods=["PUT"])
+@require_permission("sla:update")
 def api_update_sla_policy(category: str) -> Any:
     """Update one category SLA policy in tenant/workspace scope.
 
@@ -359,6 +363,7 @@ def api_update_sla_policy(category: str) -> Any:
 
 
 @sla_policies_bp.route("/api/sla/policies/overrides", methods=["GET"])
+@require_permission("sla:read")
 def api_sla_overrides() -> Any:
     """List check-level SLA overrides in tenant/workspace scope.
 
@@ -426,6 +431,7 @@ def api_sla_overrides() -> Any:
 
 
 @sla_policies_bp.route("/api/sla/policies/overrides", methods=["POST"])
+@require_permission("sla:create")
 def api_create_sla_override() -> Any:
     """Create a check-level SLA override in tenant/workspace scope.
 

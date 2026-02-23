@@ -112,6 +112,20 @@ def test_settings_invalid_api_version_falls_back_to_v1() -> None:
     assert settings.api.version == "v1"
 
 
+def test_settings_parses_api_cors_config() -> None:
+    """API CORS settings should parse from legacy and nested env keys."""
+    env = {
+        "API_CORS_ALLOWED_ORIGINS": "http://localhost:3000, https://app.example.com",
+        "API__CORS_ALLOW_CREDENTIALS": "0",
+    }
+    settings = Settings.from_env(env=env, env_file=".missing.env")
+    assert settings.api.cors_allowed_origins == [
+        "http://localhost:3000",
+        "https://app.example.com",
+    ]
+    assert settings.api.cors_allow_credentials is False
+
+
 def test_get_settings_reload_rebuilds_cache(monkeypatch: Any) -> None:
     """Reload should rebuild cached settings from current process env."""
     clear_settings_cache()

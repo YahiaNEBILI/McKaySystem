@@ -440,6 +440,147 @@ def _refresh_aggregates_with_cursor(cur, *, tenant_id: str, workspace: str) -> N
     cur.execute(_AGG_INSERT_SQL, _aggregate_params(tenant_id, workspace))
 
 
+def _count_from_row(row: tuple[Any, ...] | None, *, label: str) -> int:
+    """Read an integer count from a single-row query result."""
+    if row is None:
+        raise RuntimeError(f"Invariant query returned no row: {label}")
+    try:
+        return int(row[0] or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invariant query returned non-numeric count: {label} row={row!r}") from exc
+
+
+def _assert_post_ingest_invariants(
+    *,
+    count_query: Callable[[str, Sequence[Any], str], int],
+    tenant_id: str,
+    workspace: str,
+    run_id: str,
+    expected_presence: int,
+    expected_latest: int,
+) -> None:
+    """Validate core ingest invariants before marking a run ready."""
+    scope_run_params = (tenant_id, workspace, run_id)
+
+    run_rows = count_query(
+        "SELECT COUNT(*) FROM runs WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        scope_run_params,
+        "runs row count",
+    )
+    presence_count = count_query(
+        "SELECT COUNT(*) FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        scope_run_params,
+        "presence count",
+    )
+    latest_count = count_query(
+        "SELECT COUNT(*) FROM finding_latest WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        scope_run_params,
+        "latest count",
+    )
+    presence_distinct = count_query(
+        "SELECT COUNT(DISTINCT fingerprint) FROM finding_presence WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        scope_run_params,
+        "presence distinct fingerprints",
+    )
+    latest_distinct = count_query(
+        "SELECT COUNT(DISTINCT fingerprint) FROM finding_latest WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        scope_run_params,
+        "latest distinct fingerprints",
+    )
+    missing_latest = count_query(
+        """
+        SELECT COUNT(*)
+        FROM finding_presence fp
+        LEFT JOIN finding_latest fl
+          ON fl.tenant_id = fp.tenant_id
+         AND fl.workspace = fp.workspace
+         AND fl.fingerprint = fp.fingerprint
+         AND fl.run_id = fp.run_id
+        WHERE fp.tenant_id=%s AND fp.workspace=%s AND fp.run_id=%s
+          AND fl.fingerprint IS NULL
+        """,
+        scope_run_params,
+        "presence rows missing in latest",
+    )
+
+    errors: list[str] = []
+    if run_rows != 1:
+        errors.append(f"runs row count expected=1 actual={run_rows}")
+    if presence_count != int(expected_presence):
+        errors.append(f"presence rows expected={expected_presence} actual={presence_count}")
+    if latest_count != int(expected_latest):
+        errors.append(f"latest rows expected={expected_latest} actual={latest_count}")
+    if presence_count != presence_distinct:
+        errors.append(
+            f"presence duplicate fingerprints count={presence_count} distinct={presence_distinct}"
+        )
+    if latest_count != latest_distinct:
+        errors.append(f"latest duplicate fingerprints count={latest_count} distinct={latest_distinct}")
+    if missing_latest != 0:
+        errors.append(f"presence rows missing in latest={missing_latest}")
+
+    if errors:
+        raise RuntimeError("Post-ingest invariant failed: " + "; ".join(errors))
+
+    logger.info(
+        "Post-ingest invariants passed for %s/%s/%s (presence=%s latest=%s)",
+        tenant_id,
+        workspace,
+        run_id,
+        presence_count,
+        latest_count,
+    )
+
+
+def _assert_post_ingest_invariants_with_api(
+    api: DbApi,
+    *,
+    tenant_id: str,
+    workspace: str,
+    run_id: str,
+    expected_presence: int,
+    expected_latest: int,
+) -> None:
+    """Run post-ingest invariants using the DbApi abstraction."""
+
+    def _count(sql: str, params: Sequence[Any], label: str) -> int:
+        return _count_from_row(api.fetch_one(sql, params), label=label)
+
+    _assert_post_ingest_invariants(
+        count_query=_count,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        run_id=run_id,
+        expected_presence=expected_presence,
+        expected_latest=expected_latest,
+    )
+
+
+def _assert_post_ingest_invariants_with_cursor(
+    cur: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    run_id: str,
+    expected_presence: int,
+    expected_latest: int,
+) -> None:
+    """Run post-ingest invariants inside an existing DB transaction."""
+
+    def _count(sql: str, params: Sequence[Any], label: str) -> int:
+        cur.execute(sql, params)
+        return _count_from_row(cur.fetchone(), label=label)
+
+    _assert_post_ingest_invariants(
+        count_query=_count,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        run_id=run_id,
+        expected_presence=expected_presence,
+        expected_latest=expected_latest,
+    )
+
+
 def _refresh_remediation_impacts_best_effort(
     *,
     tenant_id: str,
@@ -801,6 +942,15 @@ def ingest_from_manifest(
             tenant_id=manifest.tenant_id,
             workspace=manifest.workspace,
         )
+        if db_api is None:
+            _assert_post_ingest_invariants_with_api(
+                api,
+                tenant_id=manifest.tenant_id,
+                workspace=manifest.workspace,
+                run_id=manifest.run_id,
+                expected_presence=total_presence,
+                expected_latest=total_latest,
+            )
 
         api.execute(
             """
@@ -1166,6 +1316,14 @@ def _ingest_with_copy(
                     cur,
                     tenant_id=manifest.tenant_id,
                     workspace=manifest.workspace,
+                )
+                _assert_post_ingest_invariants_with_cursor(
+                    cur,
+                    tenant_id=manifest.tenant_id,
+                    workspace=manifest.workspace,
+                    run_id=manifest.run_id,
+                    expected_presence=total_presence,
+                    expected_latest=total_latest,
                 )
 
                 transition_run_to_ready(

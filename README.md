@@ -51,6 +51,13 @@ CloudShell sparse clone bootstrap:
 bash tools/cloudshell/bootstrap_sparse_clone.sh <repo-url> <target-dir> worker
 ```
 
+RBAC scope bootstrap (first admin, no manual SQL):
+
+```bash
+export MCKAY_BOOTSTRAP_PASSWORD="<strong-password>"
+mckay bootstrap-scope --tenant acme --workspace prod --user-id u_admin --email admin@acme.io
+```
+
 ---
 
 ## Documentation map
